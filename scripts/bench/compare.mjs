@@ -8,7 +8,7 @@
 // 用法（父进程）：
 //   node scripts/bench/compare.mjs --baseline <基线目录>/bin/workflow.mjs \
 //     --current <当前目录>/bin/workflow.mjs [--runs 9] [--rounds 5] [--repeat-order] [--json] \
-//     [--out-json docs/plans/efficiency-review-benchmark.json]
+//     [--out-json docs/plans/2026-10-28-02-efficiency-review-benchmark.json]
 // 内部会以 --measure 子进程分别加载两个版本的 src，避免两套模块状态互相影响。
 import path from 'node:path';
 import os from 'node:os';

@@ -70,7 +70,7 @@
 
 ## 复现与产物
 
-脚本：[version-080.mjs](../../scripts/bench/version-080.mjs)、[慢 Git 注入](../../scripts/bench/version-080-slow-git.mjs)。原始数据：[version-080-benchmark.json](version-080-benchmark.json)，共 174 个样本（162 正常、9 慢 Git、3 超时）。探索夹具与交付脚本的额外 smoke 不混入统计。
+脚本：[version-080.mjs](../../scripts/bench/version-080.mjs)、[慢 Git 注入](../../scripts/bench/version-080-slow-git.mjs)。原始数据：[2026-10-30-01-version-080-benchmark.json](2026-10-30-01-version-080-benchmark.json)，共 174 个样本（162 正常、9 慢 Git、3 超时）。探索夹具与交付脚本的额外 smoke 不混入统计。
 
 在仓库根目录准备新的空 `.local/bench-080/baseline`，用 `git archive v0.7.0` 导出到该目录。运行：
 

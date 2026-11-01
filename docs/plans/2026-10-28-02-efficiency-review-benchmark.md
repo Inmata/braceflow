@@ -125,10 +125,10 @@ node scripts/bench/compare.mjs \
   --baseline "<临时目录>/baseline/bin/workflow.mjs" \
   --current "<临时目录>/current/bin/workflow.mjs" \
   --runs 9 --rounds 5 --repeat-order --json \
-  --out-json docs/plans/efficiency-review-benchmark.json
+  --out-json docs/plans/2026-10-28-02-efficiency-review-benchmark.json
 ```
 
-原始数据见 [efficiency-review-benchmark.json](efficiency-review-benchmark.json)。脚本会自动在 `finally` 中用 `trash` 清理临时目录；不含真实状态、真实宿主配置或凭据。
+原始数据见 [2026-10-28-02-efficiency-review-benchmark.json](2026-10-28-02-efficiency-review-benchmark.json)。脚本会自动在 `finally` 中用 `trash` 清理临时目录；不含真实状态、真实宿主配置或凭据。
 
 ## 7. 局限与未测项
 

@@ -232,7 +232,7 @@ Worker 与 Reviewer（drift-sim）：Codex Worker 包 w-mul 增加 `mul` 和测�
 
 ## 9. 会话学习与协议收紧（F11–F18）验收
 
-本节只记录源码维护场景，不改变前面真实宿主验收的结论。A 批（F16–F18）最终交付为 `af135ef4d18a107ee6e26a171cd82f44e4645351`，B 批（F11–F14、F15 注释）最终交付为 `dbf1a37b4969e3271806d625de8254cc77aabe60`；两批都经独立只读审查 PASS。C 批只回写公开文档，行为证据复用同一最终代码版本。逐项处理、公开测试场景和证据归属见 `docs/plans/session-learning-implementation.md`。
+本节只记录源码维护场景，不改变前面真实宿主验收的结论。A 批（F16–F18）最终交付为 `af135ef4d18a107ee6e26a171cd82f44e4645351`，B 批（F11–F14、F15 注释）最终交付为 `dbf1a37b4969e3271806d625de8254cc77aabe60`；两批都经独立只读审查 PASS。C 批只回写公开文档，行为证据复用同一最终代码版本。逐项处理、公开测试场景和证据归属见 `docs/plans/2026-10-30-02-session-learning-implementation.md`。
 
 ### 9.1 场景与命令
 
