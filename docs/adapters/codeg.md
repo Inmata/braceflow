@@ -1,4 +1,6 @@
-# Codeg ACP 适配
+# Codeg 适配（可选）
+
+Codeg 是管理 Agent 的一种软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收都独立于 Codeg；不使用 Codeg 时按 [Codex 适配](codex.md) 或 [Claude Code 适配](claude.md)接入。本页只说明 Codeg 专有的委派、等待、提问识别、结果格式和会话接续。Codeg 内嵌的 Codex ACP 或 Claude ACP 版本可能与本机 CLI 不同，Codex CLI/JetBrains 的实测结果不能直接当成 ACP 已验证。
 
 ## 接续
 
@@ -12,13 +14,9 @@
 
 ## hooks
 
-用户级宿主配置（Codex `hooks.json`、Claude `settings.json`）作为本版唯一注册途径，发布副本和文档一起固定版本。元数据不另外自动注册同一事件。安装不写 trust 记录；发现与信任需实际宿主核对。修改配置后新会话/新连接验证，复用旧连接可能仍加载旧配置。全局 CLI 版本不代表 ACP 内嵌版本。Claude 侧字段差异见[适配说明](claude.md)。
+Codeg 本身不提供 workflow 的 hook 接入；实际事件来自被管理的 Codex 或 Claude Code。用户级宿主配置（Codex `hooks.json`、Claude `settings.json`）仍是唯一注册途径，发布副本和文档一起固定版本。Codeg 内嵌版本的 hook 行为、信任状态和上下文注入需在真实 ACP 会话核对，不能由本机 CLI 结果推定。Claude 侧字段差异见[Claude 适配](claude.md)，Codex 侧见 [Codex 适配](codex.md)。
 
-SessionStart/UserPromptSubmit 提供入口；PostToolUse 限定本插件 signal 输出；Stop 做回合结束核对（见[协议](../design/protocol.md)）；Interrupt 保存而不续轮；压缩保留任务与预算。明确 transcript_path=null 才按后台过滤，缺字段不当后台；未知事件/损坏状态放行。已识别的等待工具在 PostToolUse 自动记 waiting-user，普通文本反问由 Lead 显式声明；插件不读问号/关键词猜测。
-
-Codex 0.160.1 的 PostCompact 不支持 additionalContext，安装不为它设置 additionalContextLimit，回调仅记录观测并保留状态。压缩后的入口和既有票据由支持附加上下文的 compact SessionStart 提供；是否实际触发该入口须在真实宿主核验，不能用合成压缩事件代替。
-
-合成 fixture 只验证适配机械行为，不会冒充宿主实测。双插件各管自身回执和预算；往返/重复学习无法区分时项目切 pending-only，doctor 显示降级，保留待办，不停用对方。
+SessionStart/UserPromptSubmit 提供入口；PostToolUse 限定本插件 signal 输出；Stop 做回合结束核对；Interrupt/StopFailure 保存而不续轮；压缩保留任务与预算。明确 transcript_path=null 才按后台过滤，缺字段不当后台；未知事件/损坏状态放行。已识别的等待工具在 PostToolUse 自动记 waiting-user，普通文本反问由 Lead 显式声明；插件不读问号/关键词猜测。
 
 ## 等待与纠正
 
@@ -37,39 +35,32 @@ Codeg 不会在委派结束时唤醒父会话：Lead 回合一结束，子任务
 
 - 等待集合：一次调用批量传入所有在途 `task_id`，用 `wait_ms: 0` 阻塞等待（`get_delegation_status` 遇 `blocked_on` 会提前返回，不会卡死在子会话的用户审批上）；终态 ID 首次消费后移出集合，并在账本把该包记为 consumed。压缩后按 context `ledger` 判断哪些结果已消费，不重读。插件在 `get_delegation_status` 的 PostToolUse 里按 `handle` 比对账本：等待集合含已终态包时提示移出，委派已结束但包仍是 dispatched 时提示记账。只追加提示，不改宿主输出，也不写状态。
 - 中途纠正：能力表没有“运行中追加消息”时，先核对磁盘上已有成果，再取消该任务并确认已停止，然后以新基准、用户原话和已完成工作重新派发；同包返修沿用 packageId（交付或审查要求修订后插件自动 attempts+1，同一交付轮次只计一次；交付后启动失败记为 consumed 再重派不增加，从未产出的启动失败重派也不增加），范围变化用新 packageId；新 packageId 只是同一修复的下一轮时带 `supersedes` 接上旧包，轮次照样累计。delegated 任务有 dispatched 包时，新用户回合的入口指令会列出在途包并提示这一流程；是否需要纠正仍由 Lead 判断。
-- 通道沿用：用户指定了 Codeg 智能体（如 worker 用 claude_code、reviewer 用 codex）时，task-start 带 `channels:{worker:"codeg:claude_code", reviewer:"codeg:codex"}`，每包 `channel` 填实际通道。委派被拒、额度用尽等需要改用宿主内置子代理或 Lead 自己实施时，先告诉用户，再在 packages 附 `change`；不静默换路。
+- 通道沿用：用户为各包指定了 Codeg 智能体（如 worker 用 claude_code、reviewer 用 codex）时，task-start 可选带 `channels:{worker:"codeg:claude_code", reviewer:"codeg:codex"}`，每包 `channel` 填实际通道。`channels` 目前每角色只能声明一个通道；同一角色各包使用不同 Agent 时，省略该角色键（必要时整项不带），以准备记录的逐包 Agent／通道和 packages 的实际通道为准。同一套已确认分包沿用；新增、拆分、合并或更换包的范围时重新确认。委派被拒、额度用尽等需要改用宿主内置子代理或 Lead 自己实施时，先告诉用户，再在 packages 附 `change`；不静默换路。当前协议只在任务已声明该角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时以 `CHANNEL` 拒绝；未声明角色通道或同角色逐包不同时没有可比声明，仍须说明并记录，逐包核对留 W2。
 - 委派工作包写明 packageId，并要求子会话有 workflow 身份时先发 `role-claim`。未声明的子会话按 Lead 处理，拿到的是 Lead 指引。
 
 ## 宿主能力表
 
-证据标注：实测 = 2026-10-23 本机 Codex CLI 0.163.0 隔离 `CODEX_HOME` hook 落盘探针（`codex exec` 与 `codex app-server` JSON-RPC，模型经本地代理）；源码 = openai/codex 源码（经 DeepWiki）；unknown = 未取得证据，须真实宿主补测。Codeg 内嵌的 Codex ACP 版本可能不同。
+证据标注：实测 = 2026-10-23 本机 Codeg 委派探针（临时项目、只读任务）；工具清单 = 当前 Codeg MCP 暴露的工具；unknown = 未取得证据，须真实宿主补测。Codeg 内嵌的 Agent 版本可能变化。
 
-| 能力 | Codex CLI / Codeg Codex ACP | 证据 |
+| 能力 | Codeg 委派 | 证据 |
 | --- | --- | --- |
-| 内置子代理（spawn_agent）事件 | 不触发 SessionStart；触发 SubagentStart、带 `agent_id`/`agent_type` 的 UserPromptSubmit、子代理内工具事件和 SubagentStop；`session_id` 与父会话相同，`turn_id` 为子代理自有 | 实测；装入本插件后状态只留父会话 |
-| Codeg 委派子会话 | 独立会话，触发入口事件并收到 Lead 上下文；事件与环境变量名都与 Lead 无区分；用 `role-claim`，接受后移出 Lead 列表、`role` 记为声明值 | Claude、Codex 子会话均实测（2026-10-23 Codeg 委派探针） |
-| 原生提问工具 hook `tool_name` | `request_user_input`；成功返回才有 PostToolUse，调用被拒（flag 关）时只有 PreToolUse；`codex exec` 下工具报错仍触发 PostToolUse | 实测 |
-| MCP 提问 hook `tool_name` | 服务器名 `codeg-mcp` 的连字符被规范为下划线：`mcp__codeg_mcp__ask_user_question`；插件同时识别连字符写法以兼容其他版本 | 实测（同名本地替身 MCP 服务器） |
-| `permission_mode` | 只由审批策略决定：`approval_policy=never` 为 `bypassPermissions`，其余为 `default`；Plan 协作模式也报 `default`，hook 无法识别 Plan | 实测 + 源码 |
-| Plan 模式提问 | `request_user_input` 可用，PostToolUse 触发 | 实测（app-server `collaborationMode=plan`） |
-| Default 模式提问 | flag 开：可用，PostToolUse 触发；flag 关：报 `request_user_input is unavailable in Default mode`。`doctor --agent codex` 只读报告该 flag | 实测 |
-| hook 信任 | 未信任的 hook 不执行且无提示；`codex exec --dangerously-bypass-hook-trust` 可临时绕过，app-server 无此参数；`hooks/list` 返回 `currentHash` 与 `trustStatus` | 实测 |
-| 运行中追加消息 | unknown；当前 Codeg 工具无追加消息入口，按“中途纠正”流程处理 | 工具清单 |
+| 委派子会话 | 独立会话，触发入口事件并收到 Lead 上下文；事件与环境变量名都与 Lead 无区分；用 `role-claim`，接受后移出 Lead 列表、`role` 记为声明值 | Claude、Codex 子会话均实测 |
+| MCP 提问工具名 | `ask_user_question`；Claude 经 Codeg ACP 的会话工具列表没有原生 `AskUserQuestion` | 实测 + 工具清单 |
+| 运行中追加消息 | 当前 Codeg 工具无追加消息入口，按“中途纠正”流程处理 | 工具清单 |
 | 暂停 | 无 | 工具清单 |
 | 取消 | `cancel_delegation` | 工具清单 |
 | 中断恢复 | `resume_delegation`，只限被中断任务 | 工具清单 |
-| 批量 wait | `get_delegation_status` 传多个 task_id，任一终态即返回 | 工具清单 |
+| 批量 wait | `get_delegation_status` 传多个 task_id，任一终态或 `blocked_on` 即返回 | 工具清单 |
+| MCP 提问 hook 工具名 | 服务器名 `codeg-mcp` 的连字符在 Codex 侧规范为下划线：`mcp__codeg_mcp__ask_user_question`；插件同时识别连字符写法 | 实测（同名本地替身 MCP 服务器） |
 
-| 提问路径 | Codex Plan | Codex Default（flag 关） | Codex Default（flag 开） | Claude CLI | Claude 经 Codeg ACP |
-| --- | --- | --- | --- | --- | --- |
-| 原生结构化提问 | 可用 | 不可用 | 可用 | 可用 | 不可用 |
-| Codeg MCP `ask_user_question` | 可用 | 可用 | 可用 | 可用 | 可用 |
-| 文本编号问题 | 可用 | 可用 | 可用 | 可用 | 可用 |
+| 提问路径 | Codex 经 Codeg ACP | Claude 经 Codeg ACP |
+| --- | --- | --- |
+| 原生结构化提问 | 以实际 ACP 工具为准 | 不可用（会话工具列表没有 `AskUserQuestion`） |
+| Codeg MCP `ask_user_question` | 可用 | 可用 |
+| 文本编号问题 | 可用 | 可用 |
 
-Codex 的计划模式不进入 hook 的 `permission_mode`，插件的计划会话提示和写入保护在 Codex 上只依赖任务声明的 `permissions.mode=plan|read-only`；Lead 在 Plan 模式下开任务须如实声明。Claude 经 Codeg ACP 的会话工具列表没有 `AskUserQuestion`（2026-10-23 实测，见 [Claude 能力表](claude.md#宿主能力表)）；Codex Default 且 flag 关闭时以文本编号问题完成首次对齐（2026-10-23 实测，见[验收记录](../acceptance.md#6-030-真实宿主验收)）。
+Claude 经 Codeg ACP 下使用 Codeg MCP 提问；Codex 原生提问工具的可用性以实际 ACP 会话为准。Codex Default 且 flag 关闭时以文本编号问题完成首次对齐（见[验收记录](../acceptance.md#6-030-真实宿主验收)）。
 
 ## 旧入口
 
-旧显示名为“协作开发”，旧调用标识是 `$efficient-parallel-development`。当前插件使用独立的行为文档，不创建第二套活跃技能副本。
-
-接入项目时检查真实客户端加载位置，按项目只注入一套权威方法。已接入新版的项目若显式调用旧入口，应说明当前权威正文；确需兼容时改为短导航，不维护第二份全文。
+旧显示名和旧调用标识的兼容说明放在 [Codex 适配](codex.md#旧入口)，不在本页重复维护第二份全文。

@@ -45,7 +45,8 @@ const help = {
     'context --role lead|worker|reviewer [--project <目录>] [--session <sessionId>]',
     'task show --task <taskId> [--project <目录>]（只读查看分流、工作包账本、变更条数与门禁缺项）',
     'spec check [--project <目录>] [--ref <提交>]（只读检查 .spec 管辖文件是否漂移；指定 ref 时 spec 与代码均取自该提交，HEAD 仍按当前 worktree；有发现或失败时退出码 1）',
-    'signal <task-start|task-update|phase|role-claim|task-end|packages> --session <id> --turn <id> --id <signalId> [--task <id>] [--goal --route --mode --paths a,b --paths-mode replace|append --plans a,b --channels worker=x,reviewer=y --parent | --phase --delivery | --role --package | --final-ref] [--input <补充字段 JSON>]（推荐：身份由本机状态补齐；task-update 仅该任务有效 Lead 可用，只改本机任务声明）',
+    'signal <task-start|task-update|phase|role-claim|task-end|packages|prepare> --session <id> --turn <id> --id <signalId> [--task <id>] [--goal --route --mode --paths a,b --paths-mode replace|append --plans a,b --channels worker=x,reviewer=y --parent | --phase --delivery | --role --package | --final-ref | --plan --sections] [--input <补充字段 JSON>]（推荐：身份由本机状态补齐；task-update 仅该任务有效 Lead 可用，只改本机任务声明）',
+    'signal prepare ... --input <准备记录 JSON> [--plan <项目内计划路径>] [--sections <章节,逗号分隔>]（准备记录可在尚无业务任务时保存，不创建任务或工作包）',
     'signal packages ... --package <id> [--role --status --channel --handle --ref --depends-on a,b --supersedes --verdict --reviews --base-ref --note --worktree]（单个包；同批多个包或 change 仍用 --input）',
     'signal task-end ... [--final-ref <提交>] [--validation-ref <提交> --evidence "<证据>" ...]（validation.ref 缺省取 --final-ref；waivers 等仍用 --input）',
     'signal --input <JSON文件> | --base64 <UTF-8 JSON>（完整 payload，兼容写法）',
@@ -69,7 +70,7 @@ const help = {
 allowed.add('path');
 for (const key of ['global', 'now', 'query', 'run', 'version', 'task', 'ref', 'keep', 'discard']) allowed.add(key);
 // signal 便捷子命令的字段参数；身份字段（ticket、epoch、revision）不接受命令行传入，只从状态补齐。
-for (const key of ['turn', 'id', 'goal', 'route', 'mode', 'paths', 'paths-mode', 'plans', 'channels', 'parent', 'phase', 'delivery', 'package', 'final-ref']) allowed.add(key);
+for (const key of ['turn', 'id', 'goal', 'route', 'mode', 'paths', 'paths-mode', 'plans', 'channels', 'parent', 'phase', 'delivery', 'package', 'final-ref', 'plan', 'sections']) allowed.add(key);
 // 单个工作包与 task-end validation 的便捷字段；同批多包/深层结构仍走 --input。
 for (const key of ['status', 'channel', 'handle', 'depends-on', 'supersedes', 'verdict', 'reviews', 'base-ref', 'note', 'worktree', 'validation-ref', 'evidence']) allowed.add(key);
 // knowledge capture 的单条材料字段；--explicit、--verified 在解析器里按开关处理。

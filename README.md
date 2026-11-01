@@ -2,7 +2,9 @@
 
 简体中文 | [English](README.en.md)
 
-workflow 是一套跨智能体的项目协作与知识维护规则。它解决三件事：**谁做什么**（Lead、Worker、Reviewer 的分工与边界）、**怎么收尾**（任务阶段与待恢复状态）、**怎么积累经验**（短材料持久保存、受限后台复盘、相关经验召回）。
+workflow 是一套通用的 AI 项目协作工作流，帮助用户问清需求、选择方案、安排 Agent、审查和交付。它解决三件事：**谁做什么**（Lead、Worker、Reviewer 的分工与边界）、**怎么收尾**（任务阶段与待恢复状态）、**怎么积累经验**（短材料持久保存、受限后台复盘、相关经验召回）。
+
+核心规则、项目计划和工作包资料独立于启动 Agent 的具体软件。Claude Code、Codex 可以作为 Agent；Codeg 等产品是可选的运行与管理入口，不是使用 workflow 的前提。`--agent` 只选择 hook 的宿主适配，不指定协作角色。
 
 **Lead、Worker、Reviewer 是职责，角色不绑定客户端或模型。** Claude Code 可以担任 Lead，也可以担任 Worker 或 Reviewer；Codex、OpenCode、Pi 等同样按当前授权和实际能力分工。具体安排由用户已确认的角色、可用工具和任务需要决定。
 
@@ -15,11 +17,13 @@ workflow 是一套跨智能体的项目协作与知识维护规则。它解决�
 | 宿主 | 安装参数 | 用户配置 | 适配说明 |
 | --- | --- | --- | --- |
 | Claude Code | `--agent claude` | `~/.claude/settings.json` | [Claude Code](docs/adapters/claude.md) |
-| Codex / Codeg Codex ACP | `--agent codex` | `~/.codex/hooks.json` | [Codeg ACP](docs/adapters/codeg.md) |
+| Codex | `--agent codex` | `~/.codex/hooks.json` | [Codex](docs/adapters/codex.md) |
 
 `--agent` 选择 hook 的宿主适配，不指定协作角色。OpenCode、Pi 等可通过宿主已有的委派工具参加协作，角色由工作包指定；它们的原生 hook 自动接入尚未实现，独立运行时不能保证同样的自动收尾。
 
-运行环境为 Windows + Node.js 24+，ESM，无第三方运行时依赖。可选后台学习通过 Windows 计划任务和现有 Codex CLI 运行，消耗现有账户额度；安装不会自动启用它。
+Codeg 是可选的管理软件适配：它使用被管理的 Codex 或 Claude Code 自身的 hooks，并额外提供委派、等待、提问识别和会话接续。使用 Codeg 不需要另一套 workflow 规则，也不会改变项目计划和工作包；其专有工具名、等待参数和 ACP 兼容说明见 [Codeg 适配](docs/adapters/codeg.md)。不使用 Codeg 时，公共流程和原生入口照常工作。
+
+运行环境为 Windows + Node.js 24+，ESM，无第三方运行时依赖。可选后台学习通过 Windows 计划任务和现有 Codex/Claude CLI 运行，消耗现有账户额度；安装不会自动启用它。
 
 ## 新用户从这里开始
 
@@ -36,16 +40,14 @@ node bin/workflow.mjs install --agent claude
 node bin/workflow.mjs doctor --agent claude
 ```
 
-**Codex / Codeg Codex ACP：**
+**Codex：**
 
 ```powershell
 node bin/workflow.mjs install --agent codex
 node bin/workflow.mjs doctor --agent codex
 ```
 
-只用 Claude Code 时，只需安装 Claude 适配。
-
-Claude Code 在 Codeg 中以 auto 模式担任 Lead 时，分类器可能拦截委派。请在权限设置中放行 `mcp__codeg-mcp__delegate_to_agent`、`mcp__codeg-mcp__get_delegation_status`、`mcp__codeg-mcp__cancel_delegation` 和 `mcp__codeg-mcp__check_user_feedback`，或改用逐次确认的权限模式（见 [Codeg 接续](docs/adapters/codeg.md#接续)）。
+只用 Claude Code 时，只需安装 Claude 适配。使用 Codeg 时仍按实际被管理的 Agent 安装对应宿主；Codeg 本身不替代宿主 hooks。Claude Code 在 Codeg 中以 auto 模式担任 Lead 时，分类器可能拦截委派，需要用户放行相关工具或改用逐次确认模式，见 [Codeg 接续](docs/adapters/codeg.md#接续)。
 
 `install` 会做四件事：把当前源码复制成一份带摘要的发布副本（`releases/<version>-<digest>`）、把固定入口 `current` 指向它、在宿主配置里注册本插件的事件（Codex 写 `hooks.json`，Claude 写 `settings.json`）、记录安装事务。hook 命令只包含 `current` 路径，所以升级后路径不变，宿主信任只需做一次；旧副本保留作回滚。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指链接，不重写配置、不新建副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场并报告 `conflict` 与路径。两个宿主共用一个 `current`，重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级两个宿主。它**不会**写宿主信任、不会改项目、不会提交 Git。
 
@@ -92,6 +94,8 @@ node bin/workflow.mjs project align status --root "D:/你的项目"
 | 真实代码修复、关键行为 | 派 Worker 实施，再派独立 Reviewer 审查 |
 | 需要等你拍板 | 结构化提问自动记 waiting-user（文本提问先声明），不会猜着往下做 |
 | 你中断了 | 只保存状态，不会在你下次进来时偷偷接着干 |
+
+需要讨论或调研的任务，Lead 会先问清真正要解决的问题和验收，查项目与 GitHub 上可复用的做法并讲清推荐方案。只有需要完整实施计划或进入实施时，才继续按可验证的完整行为拆包、**先说明执行顺序和串并行关系，再请你为每个包指定 Agent 与实际调用通道**；只交付纯技术方案时，按你给定的范围停在方案，不要求分包或逐包选择。这些结论和逐包选择会保存到项目 Markdown，并通过 `signal prepare` 记为准备资料；准备不齐时可以继续讨论和写计划，但不会说成已经可以开工。换会话或换电脑时，Lead 读取同一份计划恢复安排，不重新问已经确认的需求、Agent 和通道。简单明确的修改直接处理，不走完整准备。细节见[准备流程](docs/references/preparation.md)。
 
 一切写操作只在你明确要求时才发生。插件不会自动 add / commit / push / 发布，也不会替你改版本号。
 
@@ -222,6 +226,7 @@ node bin/workflow.mjs project onboard --root "D:/你的项目"
 - **Lead**：定范围、定验收、派工、集成、做知识处置。简单任务自己上。
 - **Worker**：在给定的允许路径内实施和自测，不递归派工。
 - **Reviewer**：只读审查，不改代码；分 Diff、Deep、Escalated 三档。
+- **准备记录**：需求、方案、分包、逐包 Agent、实际调用通道和确认依据的结构化摘要，用 `signal prepare` 保存；准备期不创建执行任务。
 - **AGENTS.md**：只是短导航，指向项目原有资料，不承载全部正文。
 - **项目对齐**：首次会话把项目资料与 workflow 默认的差异写成固定文件；真实差异逐条由你裁决，索引过期时增量更新。
 - **知识事务**：写入前存快照，失败留待办，不覆盖你的手改。
@@ -232,8 +237,8 @@ node bin/workflow.mjs project onboard --root "D:/你的项目"
 
 还是两步：写计划，你核对后说“执行”，开始实施。spec 不单独核对，并进计划里一起看。
 
-1. 写计划：给出建议分流（`lead-direct` 还是 `delegated`）；需要分工或独立审查时，一次列出分几个工作包、每包的范围、依赖和所用通道。已有明确安排直接沿用，无 Worker 的任务不问 Worker，只有真实新增角色或通道时才问你指定。计划末尾有一节“spec 影响”，列出要新建、修改、删除哪些 spec 条目以及改后的验收句子；不涉及 spec 时写“无”。
-2. 你核对计划时把分包、角色指定和“spec 影响”一起确认。说“执行”，这些安排就一起批准。
+1. 写计划：先完成需求澄清和技术方案；需要完整实施计划或进入实施时，再按可验证的完整行为拆包。需要分工或独立审查时，一次列出分几个工作包、每包的范围、完成后的可验证行为和依赖。**先说明执行顺序、串并行关系及理由，再请你为每包指定 Agent 与实际调用通道。** 只交付纯技术方案时，按你给定的范围停在方案，不要求分包或逐包选择。已确认的同一套分包可以接着执行，新增、拆分、合并或更换包的范围时重新确认；不按角色套用旧默认值。计划末尾有一节“spec 影响”，列出要新建、修改、删除哪些 spec 条目以及改后的验收句子；不涉及 spec 时写“无”。计划正文和 `signal prepare` 的准备记录都使用稳定包 ID、项目相对路径和代码基线，并记录逐包 Agent 与实际调用通道。
+2. 你核对计划时把分包、逐包 Agent 与实际调用通道和“spec 影响”一起确认。说“执行”，这些安排就一起批准。换会话或换电脑时，Lead 读取同一份计划恢复安排，不要求你重新澄清或重选。
 3. 实施：Lead 按这一节改 spec，作为验收交给 Worker，Reviewer 逐条核对。只有计划没写到的 spec 改动、或要改已批准的验收时，才会再问你。
 4. 收尾：spec 和代码在同一任务里提交；漏改 spec 时 task-end 被门禁挡住。Lead 同时在原计划里回写本任务完成了什么、偏离了什么、还剩什么；task-start 声明了 `plans` 而计划没动时，插件会提醒，但不挡结束。
 5. 计划全部做完后，Lead 提议归档，你确认后移入归档目录：开头标状态，剩余事项抽成短待办，导航、对齐索引和各处链接一并修好。不转成 spec。
@@ -243,7 +248,9 @@ node bin/workflow.mjs project onboard --root "D:/你的项目"
 ## 更多细节
 
 - 安装、接入、任务信号、恢复、撤销的命令细节：[使用说明](docs/usage.md)。
-- 教学案例：[独立并行](examples/parallel-change/README.md)、[依赖返修](examples/dependency-and-repair/README.md)、[例行及小任务](examples/routine/README.md)。
+- 准备流程三步、保存格式和跨会话接续：[准备流程](docs/references/preparation.md)。
+- 各宿主与可选管理软件的适配：[Codex](docs/adapters/codex.md)、[Claude Code](docs/adapters/claude.md)、[Codeg（可选）](docs/adapters/codeg.md)。
+- 教学案例：[独立并行](examples/parallel-change/README.md)、[依赖返修](examples/dependency-and-repair/README.md)、[例行及小任务](examples/routine/README.md)、[准备与接续](examples/preparation-and-resume/README.md)。
 
 ## 开发与验证
 
@@ -289,7 +296,7 @@ npm run verify
 - 安装与接入：重复 `install` 会修复自有 `current` 入口的断链或错链（不重写宿主配置），用户自己的目录或另一宿主登记的有效快照保留并报告 `conflict`；`onboard` 把核心接入与后台复盘预检分开，未加 `--enable-learning` 时预检问题只提示，显式启用失败返回 `status: partial`、退出码 1。
 - 同任务改目标或权限：新增 `signal task-update`，绑定该任务的 Lead 可改 goal 与 `permissions.mode/allowedPaths`（`--paths-mode replace|append`），宿主处于只读或计划模式时只允许收窄。
 - 返修计数：一轮返修对应一个交付轮次，`supersedes` 链继承计数；从未产出的启动失败重派不再虚增返修。
-- 结构化提问与计划交付：宿主原生与 Codeg 的结构化提问工具自动记 waiting-user，文本提问仍需先声明。Lead 交付计划时一次列明工作包划分和各包所用通道；已声明的通道或你已指定的安排直接沿用，Lead 直接执行的任务不问 Worker，只有真实新增的角色或通道才请你确认。仅本回合显式进入计划交付阶段才核对，计划模式下的普通讨论不再单独被挡；计划交付与在途包同时成立时合并为一次提醒。
+- 结构化提问与计划交付：宿主原生与 Codeg 的结构化提问工具自动记 waiting-user，文本提问仍需先声明。Lead 交付计划时一次列明工作包划分，先说明执行顺序、串并行关系和理由，再请你为每个包指定 Agent 与通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker。仅本回合显式进入计划交付阶段才核对，计划模式下的普通讨论不再单独被挡；计划交付与在途包同时成立时合并为一次提醒。
 - 高频载荷一次调用：`signal packages` 可用 `--package`、`--status`、`--role`、`--channel`、`--handle`、`--ref`、`--depends-on`、`--supersedes`、`--verdict`、`--reviews` 等便捷参数记录单个工作包的派发、消费与审查结论；`task-end` 用 `--validation-ref` 和可重复的 `--evidence` 提交验证；`knowledge capture` 可用少量字段保存短材料（`--incident` 必填）。同批多个包、`change`、`waivers` 等继续用 `--input` 附业务 JSON，旧语义不变。单 Worker + 单 Reviewer 无返修流程的总工具调用从 9 次降到 6 次。
 - 每轮入口降耗：未接入目录不再读取和哈希发布副本，入口约 15–23 ms→0.6 ms；知识召回的目录链校验改为每目录一次，300 条知识无变化回合入口约 573→104 ms，直接召回约 519→72 ms。
 

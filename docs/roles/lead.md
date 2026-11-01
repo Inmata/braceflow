@@ -7,6 +7,7 @@
 | 场景 | 读取 |
 | --- | --- |
 | 简单任务（lead-direct、operation-only） | 本页“要点”即可 |
+| 需要讨论、调研或拆包 | [准备流程](../references/preparation.md) |
 | 派发 Worker/Reviewer | [协作](../references/delegation.md) |
 | 写计划、建或改 spec、按计划实施、归档计划 | [spec 与计划](../references/spec-plan.md) |
 | UI 工作 | [UI 设计流程](../references/design.md) |
@@ -14,8 +15,8 @@
 
 ## 要点
 
-1. 开始前核对实际工作区、分支和用户未提交改动；已有确认计划直接沿用。
-2. task-start 声明 route；`lead-direct` 只需 task-start 与 task-end 两条信号，用法见入口返回的 `signal`。route 只决定门禁与检查范围，不是任务复杂度认证：用户明确要求 Worker/Reviewer 时，不能改用 `operation-only` 或 `lead-direct` 消除该分工；用户指定通道后，偏离须先说明并在同一 packages 信号用 `change` 记录。同一任务需要显式改 goal 或增/减权限范围（如 plan→write、追加/收缩 allowedPaths）时用 `task-update`，不必结束重开：只有本任务有效 Lead 能改，宿主只读/计划权限仍优先，插件只记录声明、不替代用户授权。派发、消费和审查结论按[协作](../references/delegation.md)记账：单个包用 packages 便捷参数（`--package`、`--status`、`--ref`，审查结果加 `--verdict`、`--reviews`），同批多个包或 `change` 用 `--input`。结构化提问由 hook 自动记 waiting-user；文本提问先发 phase waiting-user（见[提问路径](../workflow.md#提问路径)）。
+1. 开始前核对实际工作区、分支和用户未提交改动；已有确认计划直接沿用。目标明确、改法明确且影响很小的任务直接处理；需要讨论、调研或拆包时先按[准备流程](../references/preparation.md)完成需求澄清和技术方案。只有需要完整实施计划或进入实施时，才继续完成分包、执行顺序和逐包 Agent／实际调用通道选择；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。再用 `signal prepare` 保存。准备不齐可以继续讨论和写计划，但不能说成已经可以开工；准备记录的缺项只限制进入实施，纯技术方案按其范围交付时不因缺分包继续追问。
+2. task-start 声明 route；`lead-direct` 只需 task-start 与 task-end 两条信号，用法见入口返回的 `signal`。route 只决定门禁与检查范围，不是任务复杂度认证：用户明确要求 Worker/Reviewer 时，不能改用 `operation-only` 或 `lead-direct` 消除该分工；任务已为该角色声明通道而包通道不同，或分工任务的 worker 包改由 Lead 实施时，偏离须先说明并在同一 packages 信号用 `change` 记录；未声明角色通道或同一角色各包通道不同时，当前协议没有可比声明，仍须说明并记录，逐包核对留 W2。同一任务需要显式改 goal 或增/减权限范围（如 plan→write、追加/收缩 allowedPaths）时用 `task-update`，不必结束重开：只有本任务有效 Lead 能改，宿主只读/计划权限仍优先，插件只记录声明、不替代用户授权。派发、消费和审查结论按[协作](../references/delegation.md)记账：单个包用 packages 便捷参数（`--package`、`--status`、`--ref`，审查结果加 `--verdict`、`--reviews`），同批多个包或 `change` 用 `--input`。结构化提问由 hook 自动记 waiting-user；文本提问先发 phase waiting-user（见[提问路径](../workflow.md#提问路径)）。
 3. 指定验证方法、通过条件和执行环境，仓库必检项纳入；无需测试时说明理由，空清单不是豁免。按[验证约定](../references/validation.md)复用有效证据，避免先完整重查或全测再交审查。难点尽早验证可行性。是否独立审查按行为及失败代价判断，不按行数或文件数机械触发；关键行为即使只改一行也安排必要审查，已审对象变化时复核相关差异。只读诊断包可在首次建包时用 `diagnostic` 声明免审（用途、项目内只读范围、非空理由），交付 `note` 必须写可定位结论；实现包和事后补声明不适用，声明不证明进程实际未写。
 4. task-end 前：项目有 `.spec` 时按 spec 检查处理发现（task-end 自带权威检查，见下节）；按计划实施时回写进度；交付说明写明文档影响。曾有 PASS 的 worker 包不能改 canceled 退出门禁（审查后来改成 FIX/BLOCKED 也不恢复可取消，审查改指其他包也不抹掉历史 PASS；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消）；同包返修要重新送审最终版本，换新包只能在创建时声明 `supersedes`。`canceled` 只表示放弃该包改动，不证明集成结果不含这些改动。
 5. 任务开始或范围变化时检索相关经验。收到有据候选后按[学习指引](../learning.md)保存短材料，后台分批复盘；不在每轮收尾强制合并或制造经验。当前任务必要的项目事实仍按[知识原则](../workflow.md#知识)更新，不让不同 worktree 争写共享资料。不要把事务成功当正文正确性审查。当前目标已包含文档修订且证据唯一时，可直接修断链、笔误和事实同步并简报；做法冲突、需求取舍和批准验收变化仍交用户。
@@ -27,7 +28,7 @@
 
 ## 计划
 
-交付计划时，除方案与末尾“spec 影响”外，须给出建议分流（`lead-direct` 或 `delegated`）：需要分工或独立审查时，**一次列明分几个工作包、每包的修改范围与串并行依赖，以及所用通道**；已有明确安排直接沿用，无 Worker 的任务不问 Worker，只有真实新增角色或通道才按[提问路径](../workflow.md#提问路径)问用户；单点简单任务说明为何 `lead-direct` 免拆包。按计划实施时，task-start 用 `plans` 声明计划文件、用 `channels` 记录选定通道，集成后、task-end 前回写进度；做完或放弃时提议归档。细则见 [spec 与计划](../references/spec-plan.md#计划交付)。
+交付完整实施计划时，除方案与末尾“spec 影响”外，须给出建议分流（`lead-direct` 或 `delegated`）：需要分工或独立审查时，**一次列明分几个工作包、每包的修改范围、完成后的可验证行为与串并行依赖**。**先说明执行顺序和理由，再请用户为每包指定 Agent 与实际调用通道**；同一套已确认分包可以接着执行，沿用原选择，新增、拆分、合并或更换包的范围时重新确认。不按角色套用旧默认值。只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。单点简单任务说明为何 `lead-direct` 免拆包。计划与 `signal prepare` 的准备记录要能对应：稳定包 ID、项目相对路径、代码基线、逐包 Agent、实际调用通道和源计划位置。按计划实施时，task-start 用 `plans` 声明计划文件；`channels` 只能按角色各记一个通道，同一角色各包不同时省略该角色声明或整项不带 `channels`，以准备记录的逐包 Agent／通道和每次 `packages` 的实际通道为准；当前协议只在该角色通道已声明且包通道不同，或 delegated 任务 worker 包改由 Lead 实施时检出偏离，逐包核对留 W2。集成后、task-end 前回写进度；做完或放弃时提议归档。细则见 [spec 与计划](../references/spec-plan.md#计划交付)和[准备流程](../references/preparation.md)。
 
 ## 诊断
 

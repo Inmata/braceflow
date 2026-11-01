@@ -417,7 +417,7 @@ test('Stop 与显式 save 后未再改状态不重复落盘；中间 save 后继
 test('计划模式普通讨论不单独阻挡；本回合显式进入计划交付才核对分包与通道', async () => {
   const f = await fixture();
   const entryOut = await event({ ...f, turnId: 'plan-1' }, 'UserPromptSubmit', { permission_mode: 'plan' });
-  assert.match(entryOut.hookSpecificOutput.additionalContext, /分几个工作包.*真实新增的角色或通道/);
+  assert.match(entryOut.hookSpecificOutput.additionalContext, /分几个工作包.*为每个包指定 Agent/);
   // 本回合没有 task-start/phase：普通解释直接放行。
   assert.deepEqual(await event({ ...f, turnId: 'plan-1' }, 'Stop'), {});
 
@@ -479,7 +479,7 @@ test('计划交付核对与在途包同时成立时合并为一次阻挡，在�
   // 同回合已挡过一次，第二次 Stop 放行。
   assert.deepEqual(await event(f, 'Stop'), {});
 });
-test('计划交付核对沿用已声明的通道，只对真实新增的角色或通道提问', async () => {
+test('计划交付核对先说明顺序并要求逐包选择，已有通道只在同一分包下沿用', async () => {
   const f = await fixture();
   f.turnId = 'plan-channel';
   await event(f, 'UserPromptSubmit', { permission_mode: 'plan' });
@@ -490,9 +490,11 @@ test('计划交付核对沿用已声明的通道，只对真实新增的角色�
   });
   const blocked = await event(f, 'Stop');
   assert.equal(blocked.decision, 'block');
-  assert.match(blocked.reason, /已有明确安排直接沿用.*Worker 通道 codeg:claude_code.*Reviewer 通道 codeg:codex/);
-  assert.match(blocked.reason, /只有计划里真实新增的角色或通道且尚无明确安排时/);
+  assert.match(blocked.reason, /已记录的角色\/包通道.*Worker 通道 codeg:claude_code.*Reviewer 通道 codeg:codex/);
+  assert.match(blocked.reason, /同一套分包.*不代替逐包选择/);
+  assert.match(blocked.reason, /先说明执行顺序.*为每个包指定 Agent/);
   assert.doesNotMatch(blocked.reason, /不需要询问 Worker/);
+  assert.doesNotMatch(blocked.reason, /已有明确安排直接沿用/);
 });
 
 test('F13 真实 PostToolUse 回执逐类定位拒绝内容，修正后接受；CLI 成功退出不等于 accepted', async () => {

@@ -2,6 +2,7 @@ import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { deferredLifecycleEvents, digest, fail, id, lifecycleEvents, lifecycleScope, readDeferredLifecycleNote, samePath, SCHEMA_VERSION, WorkflowError } from './store.mjs';
 import { checkSpecs, describeFindings, verifySpecBinding } from './spec.mjs';
+import { normalizePreparation, preparationSummary } from './preparation.mjs';
 
 export const PHASES = ['unknown', 'operation-only', 'executing', 'waiting-user', 'delivering'];
 export const ROUTES = ['operation-only', 'lead-direct', 'delegated'];
@@ -10,6 +11,8 @@ export const PERMISSION_MODES = ['write', 'read-only', 'plan'];
 const HOST_BLOCKED_MODES = ['plan', 'read-only'];
 // task-update 只接受身份字段与 goal/permissions/allowedPathsMode；其余顶层字段明确拒绝，避免夹带 route/channels/账本。
 const TASK_UPDATE_FIELDS = new Set(['schemaVersion', 'projectId', 'sessionId', 'turnId', 'taskId', 'ticket', 'interruptEpoch', 'expectedRevision', 'signalId', 'action', 'goal', 'permissions', 'allowedPathsMode']);
+// prepare 只保存准备记录：除身份字段外只接受 preparation，不能借同一信号创建任务或夹带 packages。
+const PREPARE_FIELDS = new Set(['schemaVersion', 'projectId', 'sessionId', 'turnId', 'taskId', 'ticket', 'interruptEpoch', 'expectedRevision', 'signalId', 'action', 'preparation']);
 export const PACKAGE_STATUSES = ['dispatched', 'delivered', 'consumed', 'canceled', 'failed', 'waived'];
 export const TERMINAL_PACKAGE = ['consumed', 'canceled', 'failed', 'waived'];
 export const VERDICTS = ['PASS', 'FIX', 'BLOCKED'];
@@ -44,6 +47,8 @@ export function openTurn(state, project, sessionId, turnId, { compact = false, e
     ...(session?.lifecycleReceipts ? { lifecycleReceipts: session.lifecycleReceipts } : {}),
     ...(session?.captureStart ? { captureStart: session.captureStart } : {}),
     ...(session?.captureBoundary ? { captureBoundary: session.captureBoundary } : {}),
+    // 准备记录跨回合保留：讨论、调研和写计划的回合不重建业务任务，也不能丢掉已整理的准备资料。
+    ...(session?.preparation ? { preparation: session.preparation } : {}),
     // role-claim 声明的子角色跨回合保留；未声明的会话按 Lead 处理。
     ...(session?.role ? { role: session.role, packageId: session.packageId || null } : {}),
   };
@@ -105,7 +110,9 @@ function channelsInput(value) {
   for (const [role, channel] of Object.entries(value)) identifier(channel, `channels.${role}`);
   return { ...value };
 }
-// 与用户指定通道不一致，或分工任务里 worker 包由 Lead 实施，都算偏离：同一信号的 change 必须列出该包，不能静默换路。
+// 当前协议只能比较任务已按角色声明的通道：该角色通道存在时，包通道不同（含未填）算偏离；
+// 未声明角色通道或同一角色各包使用不同通道时没有逐包声明可比，逐包核对留 W2。
+// 分工任务里 worker 包由 Lead 实施仍算当前可检出的偏离，同一信号的 change 必须列出该包。
 function channelDeviation(task, next) {
   const expected = task.channels?.[next.role];
   if (expected && next.channel !== expected) return `通道 ${next.channel || '未填'} 与任务声明的 ${next.role}=${expected} 不一致`;
@@ -649,6 +656,14 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
     session.packageId = payload.packageId || null;
   } else if (session.role) {
     fail('ROLE', `当前会话已声明为 ${session.role}；业务任务和账本由 Lead 维护`);
+  } else if (payload.action === 'prepare') {
+    // 准备记录独立于业务任务：尚无活动任务时也能保存，且不建立任务、工作包或 running 账本。
+    const unsupported = Object.keys(payload).filter(field => !PREPARE_FIELDS.has(field));
+    if (unsupported.length) fail('PREPARATION', `prepare 只接受 preparation 字段；不支持 ${unsupported.join('、')}`);
+    if (payload.preparation === undefined) fail('PREPARATION', 'prepare 信号需要 preparation 对象');
+    session.preparation = normalizePreparation(payload.preparation, { root: root || project.root });
+    const preparation = preparationSummary(session.preparation);
+    extra = { preparation, ready: preparation.ready, missing: preparation.missing };
   } else if (payload.action === 'task-start') {
     if (payload.route !== undefined && !ROUTES.includes(payload.route)) fail('ROUTE', '未知任务分流');
     if (session.taskId && session.taskId !== payload.taskId) {
@@ -763,8 +778,8 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
   session.receipts[payload.signalId] = { hash: digest(JSON.stringify(payload)), result };
   return result;
 }
-// 计划交付提示：一次列明分包与所用通道；已有安排（任务声明的 channels 或包上填的 channel）
-// 直接沿用，Lead 直接执行的任务没有 Worker 就不问 Worker，只有真实新增的角色或通道才请用户确认。
+// 计划交付提示：只对完整实施计划要求分包和逐包选择；纯技术方案按用户范围停在方案。
+// 先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与通道；同一套已确认分包沿用原选择。
 function planDeliveryReason(task) {
   const labels = { worker: 'Worker', reviewer: 'Reviewer' };
   const arranged = [];
@@ -778,12 +793,13 @@ function planDeliveryReason(task) {
   }
   for (const [channel, ids] of byChannel) arranged.push(`包 ${ids.join('、')} 用 ${channel}`);
   const existing = arranged.length
-    ? `已有明确安排直接沿用，不重复询问：${arranged.join('；')}。`
-    : '目前没有已声明的 Worker/Reviewer 通道。';
+    ? `已记录的角色/包通道：${arranged.join('；')}。这些只在同一套分包（包 ID、范围、依赖和逐包 Agent 均未变）下作为沿用依据，不代替逐包选择。`
+    : '目前没有已记录的角色/包通道。';
   const ask = task.route === 'lead-direct'
-    ? '本任务由 Lead 直接执行，没有 Worker，不需要询问 Worker；只有计划里真实新增 Reviewer 或其他角色/通道且尚无明确安排时，才请用户确认。'
-    : '只有计划里真实新增的角色或通道且尚无明确安排时，才请用户确认；上面已有的安排不要重复询问。';
-  return `workflow 计划交付核对：本回合已进入计划交付但尚未向用户提问确认。若本回合在交付计划，请列出建议分流与工作包划分（分几个包、每包范围与依赖，或说明免拆包理由），一次列明各包所用通道。${existing}${ask}并在计划末尾写明 spec 影响（无影响写“无”）；结构化提问工具会自动记 waiting-user，文本提问先发 signal phase --phase waiting-user。若本回合只是回答讨论而非交付计划，直接回复即可（本回合不再重复阻挡）。`;
+    ? '若本回合交付完整实施计划且由 Lead 直接执行，没有 Worker，不需要询问 Worker；若计划还需要 Reviewer 或其他角色，仍按包请用户指定 Agent 与通道，不套角色默认值。'
+    : '若本回合交付完整实施计划，先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值。';
+  const channelNote = 'task-start 的 channels 只能按角色各记一个；同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包 channel 和 packages 的实际 channel 为准。当前协议只在任务已声明该角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时检出偏离并要求 change；逐包核对留 W2。';
+  return `workflow 计划交付核对：本回合已进入计划交付但尚未向用户提问确认。若本回合在交付完整实施计划，请列出建议分流与工作包划分（分几个包、每包范围与依赖，或说明免拆包理由），并说明执行顺序与串并行关系。只交付纯技术方案时，按用户给定范围停在方案，不要求分包或逐包选择。${existing}${ask}${channelNote}并在计划末尾写明 spec 影响（无影响写“无”）；结构化提问工具会自动记 waiting-user，文本提问先发 signal phase --phase waiting-user。若本回合只是回答讨论而非交付计划，直接回复即可（本回合不再重复阻挡）。`;
 }
 // 回合结束核对：Lead 没发 task-end 就收尾时，按门禁算一次缺项并挡下一轮。只读任务状态，只在 session 上记“本回合已挡”。
 // 经验采集独立于业务交付；Stop 从不启动复盘或要求补写经验。

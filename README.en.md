@@ -2,7 +2,9 @@
 
 [简体中文](README.md) | English
 
-workflow is a set of cross-agent rules for project collaboration and knowledge upkeep. It covers three things: **who does what** (the split of work and boundaries between Lead, Worker and Reviewer), **how a task ends** (task phases and resumable state), and **how experience accumulates** (short notes kept on disk, a bounded background review, and recall of relevant lessons).
+workflow is a general AI project collaboration workflow that helps you clarify requirements, choose an approach, assign agents, review and deliver. It covers three things: **who does what** (the split of work and boundaries between Lead, Worker and Reviewer), **how a task ends** (task phases and resumable state), and **how experience accumulates** (short notes kept on disk, a bounded background review, and recall of relevant lessons).
+
+The core rules, project plans and work-package records are independent of the software that launches the agents. Claude Code and Codex can act as agents; products such as Codeg are optional run and management entries, not a prerequisite for using workflow. `--agent` selects the host adapter for hooks; it does not assign a collaboration role.
 
 **Lead, Worker and Reviewer are responsibilities. A role is not tied to a client or a model.** Claude Code can act as Lead, Worker or Reviewer; Codex, OpenCode, Pi and others are assigned the same way, based on current permissions and actual capabilities. The roles the user has confirmed, the tools available and the needs of the task decide who does what.
 
@@ -17,9 +19,11 @@ Automatic hook integration currently supports the hosts below. Both can act as L
 | Host | Install flag | User config | Adapter notes |
 | --- | --- | --- | --- |
 | Claude Code | `--agent claude` | `~/.claude/settings.json` | [Claude Code](docs/adapters/claude.md) |
-| Codex / Codeg Codex ACP | `--agent codex` | `~/.codex/hooks.json` | [Codeg ACP](docs/adapters/codeg.md) |
+| Codex | `--agent codex` | `~/.codex/hooks.json` | [Codex](docs/adapters/codex.md) |
 
 `--agent` selects the host adapter for hooks. It does not assign a collaboration role. OpenCode, Pi and similar agents can join through a host's existing delegation tools, with the role set by the work package. Their native hook integration is not implemented yet, so the same automatic wrap-up is not guaranteed when they run on their own.
+
+Codeg is an optional management-software adapter: it uses the hooks of the managed Codex or Claude Code and adds delegation, waiting, question detection and session handoff. Using Codeg does not require another set of workflow rules and does not change project plans or work packages; its proprietary tool names, wait parameters and ACP compatibility are in the [Codeg adapter](docs/adapters/codeg.md). Without Codeg, the common flow and native entries work as usual.
 
 Runtime: Windows + Node.js 24+, ESM, no third-party runtime dependencies. Optional background learning runs through Windows Task Scheduler and an existing Codex or Claude CLI, and uses your existing account quota. Installing does not enable it.
 
@@ -38,16 +42,14 @@ node bin/workflow.mjs install --agent claude
 node bin/workflow.mjs doctor --agent claude
 ```
 
-**Codex / Codeg Codex ACP:**
+**Codex:**
 
 ```powershell
 node bin/workflow.mjs install --agent codex
 node bin/workflow.mjs doctor --agent codex
 ```
 
-If you only use Claude Code, only the Claude adapter is needed.
-
-When Claude Code runs as Lead inside Codeg in auto mode, the classifier may block delegation. Allow `mcp__codeg-mcp__delegate_to_agent`, `mcp__codeg-mcp__get_delegation_status`, `mcp__codeg-mcp__cancel_delegation` and `mcp__codeg-mcp__check_user_feedback` in the permission settings, or use a mode that asks each time (see [Codeg handoff](docs/adapters/codeg.md#接续)).
+If you only use Claude Code, only the Claude adapter is needed. When using Codeg, still install the adapter for the managed agent; Codeg does not replace host hooks. When Claude Code runs as Lead inside Codeg in auto mode, the classifier may block delegation; the user must allow the relevant tools or use a mode that asks each time (see [Codeg handoff](docs/adapters/codeg.md#接续)).
 
 `install` does four things: it copies the current source into a release copy named by its digest (`releases/<version>-<digest>`), points the fixed `current` entry at that copy, registers this plugin's events in the host config (`hooks.json` for Codex, `settings.json` for Claude), and records the install transaction. Hook commands only contain the `current` path, so the path stays the same across upgrades and host trust is only needed once. Old copies are kept for rollback. Running it again checks where `current` actually points: a missing, dangling or misdirected own entry is repaired by rebuilding or repointing that link without rewriting the host config or creating a new release copy; a directory or outward link substituted by the user is left untouched and reported as a `conflict` with its path. Both hosts share one `current`, so a repeat install only repairs its own entry: if `current` already points at another installed host's valid registered snapshot, it is left alone and a `conflict` asks you to upgrade both hosts together. It does **not** write host trust, change projects or commit to Git.
 
@@ -94,6 +96,8 @@ No commands to remember. Make a request in the Claude Code main session and Clau
 | Real code fix, key behavior | A Worker implements, then an independent Reviewer reviews |
 | Needs your decision | Structured questions are marked waiting-user automatically (text questions are declared first); no guessing ahead |
 | You interrupted | State is saved only; it does not quietly continue next time you come back |
+
+For tasks that need discussion or research, Lead first clarifies the real problem and acceptance, checks the project and GitHub for reusable approaches and explains the recommendation. Only when a complete implementation plan or implementation itself is needed does it continue to split work by verifiable complete behaviour and **state the execution order and dependencies before asking you to choose an agent and actual invocation channel for each package**; when you ask only for a technical approach, it stops at the approach within the scope you gave, without package breakdown or per-package choices. These conclusions and per-package choices are saved in the project Markdown and recorded as preparation via `signal prepare`; incomplete preparation may continue discussion and planning but is never reported as ready to start. Across sessions or computers, Lead restores the arrangement from the same plan without re-asking confirmed requirements, agents or channels. Simple, well-defined changes are handled directly without the full preparation. See [preparation](docs/references/preparation.md) (in Chinese).
 
 Write operations happen only when you explicitly ask. The plugin never adds, commits, pushes or publishes automatically, and never changes version numbers for you.
 
@@ -224,6 +228,7 @@ Changes in each version are listed in GitHub Releases.
 - **Lead**: sets scope and acceptance, dispatches work, integrates, handles knowledge disposition. Does simple tasks itself.
 - **Worker**: implements and self-tests within the given allowed paths; does not dispatch further work.
 - **Reviewer**: read-only review, never changes code; three levels: Diff, Deep, Escalated.
+- **Preparation record**: a structured summary of requirements, approach, packages, per-package agents, actual invocation channels and confirmation basis, saved with `signal prepare`; preparation does not create an execution task.
 - **AGENTS.md**: only a short pointer to the project's existing documents, not the full content.
 - **Project alignment**: in the first session, the differences between project documents and workflow defaults are written to a fixed file; you decide each real difference, and the file is updated incrementally when the index goes stale.
 - **Knowledge transactions**: a snapshot is saved before writing, failures leave a pending item, and your hand edits are never overwritten.
@@ -234,8 +239,8 @@ Changes in each version are listed in GitHub Releases.
 
 Still two steps: write the plan, you review it and say "go", implementation starts. Specs are not reviewed separately; they are part of the plan.
 
-1. Writing the plan: propose the route (`lead-direct` or `delegated`); when splitting work or adding independent review, list at once how many work packages there are, each package's scope, dependencies and channels. Reuse clear existing arrangements; do not ask about a Worker when the task has none, and ask only when a role or channel is genuinely new. End the plan with a "Spec impact" section listing which spec entries to create, change or remove, with the acceptance sentences as they will read afterwards; write "none" if no spec is affected.
-2. You review the package breakdown, role assignment and "Spec impact" together with the plan. Saying "go" approves all of them at once.
+1. Writing the plan: first finish requirement clarification and the technical approach; when a complete implementation plan or implementation is needed, split work by verifiable complete behaviour. When splitting work or adding independent review, list at once how many work packages there are, each package's scope, verifiable complete behaviour and dependencies. **State the execution order and dependencies first, then ask you to choose an agent and actual invocation channel for each package.** When you ask only for a technical approach, stop at the approach within your scope without package breakdown or per-package choices. A confirmed breakdown can be reused for continued work or in-place repair; adding, splitting, merging or changing package scope requires confirmation again, and old role defaults are not applied automatically. End the plan with a "Spec impact" section listing which spec entries to create, change or remove, with the acceptance sentences as they will read afterwards; write "none" if no spec is affected. The plan and the `signal prepare` record use stable package IDs, project-relative paths and the code baseline, and record each package's agent and actual invocation channel.
+2. You review the package breakdown, per-package agent and actual invocation channel assignment and "Spec impact" together with the plan. Saying "go" approves all of them at once. Across sessions or computers, Lead restores the arrangement from the same plan without asking you to clarify or reselect.
 3. Implementation: the Lead changes the specs as listed and hands them to Workers as acceptance criteria; the Reviewer checks them one by one. You are asked again only for spec changes the plan did not cover, or to change approved acceptance criteria.
 4. Wrap-up: the spec and the code are committed in the same task; if the spec was missed, task-end is blocked by the gate. The Lead also writes back to the plan what this task finished, where it deviated, and what remains; if task-start declared `plans` and the plan is untouched, the plugin reminds the Lead without blocking completion.
 5. Once the whole plan is done, the Lead proposes archiving it; after you confirm, it moves to the archive directory with a status line at the top, remaining items split into a short todo, and navigation, the alignment index and links fixed. It does not become a spec.
@@ -245,7 +250,9 @@ The role method text is in the [common method](docs/workflow.md); the three role
 ## More details
 
 - Command details for install, onboarding, task signals, recovery and uninstall: [usage](docs/usage.md).
-- Tutorials: [independent parallel work](examples/parallel-change/README.md), [dependencies and repair](examples/dependency-and-repair/README.md), [routine and small tasks](examples/routine/README.md).
+- The three preparation steps, record format and cross-session resume: [preparation](docs/references/preparation.md) (in Chinese).
+- Adapters for each host and optional management software: [Codex](docs/adapters/codex.md), [Claude Code](docs/adapters/claude.md), [Codeg (optional)](docs/adapters/codeg.md).
+- Tutorials: [independent parallel work](examples/parallel-change/README.md), [dependencies and repair](examples/dependency-and-repair/README.md), [routine and small tasks](examples/routine/README.md), [preparation and resume](examples/preparation-and-resume/README.md).
 
 ## Development and verification
 
@@ -291,7 +298,7 @@ Changes in 0.7.0:
 - Install and onboarding: a repeat `install` repairs a dangling or misdirected own `current` entry (without rewriting the host config), while a user directory or another host's valid registered snapshot is left alone and reported as `conflict`; `onboard` separates core onboarding from the background review preflight, so without `--enable-learning` preflight problems are only reported, and a failed explicit enable returns `status: partial` with exit code 1.
 - Changing goal or permissions within a task: new `signal task-update` lets the Lead bound to the task change the goal and `permissions.mode/allowedPaths` (`--paths-mode replace|append`); while the host is in read-only or plan mode it can only narrow them.
 - Rework counting: one rework round is one delivery round, and `supersedes` chains inherit the count; re-dispatching after a startup failure that never produced output no longer inflates rework.
-- Structured questions and plan delivery: structured question tools of the host and of Codeg mark waiting-user automatically; text questions still need to be declared first. When delivering a plan, the Lead lists the package breakdown and each package's channel at once; declared channels or arrangements you already made are reused, a Lead-direct task does not ask about a Worker, and you are asked only about genuinely new roles or channels. The check applies only when this turn explicitly enters plan delivery, so ordinary discussion in plan mode is no longer blocked by itself; plan delivery and in-flight packages together produce a single reminder.
+- Structured questions and plan delivery: structured question tools of the host and of Codeg mark waiting-user automatically; text questions still need to be declared first. When delivering a plan, the Lead lists the package breakdown, states the execution order, serial/parallel relationships and reasons first, then asks you to choose an agent and channel for each package. A confirmed breakdown may reuse its original choices; adding, splitting, merging or changing package scope requires confirmation again, and role defaults are not applied. A Lead-direct task does not ask about a Worker. The check applies only when this turn explicitly enters plan delivery, so ordinary discussion in plan mode is no longer blocked by itself; plan delivery and in-flight packages together produce a single reminder.
 - High-frequency payloads in one call: `signal packages` records a single package's dispatch, consumption and review result with `--package`, `--status`, `--role`, `--channel`, `--handle`, `--ref`, `--depends-on`, `--supersedes`, `--verdict`, `--reviews` and similar flags; `task-end` takes `--validation-ref` plus repeatable `--evidence`; `knowledge capture` can save a short note with a few fields (`--incident` required). Multiple packages in one batch, `change` and `waivers` still use `--input` with business-only JSON, with unchanged semantics. For a single-Worker + single-Reviewer flow without rework, total tool calls drop from 9 to 6.
 - Lower per-turn entry cost: directories that are not onboarded no longer read or hash the release copy, about 15–23 ms→0.6 ms per entry; the knowledge recall directory-chain check now runs once per directory, so a no-change turn with 300 knowledge entries goes from about 573→104 ms and direct recall from about 519→72 ms.
 

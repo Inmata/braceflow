@@ -2,7 +2,7 @@
 
 ## 使用
 
-运行环境为 Windows、Node.js 24+，自动 hooks 已适配 Claude Code 与 Codex / Codeg Codex ACP。Lead、Worker、Reviewer 按[公共方法](workflow.md)分配，均不绑定客户端或模型；其他智能体通过实际可用的委派工具协作，原生 hooks 支持范围见 [README](../README.md#角色与接入支持)。运行时无第三方依赖，无常驻服务，不新增付费模型调用，不要求日常手动调用技能。
+运行环境为 Windows、Node.js 24+，自动 hooks 已适配 Claude Code 与 Codex。Lead、Worker、Reviewer 按[公共方法](workflow.md)分配，均不绑定客户端或模型；Codeg 等产品是可选的管理软件，通过被管理 Agent 的 hooks 工作，不替代宿主接入。其他智能体通过实际可用的委派工具协作，原生 hooks 支持范围见 [README](../README.md#角色与接入支持)。运行时无第三方依赖，无常驻服务，不新增付费模型调用，不要求日常手动调用技能。
 
 开发验证在仓库根目录运行 `npm test`、`npm run check`、`npm run demo`。这些是源码仓库的自检命令，不属于安装后的产品能力；按改动选择检查、失败判定、组合入口和证据留存见[本仓维护的验证场景与命令](acceptance.md#8-本仓维护的验证场景与命令f10)。测试和 demo 使用系统临时目录下 `workflow-tests/` 中的隔离目录、本地 Git 远端和合成事件，不写入仓库，也不改真实全局配置。
 
@@ -15,12 +15,12 @@
 node bin/workflow.mjs install --agent claude
 node bin/workflow.mjs doctor --agent claude
 
-# Codex / Codeg Codex ACP
+# Codex
 node bin/workflow.mjs install --agent codex
 node bin/workflow.mjs doctor --agent codex
 ```
 
-只用一个宿主时，只执行对应两条命令。Claude Code 写入 `~/.claude/settings.json`，Codex 写入 `~/.codex/hooks.json`；两个宿主分别安装、升级和 `uninstall`，可共用发布副本和状态目录。
+只用一个宿主时，只执行对应两条命令。Claude Code 写入 `~/.claude/settings.json`，Codex 写入 `~/.codex/hooks.json`；两个宿主分别安装、升级和 `uninstall`，可共用发布副本和状态目录。使用 Codeg 时仍按被管理的 Codex/Claude 安装对应宿主，Codeg 不替代 hooks；Codeg 专有操作见[可选适配](adapters/codeg.md)。
 
 然后接入项目，并在该目录用所选宿主打开新主会话，当前主会话承担 Lead：
 
@@ -130,6 +130,22 @@ task-start 必须显式声明 route（CLI `--route`，完整 payload 的 `route`
 
 按计划实施的任务在 task-start 加 `"plans": ["docs/plans/xxx.md"]`（项目内相对路径，1-10 项），插件记下当时的内容摘要。这是软门禁：计划到收尾仍未改动时，Stop 的那一次阻挡附上回写提醒，task-end 照常接受，回执带 `planUnchanged` 和 `reminder`；不进缺项，也不需要豁免。计划改过或已移走（归档）时不提醒。`task show` 显示 `plans` 与 `planUnchanged`。
 
+### 准备记录（prepare）
+
+需要讨论、调研或拆包的任务，Lead 先按[准备流程](references/preparation.md)完成需求澄清、技术方案和实施安排，再用 `prepare` 保存结构化记录。准备期不建立业务任务、工作包或执行账本；准备不齐时仍可保存草案并继续讨论、调研和写计划。
+
+```powershell
+node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1 --plan docs/plans/xxx.md --sections "实施步骤,Agent 选择表" --input "<准备记录JSON>"
+```
+
+`--input` 文件只放业务字段：`{ "preparation": { "size": "simple|complex", "sizeReason": "...", "requirements": [...], "research": [...], "solution": {...}, "packages": [...], "verification": [...], "confirmation": {...}, "pending": [...], "source": {...} } }`。每个工作包还要写实际调用通道 `channel`，格式沿用现有协议（如 `builtin:agent`、`codeg:claude_code`、`lead`）；用户只指定 Agent 而当前工具通道唯一时，由 Lead 按可用工具填写，不重问用户，程序不猜默认通道。`--plan`/`--sections` 是 `preparation.source` 的便捷写法，也可直接写在 JSON 中；源计划必须是项目内相对路径的 Markdown 文件（如 `.md`、`.markdown`）。程序读取源文件并记录内容摘要，不解析 Markdown。
+
+回执保存规范化记录并返回 `ready`、`missing`（缺项字段）、`preparation.messages`（可展示说明）、`preparation.step` 和 `preparation.source`。例如包 `W2` 未选 Agent 时，`missing` 含 `package:W2:agent`，说明为“工作包 W2 尚未指定 Agent”；未填实际调用通道时含 `package:W2:channel`，说明为“工作包 W2 尚未填写实际调用通道”。`pending` 里的待决事项同样按阻塞缺项处理（`pending:0`、`pending:1` 等），非空时 `ready` 不会为 `true`；非阻塞说明写到 `solution.assumptions`。简单任务只要求 `size:"simple"` 与 `sizeReason`；`pending` 非空时仍按阻塞缺项处理。`ready` 只表示结构齐全、可以进入实施，不表示方案不能交付：只交付纯技术方案时按用户给定范围收尾，不因缺少实施安排继续追问，除非用户要求转入实施计划。
+
+换会话、换电脑或换状态目录时，读取同一份计划重新提交同形记录即可恢复包、逐包 Agent 和实际调用通道；稳定包 ID、项目相对路径和代码基线是可携带依据，原会话 ID、票据和本机绝对路径不参与。计划只改进度或证据链接时，不取消已确认的需求、方案、Agent 和通道选择；原计划只写了 Agent 时，按新入口实际可用工具补 `channel`，不要求用户重选。
+
+当前实现边界：`prepare` 只保存记录、来源摘要和缺项；复杂任务开工绑定、工具执行前拦截和宿主 hooks 属于后续实施。在那些检查落地前，`task-start` 不会因准备缺项自动拒绝，Lead 仍须按准备流程自行判断，不能把“已保存草案”说成“准备完成”或“已获授权实施”。
+
 中断或 SessionEnd 将未完任务标为 suspended 并撤销票据，保留业务未完成记录；显式 task-start 才恢复。重发 task-start 接续沿用原 goal 与 permissions，回执带 `kept:{goal,permissions}` 和提示；本次附带的 goal/permissions 不生效。挂起任务不再以 active 永久挡住升级，未辨认的写事务仍需恢复。
 
 ### 同任务变更目标或权限（task-update）
@@ -155,9 +171,9 @@ node "<入口>" signal task-update ... --id update-3 --paths docs/new.md --paths
 
 变更追加到任务的 `updates`（`task show` 显示条数）；历史回执不改写，旧任务兼容。权限收缩不追溯取消已完成的产物，后续知识/对齐写入按新范围检查；直接 Edit/Write 不受本插件拦截。
 
-Lead 的活动任务结束回合时，Stop 会挡一次（等待用户、本回合已挡过时不挡）：有在途工作包时要求继续阻塞等待结果（`wait_ms: 0`），或向用户说明为什么暂停（在途包全是 `builtin:` 通道时，宿主会通知结果，只要求说明在等什么）；没有在途包而未发 task-end 时给出缺项，按提示补齐后发 task-end，或向用户说明还没完成的部分。计划模式下，仅本回合显式 task-start/phase 才核对计划交付：一次列明分包与各包所用通道，已声明的 `channels`/包通道直接沿用，Lead 直接执行的任务不问 Worker，只有真实新增的角色或通道才请用户确认；历史 `plans` 和普通解释、讨论不因 `mode=plan` 单独挡，也不落到通用门禁阻挡。
+Lead 的活动任务结束回合时，Stop 会挡一次（等待用户、本回合已挡过时不挡）：有在途工作包时要求继续阻塞等待结果（`wait_ms: 0`），或向用户说明为什么暂停（在途包全是 `builtin:` 通道时，宿主会通知结果，只要求说明在等什么）；没有在途包而未发 task-end 时给出缺项，按提示补齐后发 task-end，或向用户说明还没完成的部分。计划模式下，仅本回合显式 task-start/phase 才核对计划交付：交付完整实施计划时一次列明分包，先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。历史 `plans` 和普通解释、讨论不因 `mode=plan` 单独挡，也不落到通用门禁阻挡。
 
-用户指定了各角色用哪个智能体时，task-start 加 `"channels": {"worker": "codeg:claude_code", "reviewer": "codeg:codex"}`，每个工作包填 `channel`。与声明不一致，或 delegated 任务的 worker 包由 Lead 实施（`channel: "lead"` 或 `handle: "lead-direct"`），须在同一 packages 信号附 `change` 列出该包，否则回执 `CHANNEL`；不能先声明错误通道，再以实际执行与声明一致为由通过。换新 packageId 返修时新包带 `"supersedes": "<旧包>"`，只能在创建时声明；已交付或审查要求修订的轮次累计（同一交付轮次只计一次，同一轮迟到的交付引用或 FIX 不重复累计）、旧包自动收尾；从未产出的启动失败重派不增加返修。同包返修再次交付后，旧 `reviewedRef` 不再匹配新的 `deliveredRef`，必须重新送审。当前账本仍有审查结论的 worker 包（PASS/FIX/BLOCKED；含它接替过的旧包），审查缺项不能用 waivers 豁免，也不能改标 waived。waived 预校验同时看批前当前结论与本批合并后的最终结论：同一批把审查对象从 A 改指 B 时，A 的批前 FIX/BLOCKED 仍参与；重指须在单独信号成功落盘后，后续信号才不再保留旧 FIX/BLOCKED。历史只有 PASS 单调保留，并跨信号沿 supersedes 链保留；审查对象改指其他包后，历史 PASS 仍算已审。曾有 PASS 的包不能改 canceled（即使审查后来改成 FIX/BLOCKED，返回 `PACKAGE`）；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消。处理方式是重新送审最终交付版本，或用 supersedes 接替。同一批 packages 不允许重复 packageId（返回 `PACKAGE` 并整批回滚）。同一批新建 worker 包并直接标 canceled 时，若同批 PASS 指向它或 supersedes 链上有 PASS，整批返回 `PACKAGE`，与数组顺序无关。`task show` 显示 `channels` 与 `diagnostic`。
+用户指定了各角色用哪个智能体时，task-start 可选带 `"channels": {"worker": "codeg:claude_code", "reviewer": "codeg:codex"}`，每个工作包填实际 `channel`。`channels` 每角色只能声明一个；同一角色各包通道不同时省略该角色键，必要时整项不带，以准备记录的逐包 `agent`/`channel` 和每次 `packages` 的 `channel` 为准。当前协议只在任务已声明该角色通道而包通道不同（含未填），或 delegated 任务的 worker 包由 Lead 实施（`channel: "lead"` 或 `handle: "lead-direct"`）时判偏离：须在同一 packages 信号附 `change` 列出该包，否则回执 `CHANNEL`。未声明角色通道或同一角色各包使用不同通道时，程序没有逐包声明可比，仍须先向用户说明并记录，逐包核对留 W2；不能先声明错误通道，再以实际执行与声明一致为由通过。换新 packageId 返修时新包带 `"supersedes": "<旧包>"`，只能在创建时声明；已交付或审查要求修订的轮次累计（同一交付轮次只计一次，同一轮迟到的交付引用或 FIX 不重复累计）、旧包自动收尾；从未产出的启动失败重派不增加返修。同包返修再次交付后，旧 `reviewedRef` 不再匹配新的 `deliveredRef`，必须重新送审。当前账本仍有审查结论的 worker 包（PASS/FIX/BLOCKED；含它接替过的旧包），审查缺项不能用 waivers 豁免，也不能改标 waived。waived 预校验同时看批前当前结论与本批合并后的最终结论：同一批把审查对象从 A 改指 B 时，A 的批前 FIX/BLOCKED 仍参与；重指须在单独信号成功落盘后，后续信号才不再保留旧 FIX/BLOCKED。历史只有 PASS 单调保留，并跨信号沿 supersedes 链保留；审查对象改指其他包后，历史 PASS 仍算已审。曾有 PASS 的包不能改 canceled（即使审查后来改成 FIX/BLOCKED，返回 `PACKAGE`）；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消。处理方式是重新送审最终交付版本，或用 supersedes 接替。同一批 packages 不允许重复 packageId（返回 `PACKAGE` 并整批回滚）。同一批新建 worker 包并直接标 canceled 时，若同批 PASS 指向它或 supersedes 链上有 PASS，整批返回 `PACKAGE`，与数组顺序无关。`task show` 显示 `channels` 与 `diagnostic`。
 
 只读诊断包（不产生项目写入的调查、复现或资料核对）可在**首次创建**时声明免审，避免为简单诊断重复派 Reviewer：同一批 packages 不允许重复 packageId，不能先消费再在批内改 `dispatched` 补挂；同一 packages 信号给新包带 `"diagnostic": {"purpose": "核对 README 与发布说明是否一致", "scope": ["README.md", "docs/usage.md"], "reason": "只读比对，不修改文件"}`，包须为 `dispatched` 的 worker，不能带 `deliveredRef` 或 `supersedes`。实现包、审查包、事后补声明或修改声明、空理由、空/绝对/含 `..` 的范围都返回 `PACKAGE`。交付时在 `note` 写可定位结论与证据，例如 `"note": "结论：一致；证据：README.md 第 1 行、docs/usage.md"`；门禁缺结论会列 `diagnostic:<id>`，不能用 waiver 抵扣。声明只表示事先约定与信任，不证明进程实际未写；历史未声明包仍要求审查。
 
@@ -212,6 +228,6 @@ disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手
 
 ### 常见阻塞
 
-启动/认证/余额/能力问题先看真实错误，不循环重启或静默换代理。Codeg 正常完成任务接续新会话，中断先核对停止与检查点，见[适配](adapters/codeg.md)。测试宿主未进入路径、缺接口、文件占用按[验证约定](references/validation.md)收敛。陌生 schema/损坏状态保留原文并停维护；锁只在进程已被操作系统确认为退出时回收，不按年龄抢活锁；短暂争用会按有界预算等待，超时只给恢复提示，不冒充已保存。中断与会话结束事件先独立落盘，状态提交后才归档，下一次入口幂等消费；缺可信回合标识时保留待办、不推断当前回合；同一任务仍被其他 Lead 会话使用时不挂起。权限拒绝不靠改信任记录绕过。
+启动/认证/余额/能力问题先看真实错误，不循环重启或静默换代理。Codex 或 Codeg 正常完成任务接续新会话，中断先核对停止与检查点，见 [Codex 适配](adapters/codex.md)和 [Codeg 适配](adapters/codeg.md)。测试宿主未进入路径、缺接口、文件占用按[验证约定](references/validation.md)收敛。陌生 schema/损坏状态保留原文并停维护；锁只在进程已被操作系统确认为退出时回收，不按年龄抢活锁；短暂争用会按有界预算等待，超时只给恢复提示，不冒充已保存。中断与会话结束事件先独立落盘，状态提交后才归档，下一次入口幂等消费；缺可信回合标识时保留待办、不推断当前回合；同一任务仍被其他 Lead 会话使用时不挂起。权限拒绝不靠改信任记录绕过。
 
 教学案例：[独立并行](../examples/parallel-change/README.md)、[依赖与返修](../examples/dependency-and-repair/README.md)、[例行及小任务](../examples/routine/README.md)。仅需计划时不实施；UI 图片先确认只有用户要求才安排；接口经确认冻结后停止追加。报告按任务规模，用户实际反馈才标人工通过；本地提交、push、改版本、Release 分别按明确授权执行。

@@ -1,7 +1,7 @@
 import { fail, SCHEMA_VERSION } from './store.mjs';
 import { identifier, sessionKey, taskKey } from './protocol.mjs';
 
-export const SIGNAL_ACTIONS = ['task-start', 'task-update', 'phase', 'packages', 'role-claim', 'task-end', 'disposition'];
+export const SIGNAL_ACTIONS = ['task-start', 'task-update', 'phase', 'packages', 'role-claim', 'task-end', 'disposition', 'prepare'];
 const IDENTITY_FIELDS = ['schemaVersion', 'projectId', 'sessionId', 'turnId', 'ticket', 'interruptEpoch', 'expectedRevision', 'signalId', 'action'];
 // 单个工作包的便捷字段；同批多个包、change 等深层结构仍用 --input。
 const PACKAGE_OPTIONS = ['status', 'channel', 'handle', 'ref', 'depends-on', 'supersedes', 'verdict', 'reviews', 'base-ref', 'note', 'worktree'];
@@ -83,9 +83,15 @@ export function buildSignal(state, resolved, action, options, extra = {}) {
   const session = state.sessions[sessionKey(projectId, sessionId)];
   if (!session) fail('IDENTITY', '当前项目没有这个会话；--session 取 context identity.sessionId');
   if (session.turnId !== turnId || session.interrupted) fail('STALE', `回合已失效（当前 turnId=${session.interrupted ? '已中断' : session.turnId}）；按当前 identity 重发`);
-  // role-claim 的 taskId 只作标识（委派子会话此时还没有自己的任务）；没给 --task 时按工作包派生。
-  const fallbackTask = session.taskId || (action === 'role-claim' ? `claim-${options.package || options.role || 'role'}` : undefined);
+  // role-claim 的 taskId 只作标识（委派子会话此时还没有自己的任务）；prepare 同样不绑定业务任务。
+  // 没给 --task 时按动作派生稳定标识；prepare 的 taskId 只是身份字段，不会建立任务。
+  const fallbackTask = session.taskId || (action === 'role-claim' ? `claim-${options.package || options.role || 'role'}` : action === 'prepare' ? 'preparation' : undefined);
   const taskId = identifier(options.task || fallbackTask, '--task');
+  // --plan/--sections 只给 prepare；给错动作直接报错，避免看起来成功却没有写入。
+  if (action !== 'prepare') {
+    const stray = ['plan', 'sections'].filter(key => options[key] !== undefined);
+    if (stray.length) fail('INPUT', `${stray.map(key => `--${key}`).join('、')} 只用于 prepare 信号`);
+  }
   // 字段值是单个 CLI 参数，Hook 是否接受由它解析真实命令行时的引号状态决定；
   // 这里不能只看字面字符就拒绝，否则 PowerShell 单引号内合法传值的自由文本会被误伤。
   // 新便捷字段只在对应动作生效；给错动作直接报错，避免看起来成功却没有写入。
@@ -117,6 +123,24 @@ export function buildSignal(state, resolved, action, options, extra = {}) {
       goal: options.goal, route: options.route, parentTaskId: options.parent, plans: list(options.plans), channels: channels(options.channels),
       ...(permissions !== undefined ? { permissions } : {}),
     });
+  } else if (action === 'prepare') {
+    // 业务字段全部来自 --input 的 {preparation:{...}}；--plan/--sections 只是来源路径的便捷写法。
+    if (extra.preparation === undefined) fail('INPUT', 'prepare 信号需要 --input 提供 {preparation:{...}}（只放业务字段，不放身份字段）');
+    if (!extra.preparation || typeof extra.preparation !== 'object' || Array.isArray(extra.preparation)) fail('INPUT', '--input 的 preparation 需为对象');
+    if (options.plan !== undefined) {
+      const source = extra.preparation.source && typeof extra.preparation.source === 'object' && !Array.isArray(extra.preparation.source) ? { ...extra.preparation.source } : {};
+      if (source.path !== undefined && source.path !== options.plan) fail('INPUT', '--plan 与 --input 的 preparation.source.path 不一致；同一个值只在一处给出');
+      source.path = options.plan;
+      extra.preparation.source = source;
+    }
+    if (options.sections !== undefined) {
+      const source = extra.preparation.source && typeof extra.preparation.source === 'object' && !Array.isArray(extra.preparation.source) ? { ...extra.preparation.source } : {};
+      if (source.sections !== undefined && JSON.stringify(source.sections) !== JSON.stringify(list(options.sections) || [])) fail('INPUT', '--sections 与 --input 的 preparation.source.sections 不一致；同一个值只在一处给出');
+      source.sections = list(options.sections) || [];
+      extra.preparation.source = source;
+    }
+    fields.preparation = extra.preparation;
+    delete extra.preparation;
   } else if (action === 'task-update') {
     // 按实际传入的参数检查：全局解析器接受的 --path/--ref 等不属于 task-update，静默丢弃会让调用方误以为生效。
     const unsupported = Object.keys(options).filter(key => !TASK_UPDATE_OPTIONS.includes(key) && !TASK_UPDATE_COMMON_OPTIONS.includes(key));
