@@ -107,7 +107,7 @@ When there is a clear correction, a failure cause or a verification result, Lead
 
 With background learning enabled, an accepted task end also registers one bounded candidate extraction: it reads only short user and assistant text from the host transcript, keeps candidates in the local note queue instead of writing formal knowledge, and never blocks or rolls back delivery. Notes are reviewed in batches based on the note threshold, maximum wait and check frequency you set. Maximum run time, runs per day, batch size, model and reasoning effort are all configurable. Formal lessons live in `.workflow/knowledge/`, each recording maturity, importance, status, scope and evidence. A new counterexample immediately stops an old lesson from being recalled by default. Current project facts stay in the existing README, spec and other authoritative documents.
 
-Configuration, commands and file layout are in [project learning](docs/learning.md). Enabling background review, switching executors and troubleshooting are in the [background review handbook](docs/background-review.md). For the first real run, follow the [cross-machine acceptance handoff](docs/acceptance.md).
+Configuration, commands and file layout are in [project learning](docs/learning.md). Enabling background review, switching executors and troubleshooting are in the [background review handbook](docs/background-review.md). For the first real run, follow the [real-environment acceptance checklist](docs/acceptance.md); you can use your current computer.
 
 ## A complete example
 
