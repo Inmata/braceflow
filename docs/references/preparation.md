@@ -45,6 +45,8 @@
 - 用户选定的 Agent 和实际调用通道 `channel`；
 - 指定验证入口（可写在包上，也可放在统一的 `verification` 列表）；无法自动验证的人工步骤单独列出。
 
+每条需求还要有稳定 `id`、负责实施包 `packages[]` 和检查入口 `verification`。负责包只能引用已登记且角色为 `worker` 的包；审查包不交付需求。需求没有负责包或检查入口时，准备回执按需求 ID 返回 `requirement:<id>:packages`、`requirement:<id>:verification`，不能借“所有包都 PASS”代替整项需求已覆盖。收集最终证据属于收尾的交付声明，不在准备阶段伪造。
+
 **先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道。** 用户只指定 Agent 而当前可用工具通道唯一时，由 Lead 按实际工具填写 `channel`，这是普通实现事实，不需要重问用户，也不当成用户另一次批准；程序不猜默认通道。已确认的同一套分包可以接着执行或原位返修，不用重新询问；新增、拆分、合并或更换包的范围时，属于新的分包决定，需要展示变化后的包并重新请用户指定相关包。不要因为某个角色以前选过某个 Agent，就把旧选择自动套到新包上，也不要由 Lead 给角色填默认值。
 
 ## 保存与接续
@@ -63,7 +65,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
     "size": "complex",
     "sizeReason": "涉及协议、文档和测试，需要独立审查",
     "requirements": [
-      { "id": "R01", "summary": "准备结果可以保存", "acceptance": ["缺 Agent 时点名具体包", "准备期不创建业务任务"] }
+      { "id": "R01", "summary": "准备结果可以保存", "acceptance": ["缺 Agent 时点名具体包", "准备期不创建业务任务"], "packages": ["W1"], "verification": "node --test test/preparation.test.mjs" }
     ],
     "research": [
       { "source": "项目现有 protocol.mjs", "conclusion": "复用身份、事务和回执", "url": "https://example.invalid/source" }
@@ -105,15 +107,42 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 
 简单任务只需声明 `size: "simple"` 和 `sizeReason`，不要求需求、调研、分包和确认范围；但 `pending` 非空时仍按阻塞缺项处理，不能一边声明任务简单、一边保留未确认的关键问题。`prepare` 不是复杂任务的必经仪式；只有需要讨论、调研或独立审查的任务才保存完整准备。
 
+## 整项需求验收与阶段交付
+
+复杂 `lead-direct` 与 `delegated` 任务收尾时，`task-end` 的 `validation` 除 `ref` 和 `evidence` 外可带 `acceptance`，按准备记录的需求 ID 逐条给状态：
+
+```json
+{
+  "validation": {
+    "ref": "abc1234",
+    "evidence": ["npm test: 250 通过", "npm run check: 0 错误"],
+    "acceptance": [
+      { "id": "R01", "status": "verified", "evidence": ["test/preparation.test.mjs: 20 通过"] },
+      { "id": "R02", "status": "manual-pending", "owner": "用户", "next": "打开设置页切换主题，确认刷新后保持" },
+      { "id": "R03", "status": "blocked", "reason": "测试账号未提供", "next": "提供测试账号后重跑登录用例" },
+      { "id": "R04", "status": "deferred", "reason": "本期不做移动端", "consent": "用户 2026-11-01 明确同意延后" }
+    ]
+  }
+}
+```
+
+- `verified` 必须给出最终证据；`manual-pending` 必须写负责人 `owner` 和可操作步骤 `next`；`blocked` 必须写原因 `reason` 和下一步 `next`；`deferred` 必须写原因 `reason` 和用户同意依据 `consent`。
+- 所有已登记包都 PASS 但漏一条需求验收时，门禁列出 `acceptance:<需求ID>`，任务不能结束。未知需求 ID 列 `acceptance-unknown:<id>`；复杂 `lead-direct` 没有逐包账本也按同一矩阵核对。
+- 人工待验、受阻和经用户同意延期可以如实阶段结束；回执返回各状态数量和剩余项，`allVerified` 为 `false`，不能宣称全部验收通过。适用矩阵时 `validation` 与 `acceptance*` 缺项不能用 waiver 抵扣。
+- 验收证据绑定 `validation.ref`，该值必须等于最终交付版本。最终版本改变后旧证据不沿用，要重新提交 `validation`；需求内容或负责包变化时，对应 ID 的旧验收声明失效，未变化条目和原顺序保留；审查版本仍按现有 `deliveredRef`/`reviewedRef` 门禁核对。
+- 准备更新按需求 ID 合并后，仍按最终快照核对负责 worker 包与包依赖；保留需求指向已移除包时拒绝并点名，同批迁到现存包才接受。
+- 回执和 `task show` 只汇总声明记录；`verified` 的证据内容、用户实际操作和延期同意仍由 Lead 与 Reviewer 核对。简单任务、`operation-only`、`read-only` 和没有 route 的历史任务不要求这套矩阵。
+
 ## 按已有计划接续
 
 换会话、换电脑或换状态目录时，先读项目里的计划 Markdown，再把其中已经确认的内容整理成同形记录重新提交。判断依据是稳定包 ID、项目相对路径、代码基线、逐包 Agent、实际调用通道和确认因素，不依赖原会话 ID、票据或本机绝对路径。
 
 - 源材料完整时直接恢复，不重新访谈需求，也不重新指定原计划的 Agent。
-- 计划只改变进度、日志或证据链接时，不取消已确认的需求、方案和 Agent 选择。
+- 计划只改变进度、日志或证据链接时，不取消已确认的需求、方案和 Agent 选择；需求按稳定 ID 合并，进度更新漏传旧条目不会删除已确认验收覆盖。
+- 接续时同时读回已完成、剩余、人工待验/受阻/延期状态及各自下一步；这些状态应写在项目计划或交付说明可查的位置，不只留在聊天或另一台电脑的临时路径。
 - 当前代码与计划基线不同时，只检查受影响部分；提交号不同本身不推翻整份计划。
 - 只对确实缺失、冲突或已经变化的决定补问；原计划没写过的选择不能猜。
 - 新入口需要填写不同的 Agent 或通道时，先说明差异和影响，再由用户决定。
 - 原计划只写了 Agent、没有写通道时，Lead 按新入口实际可用的工具填写 `channel`，不要求用户重新选择；只有 Agent 本身或实际入口发生变化时才补问。
 
-当前实现边界：`prepare` 负责保存准备记录、来源摘要和缺项，不创建任务。记录齐全后，delegated 任务用 `task-start` 开工并把 `size`、源计划摘要和逐包 `role`/`agent`/`channel`/`scope` 固定到任务；准备未齐、未声明简单或没有准备的新任务会在协议层和宿主 `PreToolUse` 被拒。源计划与关联计划都只接受 `docs/plans/` 下的 Markdown；路径链上的 symlink/junction 一律拒绝，解析后的真实路径也必须仍在真实 `docs/plans/` 内，业务文件不能借链接别名成为计划。`scope` 是负责范围声明，不是路径或语义沙箱；程序不解析 prompt 正文，也不证明用户授权真实存在。不能把“已保存草案”说成“准备完成”或“已获授权实施”。
+当前实现边界：`prepare` 负责保存准备记录、来源摘要和缺项，不创建任务。记录齐全后，delegated 任务用 `task-start` 开工并把 `size`、源计划摘要、需求/负责包/检查入口和逐包 `role`/`agent`/`channel`/`scope` 固定到任务；准备未齐、未声明简单或没有准备的新任务会在协议层和宿主 `PreToolUse` 被拒。源计划与关联计划都只接受 `docs/plans/` 下的 Markdown；路径链上的 symlink/junction 一律拒绝，解析后的真实路径也必须仍在真实 `docs/plans/` 内，业务文件不能借链接别名成为计划。`scope` 是负责范围声明，不是路径或语义沙箱；程序不解析 prompt 正文，也不证明用户授权真实存在。不能把“已保存草案”说成“准备完成”或“已获授权实施”。

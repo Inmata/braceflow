@@ -4,7 +4,7 @@ import path from 'node:path';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { digest, readState } from '../src/store.mjs';
 import { getContext } from '../src/context.mjs';
-import { normalizePreparation, preparationMissing, preparationSummary } from '../src/preparation.mjs';
+import { normalizePreparation, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary } from '../src/preparation.mjs';
 import { cli, emit, entry, event, fixture } from './helpers.mjs';
 
 const PLAN_PATH = 'docs/plans/preparation-demo.md';
@@ -32,8 +32,8 @@ function preparation(overrides = {}) {
     size: 'complex',
     sizeReason: '涉及协议、文档和测试，需要独立审查',
     requirements: [
-      { id: 'A01', summary: '准备结果可以保存', acceptance: ['缺少 Agent 时返回具体字段', '准备期不创建业务任务'] },
-      { id: 'A02', summary: '空白状态按计划恢复', acceptance: ['同一计划得到相同的包和 Agent 选择'] },
+      { id: 'A01', summary: '准备结果可以保存', acceptance: ['缺少 Agent 时返回具体字段', '准备期不创建业务任务'], packages: ['W1'], verification: 'node --test test/preparation.test.mjs' },
+      { id: 'A02', summary: '空白状态按计划恢复', acceptance: ['同一计划得到相同的包和 Agent 选择'], packages: ['W1'], verification: '同一计划在两个空白状态目录重放' },
     ],
     research: [
       { source: '本仓 protocol.mjs', conclusion: '复用现有身份、事务和回执，不新增第四种 route', url: 'https://example.invalid/protocol' },
@@ -153,6 +153,38 @@ test('同一角色的不同包保留各自的 Agent 选择，不按角色套用�
     ['R1', 'reviewer', 'Claude Code', 'codeg:claude_code'],
   ]);
   assert.deepEqual(preparationMissing(record), []);
+});
+
+test('复杂需求必须分配到已登记的实施包并写明检查入口，缺项按需求 ID 返回', () => {
+  const missingOwner = preparation({ requirements: [{ id: 'A01', summary: '整项需求', acceptance: ['可检查'] }] });
+  assert.deepEqual(preparationMissing(normalizePreparation(missingOwner, {})).map(item => item.field), [
+    'requirement:A01:packages',
+    'requirement:A01:verification',
+  ]);
+  const unknownOwner = preparation({ requirements: [{ id: 'A01', summary: '整项需求', acceptance: ['可检查'], packages: ['W9'], verification: 'npm test' }] });
+  assert.deepEqual(preparationMissing(normalizePreparation(unknownOwner, {})).map(item => item.field), ['requirement:A01:packages']);
+  // 审查包不交付需求，不能当成负责实施包。
+  const reviewerOnly = preparation({ requirements: [{ id: 'A01', summary: '整项需求', acceptance: ['可检查'], packages: ['R1'], verification: 'npm test' }] });
+  assert.deepEqual(preparationMissing(normalizePreparation(reviewerOnly, {})).map(item => item.field), ['requirement:A01:packages']);
+  // 简单任务不要求需求矩阵。
+  assert.deepEqual(preparationMissing(normalizePreparation({ size: 'simple', sizeReason: '只改文案' }, {})), []);
+});
+
+test('需求与验收句子的无意义顺序不构成实际变化，签名只比较归一化内容', () => {
+  const record = normalizePreparation(preparation(), {});
+  const snapshot = preparationSnapshot(record);
+  const reversed = {
+    ...structuredClone(snapshot),
+    requirements: [...snapshot.requirements].reverse().map(item => ({
+      ...item,
+      acceptance: [...item.acceptance].reverse(),
+      packages: [...item.packages].reverse(),
+    })),
+  };
+  assert.equal(preparationSnapshotSignature(snapshot), preparationSnapshotSignature(reversed));
+  const changed = structuredClone(snapshot);
+  changed.requirements[0].verification = '另一个检查入口';
+  assert.notEqual(preparationSnapshotSignature(snapshot), preparationSnapshotSignature(changed));
 });
 
 test('旧版普通 Markdown 可由 Lead 整理后绑定；换状态目录后用同一计划和输入恢复相同安排，不依赖原会话身份', async () => {

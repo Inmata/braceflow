@@ -9,7 +9,9 @@ export const PREPARATION_ROLES = ['worker', 'reviewer'];
 const MAX_ITEMS = 50;
 const MAX_TEXT = 8192;
 const PREPARATION_FIELDS = ['size', 'sizeReason', 'requirements', 'research', 'solution', 'packages', 'verification', 'confirmation', 'pending', 'source'];
-const REQUIREMENT_FIELDS = ['id', 'summary', 'acceptance'];
+// 需求条目是整项验收的稳定锚点：owning packages 说明由谁交付，verification 写检查入口；
+// 最终证据不在这里伪造，由 task-end 的交付声明按同一 ID 给出。
+const REQUIREMENT_FIELDS = ['id', 'summary', 'acceptance', 'packages', 'verification'];
 const RESEARCH_FIELDS = ['source', 'conclusion', 'url'];
 const SOLUTION_FIELDS = ['summary', 'decisions', 'tradeoffs', 'assumptions'];
 const DECISION_FIELDS = ['decision', 'reason'];
@@ -141,6 +143,8 @@ function normalizeRequirements(value) {
       id: readIdentifier(item.id, `requirements[${index}].id`),
       summary: maybeText(item.summary, `requirements[${index}].summary`),
       acceptance: readTextArray(item.acceptance, `requirements[${index}].acceptance`),
+      packages: readArray(item.packages, `requirements[${index}].packages`).map((dependency, at) => readIdentifier(dependency, `requirements[${index}].packages[${at}]`)),
+      verification: maybeText(item.verification, `requirements[${index}].verification`),
     };
   });
   return noDuplicate(items, 'requirements', 'id');
@@ -241,15 +245,25 @@ export function preparationMissing(record) {
   const source = record.source && typeof record.source === 'object' ? record.source : {};
   const solution = record.solution && typeof record.solution === 'object' ? record.solution : {};
   if (!requirements.length) gaps.push(gap('requirements', '尚未记录需求与验收条目'));
+  // 需求必须能落到具体实施包和检查入口，否则“所有包都 PASS”仍可能漏掉原需求。
+  // 这里只核对引用与字段是否存在；实际成果是否真实由 Lead 和 Reviewer 核内容。
+  const knownPackages = new Map(packages.map(item => [item.packageId, item]));
   for (const item of requirements) {
     if (!item.summary) gaps.push(gap(`requirement:${item.id}:summary`, `需求 ${item.id} 尚未写摘要`));
     if (!Array.isArray(item.acceptance) || !item.acceptance.length) gaps.push(gap(`requirement:${item.id}:acceptance`, `需求 ${item.id} 尚未写可检查的验收条目`));
+    const owners = Array.isArray(item.packages) ? item.packages : [];
+    if (!owners.length) gaps.push(gap(`requirement:${item.id}:packages`, `需求 ${item.id} 尚未分配负责工作包`));
+    for (const owner of owners) {
+      const target = knownPackages.get(owner);
+      if (!target) gaps.push(gap(`requirement:${item.id}:packages`, `需求 ${item.id} 负责的工作包 ${owner} 未登记`));
+      else if (target.role !== 'worker') gaps.push(gap(`requirement:${item.id}:packages`, `需求 ${item.id} 负责的工作包 ${owner} 不是实施包`));
+    }
+    if (!item.verification) gaps.push(gap(`requirement:${item.id}:verification`, `需求 ${item.id} 尚未写明检查入口`));
   }
   if (!research.length) gaps.push(gap('research', '尚未记录调研来源与结论'));
   if (!solution.summary) gaps.push(gap('solution', '尚未记录选定方案'));
   if (!Array.isArray(solution.decisions) || !solution.decisions.length) gaps.push(gap('solution:decisions', '尚未记录关键决定及理由'));
   if (!packages.length) gaps.push(gap('packages', '尚未拆分工作包'));
-  const known = new Set(packages.map(item => item.packageId));
   for (const item of packages) {
     if (!item.role) gaps.push(gap(`package:${item.packageId}:role`, `工作包 ${item.packageId} 尚未指定角色`));
     if (!item.agent) gaps.push(gap(`package:${item.packageId}:agent`, `工作包 ${item.packageId} 尚未指定 Agent`));
@@ -258,7 +272,7 @@ export function preparationMissing(record) {
     if (!item.scope) gaps.push(gap(`package:${item.packageId}:scope`, `工作包 ${item.packageId} 尚未写明负责范围`));
     if (!item.delivers) gaps.push(gap(`package:${item.packageId}:delivers`, `工作包 ${item.packageId} 尚未写明完成后可独立验证的完整行为`));
     for (const dependency of Array.isArray(item.dependsOn) ? item.dependsOn : []) {
-      if (!known.has(dependency)) gaps.push(gap(`package:${item.packageId}:dependsOn`, `工作包 ${item.packageId} 的依赖 ${dependency} 未登记为工作包`));
+      if (!knownPackages.has(dependency)) gaps.push(gap(`package:${item.packageId}:dependsOn`, `工作包 ${item.packageId} 的依赖 ${dependency} 未登记为工作包`));
     }
   }
   if (!verification.length) gaps.push(gap('verification', '尚未记录验证入口'));
@@ -266,6 +280,31 @@ export function preparationMissing(record) {
   if (!confirmation.basis) gaps.push(gap('confirmation:basis', '尚未记录确认依据（用户原话或计划位置）'));
   if (!source.path) gaps.push(gap('source', '尚未绑定源计划 Markdown'));
   else if (source.missing) gaps.push(gap('source:unreadable', `源计划 ${source.path} 读取不到`));
+  return gaps;
+}
+
+// 合并后的最终快照才是实际绑定的记录：本次提交的记录自身完整，不代表保留下来的旧需求仍指向现存 worker 包。
+// 这里只核对引用关系与角色，不判断证据真伪；旧快照完全没有 requirements 字段时保持可读，不补写也不暗删。
+export function preparationConsistencyGaps(snapshot) {
+  const gaps = [];
+  if (!snapshot || typeof snapshot !== 'object') return gaps;
+  const packages = Array.isArray(snapshot.packages) ? snapshot.packages : [];
+  const known = new Map(packages.map(item => [item.packageId, item]));
+  for (const item of Array.isArray(snapshot.requirements) ? snapshot.requirements : []) {
+    // 旧版本快照没有负责包字段：保持可读；字段存在但为空则按缺项拒绝，不能靠空数组暗删负责关系。
+    if (!Array.isArray(item.packages)) continue;
+    if (!item.packages.length) gaps.push(gap(`requirement:${item.id}:packages`, `需求 ${item.id} 尚未分配负责工作包`));
+    for (const owner of item.packages) {
+      const target = known.get(owner);
+      if (!target) gaps.push(gap(`requirement:${item.id}:packages`, `需求 ${item.id} 负责的工作包 ${owner} 未登记`));
+      else if (target.role !== 'worker') gaps.push(gap(`requirement:${item.id}:packages`, `需求 ${item.id} 负责的工作包 ${owner} 不是实施包`));
+    }
+  }
+  for (const item of packages) {
+    for (const dependency of Array.isArray(item.dependsOn) ? item.dependsOn : []) {
+      if (!known.has(dependency)) gaps.push(gap(`package:${item.packageId}:dependsOn`, `工作包 ${item.packageId} 的依赖 ${dependency} 未登记为工作包`));
+    }
+  }
   return gaps;
 }
 
@@ -279,6 +318,14 @@ export function preparationSnapshot(record) {
     sizeReason: record.sizeReason || '',
     preparedAt: record.preparedAt || null,
     source: record.source?.path ? { path: record.source.path, digest: record.source.digest || null } : null,
+    // 需求与负责包一起固定：进度更新或换会话后，仍能按同一验收 ID 核对最终证据。
+    requirements: (record.requirements || []).map(item => ({
+      id: item.id,
+      summary: item.summary || '',
+      acceptance: Array.isArray(item.acceptance) ? [...item.acceptance] : [],
+      packages: Array.isArray(item.packages) ? [...item.packages] : [],
+      verification: item.verification || '',
+    })),
     packages: (record.packages || []).map(item => ({
       packageId: item.packageId,
       role: item.role || '',
@@ -304,11 +351,29 @@ const canonicalPackage = item => ({
 });
 const canonicalPackages = items => (items || []).map(canonicalPackage)
   .sort((left, right) => left.packageId < right.packageId ? -1 : left.packageId > right.packageId ? 1 : 0);
+// 需求数组按 id 排序、验收句子与负责包按集合顺序归一化；只调整顺序不算实际需求变更。
+const canonicalRequirement = item => ({
+  id: item.id,
+  summary: item.summary || '',
+  acceptance: Array.isArray(item.acceptance) ? [...item.acceptance].sort() : [],
+  packages: Array.isArray(item.packages) ? [...item.packages].sort() : [],
+  verification: item.verification || '',
+});
+const canonicalRequirements = items => (items || []).map(canonicalRequirement)
+  .sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
 // 任务准备更新只覆盖本次明确给出的包，其余旧选择继续有效；显式 removePackageIds 才能移除，未列出的包保留。
+// 需求同理按 ID 合并：只更新进度时漏传某条需求，不会删掉已确认的验收覆盖。
 // 历史快照由调用方另存，避免把旧证据改写成新记录。
 export function mergePreparationSnapshot(previous, record, { removePackageIds = [] } = {}) {
   const next = preparationSnapshot(record);
-  if (!previous) return { snapshot: next, changed: next.packages.map(item => item.packageId), removed: [], preserved: [] };
+  if (!previous) return {
+    snapshot: next,
+    changed: next.packages.map(item => item.packageId),
+    removed: [],
+    preserved: [],
+    changedRequirements: next.requirements.map(item => item.id),
+    preservedRequirements: [],
+  };
   const before = new Map((previous.packages || []).map(item => [item.packageId, item]));
   const incoming = new Map(next.packages.map(item => [item.packageId, item]));
   const remove = new Set(removePackageIds);
@@ -319,11 +384,24 @@ export function mergePreparationSnapshot(previous, record, { removePackageIds = 
     const old = before.get(item.packageId);
     if (!old || JSON.stringify(canonicalPackage(old)) !== JSON.stringify(canonicalPackage(item))) changed.push(item.packageId);
   }
+  const requirementsBefore = new Map((previous.requirements || []).map(item => [item.id, item]));
+  const incomingRequirements = new Map(next.requirements.map(item => [item.id, item]));
+  const preservedRequirements = (previous.requirements || []).filter(item => !incomingRequirements.has(item.id));
+  const changedRequirements = [];
+  for (const item of next.requirements) {
+    const old = requirementsBefore.get(item.id);
+    if (!old || JSON.stringify(canonicalRequirement(old)) !== JSON.stringify(canonicalRequirement(item))) changedRequirements.push(item.id);
+  }
+  // 保留原计划中的需求顺序：旧条目位置不变，本次新条目追加；只更新进度不会打乱验收表。
+  const mergedRequirements = (previous.requirements || []).map(item => incomingRequirements.get(item.id) || item);
+  for (const item of next.requirements) if (!requirementsBefore.has(item.id)) mergedRequirements.push(item);
   return {
-    snapshot: { ...next, packages: [...next.packages, ...preserved] },
+    snapshot: { ...next, packages: [...next.packages, ...preserved], requirements: mergedRequirements },
     changed,
     removed: removed.map(item => item.packageId),
     preserved: preserved.map(item => item.packageId),
+    changedRequirements,
+    preservedRequirements: preservedRequirements.map(item => item.id),
   };
 }
 // 判断“这次准备是否真的带来可审计变化”。preparedAt/sizeReason 等元数据每次可能重写，不能算变化；
@@ -333,6 +411,7 @@ export function preparationSnapshotSignature(snapshot) {
   if (!snapshot) return null;
   return JSON.stringify({
     source: snapshot.source ? { path: snapshot.source.path, digest: snapshot.source.digest || null } : null,
+    requirements: canonicalRequirements(snapshot.requirements),
     packages: canonicalPackages(snapshot.packages),
   });
 }
@@ -364,6 +443,7 @@ export function preparationSummary(record) {
     messages: gaps.map(item => item.message),
     pending: Array.isArray(record.pending) ? record.pending : [],
     source: source.path ? { path: source.path, digest: source.digest } : null,
+    requirements: (Array.isArray(record.requirements) ? record.requirements : []).map(item => ({ id: item.id, packages: Array.isArray(item.packages) ? item.packages : [], verification: item.verification || '' })),
     packages: (Array.isArray(record.packages) ? record.packages : []).map(item => ({ packageId: item.packageId, role: item.role, agent: item.agent, channel: item.channel, dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn : [] })),
     preparedAt: record.preparedAt,
   };

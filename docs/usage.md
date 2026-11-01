@@ -122,7 +122,7 @@ node "<本次hook提供的bin/workflow.mjs>" signal --input "<任务JSON文件>"
 
 使用独立直接 shell 调用，当前支持 node/实际 Node 路径加本插件绝对入口；不串接其他 shell 命令（包括前置 `cd`；组合命令只得到“须单独直接调用”的提示，不更新状态）。PowerShell 中文 JSON 用 UTF-8 文件加 --input，不通过 5.1 原生文本管道；--base64 仅作兼容，长串可能被宿主脱敏成占位符而失效。signal 只输出 workflow_signal，当前 PostToolUse 接受回执才表示状态更新；拒绝时用 context 重读 identity/revision，不换 ID 绕过。权限系统或分类器拒绝命令时同样不换写法重试，向用户说明未记录的步骤。
 
-task-start 必须显式声明 route（CLI `--route`，完整 payload 的 `route`）：`operation-only` 用于无经验回执要求的例行操作，`lead-direct` 用于 Lead 自己实施，`delegated` 用于分工并核对包终态、审查与 validation。新任务漏填或值非法返回 `ROUTE`，不建立任务；已存在任务续接可省略 route；旧版本留下、记录中没有 route 的历史任务照常续接，也可在接续时补声明一次，声明后不可改（返回 `ROUTE`）。非 operation-only 的 lead-direct、delegated 与历史无 route 任务照常做 spec 检查。route 只决定门禁与检查范围，不是任务复杂度认证：用户明确要求 Worker/Reviewer 时，不能改用 `operation-only` 或 `lead-direct` 消除已要求的分工。
+task-start 必须显式声明 route（CLI `--route`，完整 payload 的 `route`）：`operation-only` 用于无经验回执要求的例行操作，`lead-direct` 用于 Lead 自己实施，`delegated` 用于分工并核对包终态、审查与 validation。新任务漏填或值非法返回 `ROUTE`，不建立任务；已存在任务续接可省略 route；旧版本留下、记录中没有 route 的历史任务照常续接，也可在接续时补声明一次，声明后不可改（返回 `ROUTE`）。非 operation-only 的 lead-direct、delegated 与历史无 route 任务照常做 spec 检查；复杂 lead-direct（有准备需求且非只读、非简单）与 delegated 一样核对 validation 和需求验收矩阵。route 只决定门禁与检查范围，不是任务复杂度认证：用户明确要求 Worker/Reviewer 时，不能改用 `operation-only` 或 `lead-direct` 消除已要求的分工。
 
 明确的小修改可直接开始，但新任务要说明为什么不需要完整准备：
 
@@ -138,6 +138,8 @@ node "<入口>" signal task-start ... --route lead-direct --goal "修一处文�
 
 完成后用新 signalId、当前 revision 发送 `action=task-end`，不以经验处置为前置。
 
+复杂 `lead-direct` 与 `delegated` 收尾时，`task-end` 的 `validation` 还要带 `acceptance`，按准备记录的稳定需求 ID 逐条给状态：`verified` 必须有最终证据；`manual-pending` 必须有负责人 `owner` 和可操作步骤 `next`；`blocked` 必须有原因 `reason` 和下一步 `next`；`deferred` 必须有原因 `reason` 和用户同意依据 `consent`。所有工作包都 PASS 但漏一条需求时，门禁返回 `GATE` 并列出 `acceptance:<需求ID>`；未知 ID 列 `acceptance-unknown:<id>`。合法的人工待验、受阻和延期允许阶段结束，回执返回各状态数量、剩余项与 `allVerified:false`，不能据此宣称全部验收通过；适用矩阵时这些缺项不能用 waiver 抵扣。验收证据绑定 `validation.ref`，该值必须等于最终交付版本；最终版本变化后要重新提交 `validation`，需求内容或负责包变化时对应 ID 的旧验收声明失效，未变化条目保留。简单任务、`operation-only`、`read-only` 和没有 route 的历史任务不要求这套矩阵。完整格式和状态说明见[准备流程](references/preparation.md#整项需求验收与阶段交付)。
+
 按计划实施的任务在 task-start 加 `"plans": ["docs/plans/xxx.md"]`（项目内相对路径，1-10 项），插件记下当时的内容摘要。这是软门禁：计划到收尾仍未改动时，Stop 的那一次阻挡附上回写提醒，task-end 照常接受，回执带 `planUnchanged` 和 `reminder`；不进缺项，也不需要豁免。计划改过或已移走（归档）时不提醒。`task show` 显示 `plans` 与 `planUnchanged`。
 
 ### 准备记录（prepare）
@@ -148,9 +150,9 @@ node "<入口>" signal task-start ... --route lead-direct --goal "修一处文�
 node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1 --plan docs/plans/xxx.md --sections "实施步骤,Agent 选择表" --input "<准备记录JSON>"
 ```
 
-`--input` 文件只放业务字段：`{ "preparation": { "size": "simple|complex", "sizeReason": "...", "requirements": [...], "research": [...], "solution": {...}, "packages": [...], "verification": [...], "confirmation": {...}, "pending": [...], "source": {...} } }`。每个工作包还要写实际调用通道 `channel`，格式沿用现有协议（如 `builtin:agent`、`codeg:claude_code`、`lead`）；用户只指定 Agent 而当前工具通道唯一时，由 Lead 按可用工具填写，不重问用户，程序不猜默认通道。`--plan`/`--sections` 是 `preparation.source` 的便捷写法，也可直接写在 JSON 中；源计划必须是项目内相对路径的 Markdown 文件（如 `.md`、`.markdown`）。程序读取源文件并记录内容摘要，不解析 Markdown。
+`--input` 文件只放业务字段：`{ "preparation": { "size": "simple|complex", "sizeReason": "...", "requirements": [...], "research": [...], "solution": {...}, "packages": [...], "verification": [...], "confirmation": {...}, "pending": [...], "source": {...} } }`。复杂任务的每条需求要写稳定 `id`、验收 `acceptance`、负责实施包 `packages` 和检查入口 `verification`；负责包只能引用已登记且角色为 `worker` 的包。缺这些字段时回执按需求 ID 返回 `requirement:<id>:packages`、`requirement:<id>:verification`。每个工作包还要写实际调用通道 `channel`，格式沿用现有协议（如 `builtin:agent`、`codeg:claude_code`、`lead`）；用户只指定 Agent 而当前工具通道唯一时，由 Lead 按可用工具填写，不重问用户，程序不猜默认通道。`--plan`/`--sections` 是 `preparation.source` 的便捷写法，也可直接写在 JSON 中；源计划必须是项目内相对路径的 Markdown 文件（如 `.md`、`.markdown`）。程序读取源文件并记录内容摘要，不解析 Markdown。
 
-回执保存规范化记录并返回 `ready`、`missing`（缺项字段）、`preparation.messages`（可展示说明）、`preparation.step` 和 `preparation.source`。例如包 `W2` 未选 Agent 时，`missing` 含 `package:W2:agent`，说明为“工作包 W2 尚未指定 Agent”；未填实际调用通道时含 `package:W2:channel`，说明为“工作包 W2 尚未填写实际调用通道”。`pending` 里的待决事项同样按阻塞缺项处理（`pending:0`、`pending:1` 等），非空时 `ready` 不会为 `true`；非阻塞说明写到 `solution.assumptions`。简单任务只要求 `size:"simple"` 与 `sizeReason`；`pending` 非空时仍按阻塞缺项处理。`ready` 只表示结构齐全、可以进入实施，不表示方案不能交付：只交付纯技术方案时按用户给定范围收尾，不因缺少实施安排继续追问，除非用户要求转入实施计划。
+回执保存规范化记录并返回 `ready`、`missing`（缺项字段）、`preparation.messages`（可展示说明）、`preparation.step` 和 `preparation.source`。例如包 `W2` 未选 Agent 时，`missing` 含 `package:W2:agent`，说明为“工作包 W2 尚未指定 Agent”；未填实际调用通道时含 `package:W2:channel`，说明为“工作包 W2 尚未填写实际调用通道”；需求 `A01` 没分配实施包或缺检查入口时含 `requirement:A01:packages`、`requirement:A01:verification`。`pending` 里的待决事项同样按阻塞缺项处理（`pending:0`、`pending:1` 等），非空时 `ready` 不会为 `true`；非阻塞说明写到 `solution.assumptions`。简单任务只要求 `size:"simple"` 与 `sizeReason`；`pending` 非空时仍按阻塞缺项处理。`ready` 只表示结构齐全、可以进入实施，不表示方案不能交付：只交付纯技术方案时按用户给定范围收尾，不因缺少实施安排继续追问，除非用户要求转入实施计划。
 
 换会话、换电脑或换状态目录时，读取同一份计划重新提交同形记录即可恢复包、逐包 Agent 和实际调用通道；稳定包 ID、项目相对路径和代码基线是可携带依据，原会话 ID、票据和本机绝对路径不参与。计划只改进度或证据链接时，不取消已确认的需求、方案、Agent 和通道选择；原计划只写了 Agent 时，按新入口实际可用工具补 `channel`，不要求用户重选。
 
@@ -186,7 +188,7 @@ node "<入口>" signal task-update ... --id update-4 --goal "扩大后的目标"
 
 `permissions` 可只给 `mode` 或 `allowedPaths`；`allowedPathsMode=append` 追加去重，`replace`（缺省）用新集合替换。命令行与 `--input` 同时给出 `permissions` 时按 mode、allowedPaths 子字段合并（同一子字段两处值不同返回 `INPUT`）；`task-update` 的便捷参数只接受 `--goal`、`--mode`、`--paths`、`--paths-mode`，给出 `--route`、`--channels` 等其他动作的参数返回 `UNSUPPORTED`，准备更新与 `preparationTarget`/`preparationRemove` 用 `--input`。宿主当前为只读/计划模式时，把 mode 提到 write 或追加路径返回 `PERMISSION`（缩小范围和只改 goal 仍可记录）：插件只更新本机任务声明，不改宿主全局配置。
 
-目标变化或写权限扩张时，必须在同一 `task-update` 提供完整 `preparation`、非空 `preparationReason` 和 `preparationTarget`；`preparationTarget` 的 goal/mode/allowedPaths 必须与本次更新后的结果完全一致。准备记录还必须相对上次有可审计的实际变化（新增/调整包、移除包或更新计划来源）；比较前按 `packageId` 排序包数组，并归一化 `dependsOn` 等无意义集合顺序，只重放旧记录（包括倒序重放相同包）再加一条理由会以 `PREPARATION` 拒绝，非空理由不等于用户授权证明。未列出的旧包默认保留；`preparationRemove` 显式移除包，但仍在 dispatched 等非终态且未被接替的包不能移除。回执与 `preparationUpdates` 记录 `changed`/`removed`/`preserved` 和 before/after。只同步进度、日志或路径不要求重问。不改 route/channels/历史工作包，也不替代用户授权。
+目标变化或写权限扩张时，必须在同一 `task-update` 提供完整 `preparation`、非空 `preparationReason` 和 `preparationTarget`；`preparationTarget` 的 goal/mode/allowedPaths 必须与本次更新后的结果完全一致。准备记录还必须相对上次有可审计的实际变化（新增/调整包、调整需求或更新计划来源）；比较前按 `packageId`、需求 `id` 排序，并归一化 `dependsOn`、验收句子和负责包等无意义集合顺序，只重放旧记录（包括倒序重放）再加一条理由会以 `PREPARATION` 拒绝，非空理由不等于用户授权证明。未列出的旧包和旧需求默认保留，只更新进度时漏传不会删除已确认覆盖；合并后还会按最终快照核对所有需求的负责 worker 包和包依赖，保留需求仍指向被移除包时返回 `PREPARATION` 并点名具体需求与包，同批把需求迁到现存 worker 包才接受。需求内容实际变化时只失效对应 ID 的旧 `validation.acceptance` 声明，未变化条目和顺序保留。`preparationRemove` 显式移除包，但仍在 dispatched 等非终态且未被接替的包不能移除。回执与 `preparationUpdates` 记录 `changed`/`removed`/`preserved`、`changedRequirements`/`preservedRequirements`、`invalidatedAcceptance` 和 before/after。只同步进度、日志或路径不要求重问。不改 route/channels/历史工作包，也不替代用户授权。
 
 回执返回有效权限和变更摘要，例如：
 

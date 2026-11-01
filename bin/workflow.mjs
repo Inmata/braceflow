@@ -5,7 +5,7 @@ import { fail, readState, stateDirectory } from '../src/store.mjs';
 import { identity, resolveProject } from '../src/projects.mjs';
 import { getContext } from '../src/context.mjs';
 import { handleHook, HOSTS as AGENTS } from '../src/hooks.mjs';
-import { gateReport, taskKey, unchangedPlans } from '../src/protocol.mjs';
+import { acceptanceSummary, gateReport, taskKey, unchangedPlans } from '../src/protocol.mjs';
 import { cliPath, transportArguments } from '../src/entry.mjs';
 
 const allowed = new Set(['state-dir', 'user-dir', 'root', 'project', 'role', 'session', 'input', 'base64', 'agent', 'owner', 'coexistence-mode', 'transaction', 'pending', 'max-files', 'skip-learning', 'enable-learning', 'help']);
@@ -48,7 +48,7 @@ const help = {
     'signal <task-start|task-update|phase|role-claim|task-end|packages|prepare> --session <id> --turn <id> --id <signalId> [--task <id>] [--goal --route --size simple|complex --size-reason "<理由>" --mode --paths a,b --paths-mode replace|append --plans a,b --channels worker=x,reviewer=y --parent | --phase --delivery | --role --package | --final-ref | --plan --sections] [--input <补充字段 JSON>]（推荐：身份由本机状态补齐；新任务须有完整准备、带理由的简单声明或 operation-only；task-update 仅该任务有效 Lead 可用，目标/范围变化时用 --input 同时给 preparation、preparationReason 与 preparationTarget；移除包用 preparationRemove）',
     'signal prepare ... --input <准备记录 JSON> [--plan <项目内计划路径>] [--sections <章节,逗号分隔>]（准备记录可在尚无业务任务时保存，不创建任务或工作包）',
     'signal packages ... --package <id> [--role --status --package-agent <Agent> --scope --channel --handle --ref --depends-on a,b --supersedes --verdict --reviews --base-ref --note --worktree]（单个包；同批多个包或 change 仍用 --input；开工时固定的准备记录会按包核对 role/agent/channel/scope）',
-    'signal task-end ... [--final-ref <提交>] [--validation-ref <提交> --evidence "<证据>" ...]（validation.ref 缺省取 --final-ref；waivers 等仍用 --input）',
+    'signal task-end ... [--final-ref <提交>] [--validation-ref <提交> --evidence "<证据>" ...]（validation.ref 缺省取 --final-ref；完整流程用 --input 给 validation.acceptance 逐条验收状态；waivers 等仍用 --input）',
     'signal --input <JSON文件> | --base64 <UTF-8 JSON>（完整 payload，兼容写法）',
     'knowledge inspect --path <资料路径> [--project <目录>]',
     'knowledge apply --input <JSON文件>', 'knowledge recover --transaction <id> [--project <目录>]',
@@ -105,7 +105,7 @@ async function showTask(state, root, taskId) {
   const gate = lifecycle === 'active' ? gateReport(state, task, finalRef, resolved.worktree) : { missing: [], findings: [], diagnostic: [] };
   const plans = (task.plans || []).map(plan => plan.path);
   const planUnchanged = lifecycle === 'active' ? unchangedPlans(state, task, resolved.worktree) : [];
-  return { taskId: id, goal, parentTaskId, route, channels, size, sizeReason, preparation, lifecycle, packages: Object.values(packages), validation, waivers, finalRef, changes: changes.length, updates: updates.length, gateMissing: gate.missing, specFindings: gate.findings, diagnostic: gate.diagnostic || [], plans, planUnchanged, note: '门禁核对声明记录一致性，不证明审查或测试真实发生，也不证明诊断包进程实际未写' };
+  return { taskId: id, goal, parentTaskId, route, channels, size, sizeReason, preparation, lifecycle, packages: Object.values(packages), validation, acceptance: acceptanceSummary(task), waivers, finalRef, changes: changes.length, updates: updates.length, gateMissing: gate.missing, specFindings: gate.findings, diagnostic: gate.diagnostic || [], plans, planUnchanged, note: '门禁核对声明记录一致性，不证明审查或测试真实发生，也不证明诊断包进程实际未写' };
 }
 // spec check 的检查根：先按本机绑定找到当前 worktree（与 hook 同一解析，--project 已在此前的 root 中生效），
 // 未接入或不在绑定时退回 Git 顶层目录；都不是 Git 目录就按给定目录检查。

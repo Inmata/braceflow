@@ -9,13 +9,14 @@ import { mutate, readState } from '../src/store.mjs';
 import { emit, entry, event, fixture } from './helpers.mjs';
 
 const planPath = 'docs/plans/r2-regressions.md';
-async function prepare(f, packages) {
+async function prepare(f, packages, requirements = null) {
   await mkdir(path.dirname(path.join(f.project, planPath)), { recursive: true });
   await writeFile(path.join(f.project, planPath), '# R2 回归计划\n\n## 实施步骤\n\n1. 实施并核对。\n');
   const preparation = {
     size: 'complex',
     sizeReason: '涉及协议、hooks 与测试，需要逐包核对',
-    requirements: [{ id: 'A01', summary: '回归七项', acceptance: ['错误声明被拒绝'] }],
+    // 默认只把第一条需求挂到首个实施包：后续用例可能替换或移除其他未派发包，不应因此产生未登记引用。
+    requirements: requirements || [{ id: 'A01', summary: '回归七项', acceptance: ['错误声明被拒绝'], packages: packages.filter(item => item.role === 'worker').slice(0, 1).map(item => item.packageId), verification: 'node --test test/r2-regressions.test.mjs' }],
     research: [{ source: '本仓 protocol.mjs', conclusion: '复用现有门禁' }],
     solution: { summary: '按结构化声明核对', decisions: [{ decision: '不解析自然语言', reason: '只接受显式字段' }] },
     packages,
@@ -180,6 +181,8 @@ test('R2 中 5：task-update 拒绝重放/错配 target/移除在途包，允许
   const dropActive = structuredClone(removedPrep);
   dropActive.packages = dropActive.packages.filter(item => item.packageId !== 'W1');
   dropActive.packages.push({ packageId: 'W3', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/z.mjs', delivers: '替代包', dependsOn: [] });
+  // W1 若被移除，需求必须改由接替包承担；否则会先命中“负责包未登记”的缺项。
+  dropActive.requirements = dropActive.requirements.map(item => ({ ...item, packages: item.packages.map(owner => owner === 'W1' ? 'W3' : owner) }));
   const active = await emit(f, { action: 'task-update', preparation: dropActive, preparationRemove: ['W1'], preparationReason: '用户确认移除 W1' });
   assert.equal(active.result.accepted, false, JSON.stringify(active.result));
   assert.match(active.result.message, /仍在 dispatched/);
@@ -223,4 +226,164 @@ test('R2 第三轮：准备快照倒序重放不算实际变化，目标变化�
   });
   assert.equal(metadata.result.accepted, false, JSON.stringify(metadata.result));
   assert.match(metadata.result.message, /没有实际变化/);
+});
+
+// W3：只更新进度或新增包时，未列出的需求与旧选择保留；不能靠漏传需求删掉验收覆盖。
+test('W3 准备更新按需求 ID 合并，未列出的需求与包保留，需求顺序变化不算实际变化', async () => {
+  const f = await fixture();
+  const packages = [
+    { packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/a.mjs', delivers: '行为 A', dependsOn: [] },
+    { packageId: 'W2', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/b.mjs', delivers: '行为 B', dependsOn: ['W1'] },
+  ];
+  const requirements = [
+    { id: 'A01', summary: '行为 A', acceptance: ['A 可验证'], packages: ['W1'], verification: 'node --test test/a.test.mjs' },
+    { id: 'A02', summary: '行为 B', acceptance: ['B 可验证'], packages: ['W2'], verification: 'node --test test/b.test.mjs' },
+  ];
+  await prepare(f, packages, requirements);
+  await emit(f, { action: 'task-start', goal: 'W3 需求保留', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/a.mjs'] } });
+  const state = await readState(f.directory);
+  const saved = state.sessions[sessionKey(f.projectId, f.sessionId)].preparation;
+  const progressOnly = {
+    size: saved.size, sizeReason: saved.sizeReason,
+    // 只列 A02；A01 没漏传就删掉的范围由合并逻辑保留。
+    requirements: [saved.requirements.find(item => item.id === 'A02')],
+    research: saved.research, solution: saved.solution,
+    packages: saved.packages,
+    verification: saved.verification, confirmation: saved.confirmation, pending: saved.pending,
+    source: { path: saved.source.path, sections: saved.source.sections },
+  };
+  const updated = await emit(f, { action: 'task-update', preparation: progressOnly, preparationReason: '只同步进度，不改变已确认需求' });
+  assert.equal(updated.result.accepted, true, JSON.stringify(updated.result));
+  assert.deepEqual(updated.result.change.preparation.changedRequirements, []);
+  assert.deepEqual(updated.result.change.preparation.preservedRequirements, ['A01']);
+  const task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.deepEqual(task.preparation.requirements.map(item => item.id), ['A01', 'A02']);
+  assert.deepEqual(task.preparation.requirements.find(item => item.id === 'A01').packages, ['W1']);
+  assert.deepEqual(task.preparation.packages.map(item => item.packageId), ['W1', 'W2']);
+
+  // 需求顺序与验收句子顺序变化不构成实际变化：目标变化时仍被判定为重放。
+  const replay = structuredClone(progressOnly);
+  replay.requirements = [
+    { ...saved.requirements.find(item => item.id === 'A02') },
+    { ...saved.requirements.find(item => item.id === 'A01'), acceptance: [...saved.requirements.find(item => item.id === 'A01').acceptance].reverse() },
+  ];
+  const target = { goal: '扩大目标', permissions: { mode: 'write', allowedPaths: ['src/a.mjs'] } };
+  const reorder = await emit(f, { action: 'task-update', goal: '扩大目标', preparation: replay, preparationReason: '用户确认扩大目标', preparationTarget: target });
+  assert.equal(reorder.result.accepted, false, JSON.stringify(reorder.result));
+  assert.match(reorder.result.message, /没有实际变化/);
+});
+
+// W3：同一需求 ID 的验收句子变化后，旧验收证据不能继续算 verified；未变化条目与顺序保留。
+test('W3 需求内容变化使对应验收证据失效，未变化条目和需求顺序保留', async () => {
+  const f = await fixture();
+  const packages = [
+    { packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/a.mjs', delivers: '行为 A', dependsOn: [] },
+    { packageId: 'W2', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/b.mjs', delivers: '行为 B', dependsOn: [] },
+  ];
+  const requirements = [
+    { id: 'A01', summary: '行为 A', acceptance: ['A 可验证', 'A 也可复核'], packages: ['W1'], verification: 'node --test test/a.test.mjs' },
+    { id: 'A02', summary: '行为 B', acceptance: ['B 可验证', 'B 也可复核'], packages: ['W2'], verification: 'node --test test/b.test.mjs' },
+  ];
+  await prepare(f, packages, requirements);
+  await emit(f, { action: 'task-start', goal: 'W3 需求变化失效', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/a.mjs', 'src/b.mjs'] } });
+  const packagesReady = await emit(f, {
+    action: 'packages',
+    packages: [
+      { packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/a.mjs', status: 'dispatched' },
+      { packageId: 'W2', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/b.mjs', status: 'dispatched' },
+    ],
+    validation: {
+      ref: 'v1', evidence: ['npm test'],
+      acceptance: [
+        { id: 'A01', status: 'verified', evidence: ['A 的旧证据'] },
+        { id: 'A02', status: 'verified', evidence: ['B 的证据'] },
+      ],
+    },
+  });
+  assert.equal(packagesReady.result.accepted, true, JSON.stringify(packagesReady.result));
+
+  const state = await readState(f.directory);
+  const saved = state.sessions[sessionKey(f.projectId, f.sessionId)].preparation;
+  const record = {
+    size: saved.size, sizeReason: saved.sizeReason,
+    requirements: [{ ...saved.requirements.find(item => item.id === 'A01'), acceptance: ['A 的新验收', 'A 也可复核'] }],
+    research: saved.research, solution: saved.solution,
+    packages: saved.packages,
+    verification: saved.verification, confirmation: saved.confirmation, pending: saved.pending,
+    source: { path: saved.source.path, sections: saved.source.sections },
+  };
+  const updated = await emit(f, { action: 'task-update', preparation: record, preparationReason: '用户确认 A01 验收句子变化' });
+  assert.equal(updated.result.accepted, true, JSON.stringify(updated.result));
+  assert.deepEqual(updated.result.change.preparation.changedRequirements, ['A01']);
+  assert.deepEqual(updated.result.change.preparation.invalidatedAcceptance, ['A01']);
+  const task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  // 只失效变化的需求；A02 的证据与两条需求的原顺序都保留。
+  assert.deepEqual(task.validation.acceptance.map(entry => entry.id), ['A02']);
+  assert.deepEqual(task.preparation.requirements.map(item => item.id), ['A01', 'A02']);
+  assert.equal(task.preparation.requirements.find(item => item.id === 'A01').acceptance[0], 'A 的新验收');
+
+  // 仅调整需求与验收句子顺序不算内容变化，不会继续失效 A02。
+  const reorder = {
+    ...record,
+    requirements: [
+      { ...saved.requirements.find(item => item.id === 'A02'), acceptance: [...saved.requirements.find(item => item.id === 'A02').acceptance].reverse() },
+      { ...record.requirements[0], acceptance: [...record.requirements[0].acceptance].reverse() },
+    ],
+  };
+  const reordered = await emit(f, { action: 'task-update', preparation: reorder, preparationReason: '仅调整展示顺序' });
+  assert.equal(reordered.result.accepted, true, JSON.stringify(reordered.result));
+  assert.deepEqual(reordered.result.change.preparation.changedRequirements, []);
+  assert.deepEqual(reordered.result.change.preparation.invalidatedAcceptance, []);
+  const after = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.deepEqual(after.validation.acceptance.map(entry => entry.id), ['A02']);
+  assert.deepEqual(after.preparation.requirements.map(item => item.id), ['A01', 'A02']);
+});
+
+// W3：incoming 记录自身完整不代表合并结果完整；移除旧包时必须迁移仍引用它的需求。
+test('W3 合并后核对最终引用：保留需求指向被移除包时拒绝并点名，同批迁移到现存包时接受', async () => {
+  const f = await fixture();
+  const packages = [
+    { packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/a.mjs', delivers: '行为 A', dependsOn: [] },
+    { packageId: 'W2', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/b.mjs', delivers: '行为 B', dependsOn: [] },
+  ];
+  const requirements = [
+    { id: 'A01', summary: '行为 A', acceptance: ['A 可验证'], packages: ['W1'], verification: 'node --test test/a.test.mjs' },
+    { id: 'A02', summary: '行为 B', acceptance: ['B 可验证'], packages: ['W2'], verification: 'node --test test/b.test.mjs' },
+  ];
+  await prepare(f, packages, requirements);
+  await emit(f, { action: 'task-start', goal: 'W3 合并引用', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/a.mjs', 'src/b.mjs'] } });
+  const state = await readState(f.directory);
+  const saved = state.sessions[sessionKey(f.projectId, f.sessionId)].preparation;
+  // 只提交 A02 和 W2，并显式移除 W1：A01 会被合并逻辑保留，但已无负责包。
+  const record = {
+    size: saved.size, sizeReason: saved.sizeReason,
+    requirements: [{ ...saved.requirements.find(item => item.id === 'A02') }],
+    research: saved.research, solution: saved.solution,
+    packages: [{ ...saved.packages.find(item => item.packageId === 'W2') }],
+    verification: saved.verification, confirmation: saved.confirmation, pending: saved.pending,
+    source: { path: saved.source.path, sections: saved.source.sections },
+  };
+  const rejected = await emit(f, { action: 'task-update', preparation: record, preparationReason: '移除 W1 但未迁移 A01', preparationRemove: ['W1'] });
+  assert.equal(rejected.result.accepted, false, JSON.stringify(rejected.result));
+  assert.equal(rejected.result.reason, 'PREPARATION');
+  assert.match(JSON.stringify(rejected.result), /requirement:A01:packages/);
+  assert.match(JSON.stringify(rejected.result), /W1/);
+  const unchanged = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.deepEqual(unchanged.preparation.packages.map(item => item.packageId), ['W1', 'W2']);
+  assert.deepEqual(unchanged.preparation.requirements.map(item => item.id), ['A01', 'A02']);
+
+  // 同一批把 A01 转到 W2 再移除 W1：最终引用完整，接受。
+  const migrated = {
+    ...record,
+    requirements: [
+      { ...saved.requirements.find(item => item.id === 'A01'), packages: ['W2'] },
+      { ...saved.requirements.find(item => item.id === 'A02') },
+    ],
+  };
+  const accepted = await emit(f, { action: 'task-update', preparation: migrated, preparationReason: '用户确认 A01 改由 W2 交付', preparationRemove: ['W1'] });
+  assert.equal(accepted.result.accepted, true, JSON.stringify(accepted.result));
+  const final = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)].preparation;
+  assert.deepEqual(final.packages.map(item => item.packageId), ['W2']);
+  assert.deepEqual(final.requirements.find(item => item.id === 'A01').packages, ['W2']);
+  assert.deepEqual(final.requirements.map(item => item.id), ['A01', 'A02']);
 });

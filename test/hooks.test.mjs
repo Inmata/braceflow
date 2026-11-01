@@ -718,7 +718,7 @@ async function w2Prepare(f, overrides = {}) {
   const preparation = {
     size: 'complex',
     sizeReason: '涉及协议、hooks 和测试，需要独立审查',
-    requirements: [{ id: 'A10', summary: '准备期可读代码和写计划', acceptance: ['业务写入被拦下'] }],
+    requirements: [{ id: 'A10', summary: '准备期可读代码和写计划', acceptance: ['业务写入被拦下'], packages: ['W1'], verification: 'node --test test/hooks.test.mjs' }],
     research: [{ source: '本仓 hooks.mjs', conclusion: '复用真实 PreToolUse' }],
     solution: { summary: '在工具执行前读取准备记录', decisions: [{ decision: '只拦可识别入口', reason: '不猜 shell 任意写入' }] },
     packages: [{ packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/hooks.mjs', delivers: '真实拦截', dependsOn: [] }],
@@ -1082,7 +1082,7 @@ test('R2 简单任务允许审查与只读诊断包，实施 worker 必须显式
   await writeFile(path.join(f.project, 'docs', 'plans', 'upgrade.md'), '# 升级\n');
   const preparation = {
     size: 'complex', sizeReason: '实际需要实施与独立审查',
-    requirements: [{ id: 'A01', summary: '实施', acceptance: ['行为可验证'] }],
+    requirements: [{ id: 'A01', summary: '实施', acceptance: ['行为可验证'], packages: ['W1'], verification: 'node --test' }],
     research: [{ source: '本仓', conclusion: '最小实施' }],
     solution: { summary: '直接实现', decisions: [{ decision: '单包', reason: '范围小' }] },
     packages: [{ packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'builtin:general-purpose', scope: 'README.md', delivers: '可验证行为', dependsOn: [] }],

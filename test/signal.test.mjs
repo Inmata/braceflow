@@ -74,7 +74,7 @@ test('空白状态真实 CLI prepare→delegated task-start→packages 全链经
   const preparation = {
     size: 'complex',
     sizeReason: '真实 CLI→Post 链需要完整准备与逐包核对',
-    requirements: [{ id: 'A01', summary: '准备记录绑定到新任务', acceptance: ['task-start 后快照仍在'] }],
+    requirements: [{ id: 'A01', summary: '准备记录绑定到新任务', acceptance: ['task-start 后快照仍在'], packages: ['W1'], verification: 'node --test test/signal.test.mjs' }],
     research: [{ source: '本仓 src/signal.mjs', conclusion: 'CLI 只拼 payload，由 PostToolUse 接受写入' }],
     solution: {
       summary: 'prepare 保存会话记录，task-start 绑定快照，packages 按包核对',
@@ -229,6 +229,26 @@ test('task-end 便捷 validation 用 --final-ref 补 ref，证据可重复给出
   assert.equal(JSON.parse(build(f, 'task-end', ['--id', 'e2', '--validation-ref', 'abc123', '--input', file]).stdout).error, 'INPUT');
   assert.equal(JSON.parse(build(f, 'task-end', ['--id', 'e3', '--evidence', '仅有证据']).stdout).error, 'INPUT');
   assert.equal(JSON.parse(build(f, 'task-end', ['--id', 'e4', '--validation-ref', 'abc123', '--final-ref', 'def456']).stdout).error, 'INPUT');
+});
+test('W3 task-end 的 --input validation.acceptance 与命令行证据合并后经真实 PostToolUse 保存', async () => {
+  const f = await fixture();
+  await start(f);
+  const file = path.join(f.area, 'acceptance.json');
+  await writeFile(file, JSON.stringify({
+    validation: {
+      acceptance: [{ id: 'A01', status: 'manual-pending', owner: '用户', next: '打开页面确认结果' }],
+    },
+  }));
+  // 命令行给 ref/evidence，--input 补 acceptance；两处合并而不是覆盖。
+  const ended = await accept(f, 'task-end', ['--id', 'e-accept', '--final-ref', 'abc123', '--evidence', 'npm test 通过', '--input', file]);
+  assert.equal(ended.receipt.accepted, true, JSON.stringify(ended.receipt));
+  assert.deepEqual(ended.payload.validation.acceptance, [{ id: 'A01', status: 'manual-pending', owner: '用户', next: '打开页面确认结果' }]);
+  const task = Object.values((await readState(f.directory)).tasks)[0];
+  assert.deepEqual(task.validation, {
+    ref: 'abc123',
+    evidence: ['npm test 通过'],
+    acceptance: [{ id: 'A01', status: 'manual-pending', evidence: [], owner: '用户', next: '打开页面确认结果' }],
+  });
 });
 test('便捷字段用错动作由 CLI 返回 INPUT；合法字面值中的 shell 元字符不再被参数层误拒', async () => {
   const f = await fixture();

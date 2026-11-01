@@ -1160,3 +1160,215 @@ test('关联计划软提醒：计划未改时 Stop 与 task-end 回执提醒回�
     assert.equal((await emit(h, { action: 'task-start', goal: 'x', route: 'lead-direct', plans, permissions: { mode: 'write', allowedPaths: [] } })).result.reason, 'PLAN');
   }
 });
+
+// W3：完整流程按准备记录的需求 ID 核对交付声明；包全 PASS 仍不能代替整项需求验收。
+async function acceptanceFixture(requirements) {
+  const f = await fixture();
+  const plan = 'docs/plans/acceptance.md';
+  await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(f.project, plan), '# 验收计划\n\n## 需求对应\n\nA01、A02\n');
+  const preparation = {
+    size: 'complex',
+    sizeReason: '整项需求跨多个行为，需要逐条核对最终证据',
+    requirements,
+    research: [{ source: '本仓 protocol.mjs', conclusion: '复用现有 task-end validation 与门禁' }],
+    solution: { summary: '在交付声明中增加验收矩阵', decisions: [{ decision: '按稳定需求 ID 核对', reason: '包 PASS 不能代表需求覆盖' }] },
+    packages: [
+      { packageId: 'w1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', delivers: '完整行为', dependsOn: [] },
+      { packageId: 'r1', role: 'reviewer', agent: 'Codex', channel: 'codeg:codex', scope: '独立审查 w1', delivers: '对 w1 的审查结论', dependsOn: ['w1'] },
+    ],
+    verification: ['npm test'],
+    confirmation: { scope: ['需求', '分包', 'Agent'], basis: '用户确认完整流程验收' },
+    pending: [],
+    source: { path: plan },
+  };
+  const prepared = await emit(f, { action: 'prepare', preparation });
+  assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
+  const started = await emit(f, { action: 'task-start', goal: '整项需求交付', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const readyPackages = await emit(f, {
+    action: 'packages',
+    packages: [
+      { packageId: 'w1', role: 'worker', status: 'consumed', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', deliveredRef: 'v1' },
+      { packageId: 'r1', role: 'reviewer', status: 'consumed', agent: 'Codex', channel: 'codeg:codex', scope: '独立审查 w1', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
+    ],
+  });
+  assert.equal(readyPackages.result.accepted, true, JSON.stringify(readyPackages.result));
+  return f;
+}
+const acceptanceRequirements = () => [
+  { id: 'A01', summary: '自动验证的完整行为', acceptance: ['定向测试通过'], packages: ['w1'], verification: 'npm test' },
+  { id: 'A02', summary: '需要用户操作的行为', acceptance: ['用户实际点击后结果正确'], packages: ['w1'], verification: '用户按步骤操作' },
+];
+
+// W3：复杂 lead-direct 没有逐包账本，但 Lead 自己交付的整项需求仍需要验收矩阵。
+async function leadDirectAcceptanceFixture() {
+  const f = await fixture();
+  const plan = 'docs/plans/lead-direct-acceptance.md';
+  await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(f.project, plan), '# lead-direct 验收计划\n\nA01\n');
+  const prepared = await emit(f, {
+    action: 'prepare',
+    preparation: {
+      size: 'complex',
+      sizeReason: '复杂 lead-direct 需要一个稳定的整项验收锚点',
+      requirements: [{ id: 'A01', summary: 'Lead 自己实现的完整行为', acceptance: ['定向测试通过'], packages: ['w1'], verification: 'node --test test/gate.test.mjs' }],
+      research: [{ source: '本仓 protocol.mjs', conclusion: '复用现有 task-end validation 与验收矩阵' }],
+      solution: { summary: '复杂 lead-direct 同样核对验收矩阵', decisions: [{ decision: '矩阵按准备需求判断，不只按 route', reason: '避免复杂 lead-direct 只做 spec 检查就结束' }] },
+      packages: [{ packageId: 'w1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', delivers: '完整行为', dependsOn: [] }],
+      verification: ['node --test test/gate.test.mjs'],
+      confirmation: { scope: ['需求', '分包', 'Agent'], basis: '用户确认复杂 lead-direct 验收' },
+      pending: [],
+      source: { path: plan },
+    },
+  });
+  assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
+  const started = await emit(f, { action: 'task-start', goal: 'Lead 自己交付整项需求', route: 'lead-direct', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  return f;
+}
+
+test('W3 所有包 PASS 但漏一条需求证据仍被门禁列出，补齐后才允许阶段交付', async () => {
+  const f = await acceptanceFixture(acceptanceRequirements());
+  const partial = await emit(f, {
+    action: 'task-end', finalRef: 'v1',
+    validation: { ref: 'v1', evidence: ['npm test 通过'], acceptance: [{ id: 'A01', status: 'verified', evidence: ['npm test: 20 pass'] }] },
+  });
+  assert.equal(partial.result.accepted, false);
+  assert.equal(partial.result.reason, 'GATE');
+  assert.ok(partial.result.missing.includes('acceptance:A02'), JSON.stringify(partial.result));
+  assert.equal((await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)].lifecycle, 'active');
+
+  // manual-pending 是可如实的阶段交付：必须写负责人与可操作步骤，并明确不是全部通过。
+  const ended = await emit(f, {
+    action: 'task-end', finalRef: 'v1',
+    validation: {
+      ref: 'v1', evidence: ['npm test 通过'],
+      acceptance: [
+        { id: 'A01', status: 'verified', evidence: ['npm test: 20 pass'] },
+        { id: 'A02', status: 'manual-pending', owner: '用户', next: '打开页面点击“登录”，确认 3 秒内返回' },
+      ],
+    },
+  });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.equal(ended.result.acceptance.total, 2);
+  assert.equal(ended.result.acceptance.verified, 1);
+  assert.equal(ended.result.acceptance.manualPending, 1);
+  assert.equal(ended.result.acceptance.allVerified, false);
+  assert.deepEqual(ended.result.acceptance.remaining, [{ id: 'A02', status: 'manual-pending', owner: '用户', next: '打开页面点击“登录”，确认 3 秒内返回' }]);
+  assert.match(ended.result.acceptance.note, /不是全部验收通过/);
+  const task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.equal(task.lifecycle, 'complete');
+  assert.equal(task.validation.acceptance.length, 2);
+});
+
+test('W3 交付声明按状态校验：manual-pending 缺负责人/步骤、blocked 缺下一步、deferred 缺同意依据、verified 缺证据都拒绝', async () => {
+  const f = await acceptanceFixture(acceptanceRequirements());
+  const cases = [
+    [{ id: 'A01', status: 'verified', evidence: [] }, /verified.*最终证据/],
+    [{ id: 'A01', status: 'manual-pending', owner: '用户' }, /manual-pending.*负责人.*步骤/],
+    [{ id: 'A01', status: 'blocked', reason: '环境不可用' }, /blocked.*下一步/],
+    [{ id: 'A01', status: 'deferred', reason: '以后再做' }, /deferred.*同意依据/],
+    [{ id: 'A9', status: 'verified', evidence: ['x'] }, /acceptance-unknown|acceptance:A01|acceptance:A02/],
+  ];
+  for (const [entry, pattern] of cases) {
+    const result = await emit(f, { action: 'task-end', finalRef: 'v1', validation: { ref: 'v1', evidence: ['npm test'], acceptance: [entry] } });
+    assert.equal(result.result.accepted, false, JSON.stringify(result.result));
+    assert.match(`${result.result.reason}: ${result.result.message || ''} ${(result.result.missing || []).join(',')}`, pattern);
+  }
+  // 拒绝后仍可补齐；blocked/deferred 的合法记录能如实保存，但不等于全部通过。
+  const ended = await emit(f, {
+    action: 'task-end', finalRef: 'v1',
+    validation: {
+      ref: 'v1', evidence: ['npm test'],
+      acceptance: [
+        { id: 'A01', status: 'blocked', reason: '测试环境缺少账号', next: '提供测试账号后重跑 npm test' },
+        { id: 'A02', status: 'deferred', reason: '本期不做', consent: '用户 2026-11-01 明确同意延后' },
+      ],
+    },
+  });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.equal(ended.result.acceptance.blocked, 1);
+  assert.equal(ended.result.acceptance.deferred, 1);
+  assert.equal(ended.result.acceptance.allVerified, false);
+});
+
+test('W3 最终版本变化后旧验收证据不沿用：finalRef 改变要求重新提交 validation', async () => {
+  const f = await acceptanceFixture(acceptanceRequirements());
+  const validation = {
+    ref: 'v1', evidence: ['npm test'],
+    acceptance: [
+      { id: 'A01', status: 'verified', evidence: ['npm test: 20 pass'] },
+      { id: 'A02', status: 'verified', evidence: ['人工确认记录'] },
+    ],
+  };
+  const moved = await emit(f, { action: 'task-end', finalRef: 'v2', validation });
+  assert.equal(moved.result.accepted, false);
+  assert.equal(moved.result.reason, 'GATE');
+  assert.ok(moved.result.missing.includes('validation'), JSON.stringify(moved.result));
+  // 重新绑定最终版本后接受，旧版本证据不自动迁移。
+  const ended = await emit(f, { action: 'task-end', finalRef: 'v2', validation: { ...validation, ref: 'v2' } });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.equal(ended.result.acceptance.allVerified, true);
+});
+
+test('W3 复杂 lead-direct 也要过需求验证与验收矩阵；简单 lead-direct 保持轻量', async () => {
+  const f = await leadDirectAcceptanceFixture();
+  // 只给 validation、不给 acceptance：即使任务是 lead-direct，也不能结束。
+  const missingAcceptance = await emit(f, { action: 'task-end', finalRef: 'v1', validation: { ref: 'v1', evidence: ['node --test 通过'] } });
+  assert.equal(missingAcceptance.result.accepted, false, JSON.stringify(missingAcceptance.result));
+  assert.equal(missingAcceptance.result.reason, 'GATE');
+  assert.ok(missingAcceptance.result.missing.includes('acceptance:A01'), JSON.stringify(missingAcceptance.result));
+
+  const ended = await emit(f, {
+    action: 'task-end', finalRef: 'v1',
+    validation: { ref: 'v1', evidence: ['node --test 通过'], acceptance: [{ id: 'A01', status: 'verified', evidence: ['20 pass'] }] },
+  });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.equal(ended.result.acceptance.allVerified, true);
+
+  // 简单 lead-direct 不制造空矩阵：没有准备需求时，validation/acceptance 都不要求。
+  const simple = await fixture();
+  const started = await emit(simple, { action: 'task-start', goal: '只改一处文案', route: 'lead-direct', size: 'simple', sizeReason: '单点文案，无需调研和分包', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const done = await emit(simple, { action: 'task-end' });
+  assert.equal(done.result.accepted, true, JSON.stringify(done.result));
+  assert.equal(done.result.acceptance, undefined);
+});
+
+test('W3 验收矩阵不能用 waiver 抵扣：类别、精确 ID 和 validation 都拒绝，人工待验可如实结束', async () => {
+  const f = await acceptanceFixture(acceptanceRequirements());
+  const partial = { ref: 'v1', evidence: ['npm test'], acceptance: [{ id: 'A01', status: 'verified', evidence: ['npm test: 20 pass'] }] };
+  // 类别和精确条目都不能把缺失的 A02 豁免掉。
+  for (const step of ['acceptance', 'acceptance:A02']) {
+    const result = await emit(f, { action: 'task-end', finalRef: 'v1', validation: partial, waivers: [{ step, reason: '想直接通过' }] });
+    assert.equal(result.result.accepted, false, `${step}: ${JSON.stringify(result.result)}`);
+    assert.equal(result.result.reason, 'GATE');
+    assert.ok(result.result.missing.includes('acceptance:A02'), `${step}: ${JSON.stringify(result.result)}`);
+  }
+  // validation 缺项同样不能豁免。
+  const noValidation = await emit(f, { action: 'task-end', finalRef: 'v1', waivers: [{ step: 'validation', reason: '想直接通过' }] });
+  assert.equal(noValidation.result.accepted, false, JSON.stringify(noValidation.result));
+  assert.ok(noValidation.result.missing.includes('validation'), JSON.stringify(noValidation.result));
+  // 未知验收 ID 的类别和精确条目也不能豁免。
+  const unknown = { ...partial, acceptance: [...partial.acceptance, { id: 'A9', status: 'verified', evidence: ['x'] }] };
+  for (const step of ['acceptance-unknown', 'acceptance-unknown:A9']) {
+    const result = await emit(f, { action: 'task-end', finalRef: 'v1', validation: unknown, waivers: [{ step, reason: '想直接通过' }] });
+    assert.equal(result.result.accepted, false, `${step}: ${JSON.stringify(result.result)}`);
+    assert.ok(result.result.missing.includes('acceptance-unknown:A9'), `${step}: ${JSON.stringify(result.result)}`);
+  }
+  // 合法的人工待验不是豁免，但能如实阶段结束。
+  const ended = await emit(f, {
+    action: 'task-end', finalRef: 'v1',
+    validation: {
+      ...partial,
+      acceptance: [
+        { id: 'A01', status: 'verified', evidence: ['npm test: 20 pass'] },
+        { id: 'A02', status: 'manual-pending', owner: '用户', next: '打开页面点击“登录”，确认结果' },
+      ],
+    },
+  });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.equal(ended.result.acceptance.allVerified, false);
+  assert.equal(ended.result.acceptance.manualPending, 1);
+});

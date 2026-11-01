@@ -543,3 +543,33 @@ Worker 与 Reviewer（drift-sim）：Codex Worker 包 w-mul 增加 `mul` 和测�
 **未测与边界：** 未调用真实 MCP 工具或 Codeg ACP；未实际调用 `NotebookEdit`；文件符号链接仍因 Windows 权限无法创建；未验证 OS 绝对隔离、长会话或任意已启动进程。Bash 的只读内置命令仍会由 `dontAsk` 自动放行，普通非 signal Bash 的审批拒绝没有在本次会话中逐项重放。以上均不能写成已通过。
 
 **清理：** 本节使用的隔离项目、状态目录、隔离配置目录、认证文件副本和原始 stream-json 已删除；未触碰 `.local/`、真实配置或信任记录。
+
+## 11. W3 整项需求验收（2026-11-01）
+
+本节按计划第 8.1 节 A01–A21 逐项记录当前实际证据和下一步。状态只分四类：**已验证**（有可复查的代码/测试或真实宿主记录）、**人工待验**（需要真实协作或用户操作，尚未执行）、**受阻**（当前入口或环境无法完成）、**经用户同意后延**（明确不在本轮范围）。程序测试和文档记录不能代替真实短任务体验；未运行的宿主入口仍按未验处理。
+
+| ID | 场景 | 状态 | 实际证据 | 下一步 / 负责人 |
+| --- | --- | --- | --- | --- |
+| A01 | 明确的小修改 | 人工待验 | `test/signal.test.mjs`、`test/gate.test.mjs` 覆盖简单声明与 `task-end` 程序路径；尚无一次真实小改动记录 Lead 是否主动跳过完整流程 | 做一次真实小改动（如修错字），记录是否直接处理、是否误走完整流程；Lead |
+| A02 | 模糊的新功能 | 人工待验 | 准备流程、提问规则和 `prepare` 缺项已实现并有测试；尚未用真实模糊需求观察提问质量 | 选一个真实模糊需求做短任务，记录问了什么、方案是否易理解；Lead |
+| A03 | 已有资料写清的需求 | 已验证 | `test/preparation.test.mjs` 旧版 Markdown 绑定、两个空白状态目录恢复；入口提示复用已有记录 | 换真实项目资料复用时只需核对源计划路径；Lead |
+| A04 | 有现成开源做法 | 人工待验 | 计划和 `docs/references/preparation.md` 要求先查项目与 GitHub；具体新任务的调研质量未实测 | 在下一个新功能中记录调研来源、复用与不采用理由；Lead |
+| A05 | 技术方案交付 | 人工待验 | 文档和入口提示区分“纯技术方案停在方案”与完整实施计划；未做真实用户可读性验收 | 用一个真实方案让用户复述怎么做、为什么和限制；Lead |
+| A06 | 方案已写但没分包/没选 Agent | 已验证 | `test/preparation.test.mjs` 缺 Agent/通道/需求负责包返回具体字段；`task-start` 未准备返回 `PREPARATION`；`test/hooks.test.mjs` 真实 hook 拒绝未准备开工 | 无；后续新任务沿用同一检查 |
+| A07 | 同一角色不同包选不同 Agent | 已验证 | `test/preparation.test.mjs` 同角色 W1/W2 不同 Agent 保留；`test/signal.test.mjs` 真实 CLI→Post 快照绑定；`test/hooks.test.mjs` 逐包核对 | 无；新增包时重新确认选择 |
+| A08 | 已确认计划换会话、换电脑 | 人工待验 | `test/preparation.test.mjs` 用两个独立状态目录和同一计划/输入恢复相同安排，证明不依赖原会话 ID；尚未在真实第二台电脑或真实换会话中读取已保存计划 | 在另一台电脑或新会话按交接步骤读取同一计划并确认安排一致；Lead |
+| A09 | 用户提出新分包 | 人工待验 | `test/r2-regressions.test.mjs` 的“R2 中 5”用例覆盖新包替换/移除与在途包保护，`test/hooks.test.mjs` 覆盖准备更新与 dispatched 包保护；这些测试只构造 `confirmation` 声明，不能证明 Lead 真实展示了变化后的包并请用户指定 Agent | 下一个真实新分包时观察 Lead 是否展示变化后的包并请用户指定 Agent 与通道，记录实际询问顺序；Lead |
+| A10 | 准备阶段读代码、写计划 | 已验证 | `test/hooks.test.mjs` 读取与计划写入放行、业务写入拒绝；`docs/acceptance.md` 10.7 真实 Claude 会话 Read、指定 plan 的 Write/Edit 放行 | 真实 MCP/Notebook 入口未验，见 A11 边界 |
+| A11 | 准备不齐时尝试业务修改/实施委派 | 已验证 | `docs/acceptance.md` 10.7/10.8：真实 Claude `PreToolUse` 拒绝业务 Write/Edit 与 Agent；`test/hooks.test.mjs` 覆盖委派、role-claim、通道与包核对。未覆盖：真实 MCP、NotebookEdit、文件符号链接、Codex/Codeg ACP、任意 shell 写 | 在真实 MCP/Notebook 可用时补拒绝样本；Lead |
+| A12 | 所有包 PASS 但原需求漏项 | 已验证 | `test/gate.test.mjs` W3 用例：全部包 PASS 但缺 `validation.acceptance` 条目时返回 `GATE` 的 `acceptance:A02`，补齐后才接受 | 无；Lead 和 Reviewer 仍需核证据内容 |
+| A13 | 只更新进度或日志链接 | 已验证 | `test/r2-regressions.test.mjs` W3 用例：漏传旧需求/旧包时合并保留；需求与包无意义顺序不构成实际变化 | 无；进度更新不重问需求与 Agent |
+| A14 | UI 需用户操作验收 | 人工待验 | `test/gate.test.mjs` 覆盖程序侧：`manual-pending` 必须有 owner/next，阶段结束回执 `allVerified:false` 并列出剩余项；尚无真实 UI 操作记录 | 下一个人工待验项由用户按步骤操作并回报；用户/Lead |
+| A15 | 本机运行失败或 Agent 不可用 | 人工待验 | 文档要求如实报告，未做一次真实失败/不可用 Agent 的短任务演练 | 在真实失败时记录实际报错、未启动项和替代说明；Lead |
+| A16 | 中断后接续 | 已验证 | `test/signal.test.mjs`、`test/gate.test.mjs` 的 suspended/接续与 `task-start` 保留原目标；未做真实宿主长会话恢复 | 真实中断会话恢复按 `docs/adapters` 步骤复核；Lead |
+| A17 | 交付新分包并请用户选 Agent | 人工待验 | 计划、Lead 入口和 Stop 提示要求先说明顺序再逐包选择；尚未用真实新分包观察用户是否被正确询问 | 下一个真实分包时记录询问顺序；Lead |
+| A18 | 不使用 Codeg，通过已有原生入口工作 | 已验证 | `docs/acceptance.md` 10.7/10.8 真实 Claude Code 路径；`test/adapters.test.mjs` 与 hooks 测试；公共提示不要求 Codeg | 无；Codeg 不是使用前提 |
+| A19 | 用户想换一种管理 Agent 的软件 | 人工待验 | 现有原生入口已由 `docs/acceptance.md` 10.7/10.8 真实验证；独立本机状态、换会话资料复用和同一计划重建安排由 `test/preparation.test.mjs`、`test/r2-regressions.test.mjs` 与 hooks/adapters 测试覆盖；本轮尚未在真实换用另一套管理软件后的项目里走一次完整短任务。Herdr 本体安装、配置、专用接入和实测明确不在本轮范围，但不等于整项 A19 延期 | 换用另一种原生入口或新会话，按同一计划重建准备并完成一次真实短任务，记录资料复用与未覆盖项；Herdr 另列接入任务；Lead |
+| A20 | 整理公共流程与 Codeg 接入后原有能力仍可用 | 受阻 | `src/adapters/codeg.mjs` 提取与合成测试通过；真实 Codeg ACP 未运行，无法证明派工、提问、等待和结果提示实际可用 | 在 Codeg 实际环境回归派工/提问/等待/role-claim；Lead |
+| A21 | 软件显示空闲或恢复了会话 | 人工待验 | 程序不把宿主空闲/恢复自动记为审查通过或授权续跑；尚无真实管理软件观察记录 | 在 Codeg/Herdr 实际入口观察一次空闲与恢复；Lead |
+
+**本节边界：** A01–A21 的分类只反映 2026-11-01 的实际证据。`已验证` 中的自动化项可复跑对应 `node --test` 文件；真实宿主项以 `docs/acceptance.md` 10.7/10.8 为限。A01、A02、A04、A05、A08、A09、A14、A15、A17、A19、A21 仍需真实短任务、真实换机/换会话、真实 UI 操作或真实软件观察，不能用程序测试替代。A19 只把 Herdr 本体安装、配置、专用接入和实测列为范围外，不把整项 A19 延期；其原生入口与独立状态资料复用已有 10.7/10.8 和准备/接续测试覆盖，真实换软件复用仍按人工待验记录。其他事项没有据此自动延期。A20 的真实 Codeg ACP 未运行，不把合成测试写成已通过。

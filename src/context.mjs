@@ -1,6 +1,6 @@
 import { fail, readState } from './store.mjs';
 import { PRODUCT_VERSION, cliPath, command, docPath, shellValue } from './entry.mjs';
-import { sessionKey, taskKey } from './protocol.mjs';
+import { acceptanceSummary, sessionKey, taskKey } from './protocol.mjs';
 import { preparationSummary } from './preparation.mjs';
 import { resolveProject } from './projects.mjs';
 import { inspectAlignment } from './alignment.mjs';
@@ -67,12 +67,15 @@ function alignmentAction(alignment) {
 export function compactLedger(task) {
   const packages = Object.values(task?.packages || {});
   if (!task || (!packages.length && !task.route)) return null;
+  // 已完成任务也给一行验收汇总，接手者据此区分全部验证、人工待验、受阻与延期。
+  const acceptance = acceptanceSummary(task);
   return {
     lifecycle: task.lifecycle,
     route: task.route || null,
     ...(task.channels ? { channels: task.channels } : {}),
     packages: packages.map(p => [p.packageId, p.role, p.status, p.deliveredRef || '-', p.role === 'reviewer' ? `${p.verdict || '-'}@${p.reviews || '-'}:${p.reviewedRef || '-'}` : '-', p.attempts || 0, p.channel || '-', p.supersededBy ? `>${p.supersededBy}` : '-'].join(' ')),
     validation: task.validation ? task.validation.ref : null,
+    ...(acceptance ? { acceptance: { total: acceptance.total, verified: acceptance.verified, manualPending: acceptance.manualPending, blocked: acceptance.blocked, deferred: acceptance.deferred, allVerified: acceptance.allVerified } } : {}),
     changes: task.changes?.length || 0,
   };
 }
@@ -112,7 +115,7 @@ export async function projectContext(state, resolved, role = 'lead', sessionId, 
   const pending = Object.values(state.pending).filter(p => p.projectId === project.projectId && p.kind === 'knowledge-pending' && p.status === 'open').slice(0, 1);
   const identity = session && !session.interrupted ? { schemaVersion: 1, projectId: project.projectId, sessionId, taskId: session.taskId, turnId: session.turnId, ticket: session.ticket, interruptEpoch: session.interruptEpoch, expectedRevision: session.revision } : null;
   const instructions = {
-    lead: '首次或范围变化时读公共方法和 Lead 指引。交付完整实施计划时一次给出建议分流、工作包划分（几包、每包范围与依赖）；先说明执行顺序、串并行关系和理由，再按提问路径请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，无 Worker 的任务不问 Worker。只交付纯技术方案时按用户给定范围停在方案，不套用分包和逐包选择。新业务用 signal task-start 声明 route（identity.taskId 为空时自拟 taskId，如 task-<简短英文>；续接沿用原 ID）；同一任务改目标或增/减权限范围用 signal task-update（仅该任务有效 Lead；只记录本机声明，宿主只读/计划权限仍优先），不必结束重开；简单任务 lead-direct 用 task-start --size simple --size-reason "<理由>" 开工、task-end 收尾；复杂任务先用 prepare 保存完整准备记录，准备不齐不能 task-start。结构化提问工具会自动记 waiting-user，文本提问先发 phase waiting-user；派发/消费/审查结论用 packages 记录：单个包用 --package 加 --status、--package-agent、--scope、--channel、--ref 等便捷参数（reviewer 结果加 --verdict/--reviews），同批多个包或 change 用 --input（handle 填委派 ID，channel 填实际通道；task-start 的 channels 只能按角色各记一个，同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包选择为准；开工时固定的准备记录会按包 ID 核对 role/agent/channel/scope，新增、拆分或重新分包需先请用户确认并更新 prepare；换新 packageId 返修用 supersedes）。明确纠正、失败原因或已验证方法出现时按 learningGuide 用 knowledge capture 保存；任务开始或范围变化用 knowledge select 检索经验。当前用户要求优先于历史经验。受委派的工作包会话（给出 packageId 与 worker/reviewer 角色）不按 Lead 行事：先 signal role-claim --role <角色> --package <packageId> --task <父活动任务ID>，再读对应角色指引；缺 --task 的声明会被拒绝，不能生成未绑定的伪成功。',
+    lead: '首次或范围变化时读公共方法和 Lead 指引。交付完整实施计划时一次给出建议分流、工作包划分（几包、每包范围与依赖）；先说明执行顺序、串并行关系和理由，再按提问路径请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，无 Worker 的任务不问 Worker。只交付纯技术方案时按用户给定范围停在方案，不套用分包和逐包选择。新业务用 signal task-start 声明 route（identity.taskId 为空时自拟 taskId，如 task-<简短英文>；续接沿用原 ID）；同一任务改目标或增/减权限范围用 signal task-update（仅该任务有效 Lead；只记录本机声明，宿主只读/计划权限仍优先），不必结束重开；简单任务 lead-direct 用 task-start --size simple --size-reason "<理由>" 开工、task-end 收尾；复杂任务先用 prepare 保存完整准备记录，准备不齐不能 task-start。完整流程收尾时在 task-end 的 validation.acceptance 按准备记录逐条给验收 ID 的状态（verified、manual-pending、blocked、deferred）和最终证据；manual-pending 要写负责人与可操作步骤，deferred 要写用户同意依据。所有包 PASS 不代表整项需求已验收，记录齐全也不等于内容真实，Lead 和 Reviewer 仍需核对证据。结构化提问工具会自动记 waiting-user，文本提问先发 phase waiting-user；派发/消费/审查结论用 packages 记录：单个包用 --package 加 --status、--package-agent、--scope、--channel、--ref 等便捷参数（reviewer 结果加 --verdict/--reviews），同批多个包或 change 用 --input（handle 填委派 ID，channel 填实际通道；task-start 的 channels 只能按角色各记一个，同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包选择为准；开工时固定的准备记录会按包 ID 核对 role/agent/channel/scope，新增、拆分或重新分包需先请用户确认并更新 prepare；换新 packageId 返修用 supersedes）。明确纠正、失败原因或已验证方法出现时按 learningGuide 用 knowledge capture 保存；任务开始或范围变化用 knowledge select 检索经验。当前用户要求优先于历史经验。受委派的工作包会话（给出 packageId 与 worker/reviewer 角色）不按 Lead 行事：先 signal role-claim --role <角色> --package <packageId> --task <父活动任务ID>，再读对应角色指引；缺 --task 的声明会被拒绝，不能生成未绑定的伪成功。',
     worker: '先读公共方法和 Worker 指引。只读工作包直接资料，必要的直接依赖可读；按阶段或范围变化说明【目标】和最小读取范围。不加载 Lead 调度，不递归创建代理，不发 task-start/packages。协作需要 workflow 身份而当前没有时，停止寻找并报告 Lead。复用有效证据；包内已授权的补测直接做，范围外补测先说明缺口交 Lead。发现随正常交付回报。',
     reviewer: '先读公共方法、Reviewer 指引和工作包指定范围。只读审查，不改源码、测试或配置，不递归创建代理，不发 task-start/packages。没有 workflow 身份时，停止寻找并报告 Lead。复用与待审版本匹配的证据；包内已授权的定向检查直接做，范围外补测先说明缺口交 Lead。完成即交回。',
   };

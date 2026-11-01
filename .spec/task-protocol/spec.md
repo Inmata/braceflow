@@ -15,8 +15,9 @@ related:
 
 ## 目标
 
-- 新任务必须显式声明合法的 `route`（`operation-only`、`lead-direct`、`delegated`）；漏填或值非法返回 `ROUTE`，不建立任务。三种分流的原有契约不变：`operation-only` 跳过 spec 与 delegated 门禁，`lead-direct` 只做 spec 检查，`delegated` 另核对包终态、审查与 validation。`route` 只决定门禁与检查范围，不是任务复杂度认证；用户明确要求 Worker/Reviewer 时，Lead 不得借 `operation-only` 或 `lead-direct` 消除已要求的分工。用户指定 `channels` 后，工作包通道偏离（含漏填，或 delegated 的 worker 包由 Lead 实施）必须在同一 `packages` 信号用 `change.packages` 记录并先取得用户同意，否则返回 `CHANNEL`；不能先声明错误通道再以实际执行与声明一致为由通过。
+- 新任务必须显式声明合法的 `route`（`operation-only`、`lead-direct`、`delegated`）；漏填或值非法返回 `ROUTE`，不建立任务。三种分流的原有契约不变：`operation-only` 跳过 spec 与 delegated 门禁；`lead-direct` 做 spec 检查，复杂 `lead-direct`（有准备需求且非只读、非简单）还要按需求 ID 核对 `validation` 与验收矩阵；`delegated` 另核对包终态与审查。`route` 只决定门禁与检查范围，不是任务复杂度认证；用户明确要求 Worker/Reviewer 时，Lead 不得借 `operation-only` 或 `lead-direct` 消除已要求的分工。用户指定 `channels` 后，工作包通道偏离（含漏填，或 delegated 的 worker 包由 Lead 实施）必须在同一 `packages` 信号用 `change.packages` 记录并先取得用户同意，否则返回 `CHANNEL`；不能先声明错误通道再以实际执行与声明一致为由通过。
 - 历史任务按任务记录自身识别：记录不存在即新任务；记录存在但没有 `route` 字段时视为旧版本任务，允许续接，可在续接时补声明一次，声明后不可更改。不引入迁移字段，也不改写历史数据。
+- `prepare` 在尚无活动任务时保存会话级准备记录（需求、调研、方案、分包、逐包 `role`/`agent`/`channel`/`scope`、验证、确认与来源），不创建任务或账本。复杂任务 `task-start` 必须绑定无缺项记录，并把 `size`、来源摘要、需求和逐包选择固定到 `task.preparation`；简单任务要求非空理由，`operation-only` 保持轻量路径。`packages` 按包 ID 核对准备快照；已开工任务用 `task-update` 的 `preparation`+`preparationReason` 更新，按包 ID 与需求 ID 合并，未列出的旧内容保留，无意义顺序不构成实际变化。
 - `task-start` 接续保留原 `goal` 与 `permissions`；新任务缺 `goal`、`permissions` 或 `route` 时回执点名缺项。
 - 已登记工作包的 `role` 不可修改；需要更换角色时新建接替包，不能借改 `role` 改写既有审查与取消事实。
 - 信号只在当前 shell 确实直接执行本安装副本的 `signal` 子命令后由 PostToolUse 接受；完整 payload 与便捷子命令走同一协议校验。拒绝时业务状态整体回滚；宿主 `permission_mode` 属于当前事件的可信观测，不随信号声明回滚，普通工具事件在模式变化时也会同步该观测。
@@ -36,6 +37,11 @@ related:
 - 三种合法 `route` 的新任务均被接受并记录到任务；`route` 缺失、`null`、空串或未知值返回 `ROUTE`，状态中不留下任务。
 - 历史无 `route` 任务续接被接受并返回 `kept`；补声明后记录生效，再次声明其他分流返回 `ROUTE`；补声明 `delegated` 后 `task-end` 按 delegated 门禁列出缺项。
 - 未声明的历史任务 `task-end` 接受并附 `warning:'route-missing'`，spec 漂移仍被检查。
+- 复杂任务无完整准备、未声明简单或未声明 `operation-only` 时 `task-start` 返回 `PREPARATION` 且不建立任务；已有旧任务续接保持兼容。准备快照绑定后，`packages` 按包 ID 核对 `role`/`agent`/`channel`/`scope`，未声明或字段不一致整批不落盘。
+- `task-update` 只在目标或权限变化时要求同批准备更新；按包 ID 和需求 ID 合并，漏传旧包或旧需求不会删除已确认内容，倒序或仅顺序变化不算实际变化。合并后按最终快照核对所有需求的负责 worker 包和包依赖，保留需求仍指向被移除包时返回 `PREPARATION` 并点名具体需求 ID 与包 ID；同批把需求迁到现存 worker 包则接受。需求内容实际变化时只失效对应 ID 的旧 `validation.acceptance` 声明，未变化条目的证据、进度和原顺序保留。复杂任务不能降为简单记录，非终态包不能静默改选择或移除。
+- 复杂 `lead-direct` 与 `delegated` 的 `task-end` 按准备记录的稳定需求 ID 核对 `validation.acceptance`：缺条目或未知 ID 返回 `GATE` 的 `acceptance:<id>`/`acceptance-unknown:<id>`。`verified` 必须有证据，`manual-pending` 必须有负责人和步骤，`blocked` 必须有原因和下一步，`deferred` 必须有原因和用户同意依据；简单任务、`operation-only`、`read-only` 和没有 route 的历史任务不要求矩阵。
+- 适用验收矩阵时，`validation` 与 `acceptance:<id>`/`acceptance-unknown:<id>` 缺项不能用 waiver（类别或精确条目）抵扣；只能补齐，或用 `manual-pending`/`blocked`/`deferred` 如实阶段结束。旧任务没有矩阵时保留原 waiver 兼容。
+- 合法的人工待验/受阻/延期允许阶段结束，回执返回各状态数量、剩余项和 `allVerified:false`；`finalRef` 变化后旧 `validation` 不再匹配，必须按新版本重新提交。门禁与回执只核对声明记录，不证明证据内容真实。
 - 经真实 PostToolUse 的便捷子命令与完整 payload 得到相同的接受/拒绝行为；伪造输出、组合命令和非本插件入口不被接收。
 - 已有工作包改 `role` 返回 `PACKAGE`，原账本不变；新建同角色接替包可正常登记。宿主 `permission_mode` 变化后，普通工具事件也会同步该观测；信号被拒绝时业务声明回滚，但已观测到的宿主模式保留。
 - 用户指定分工后，`operation-only`/`lead-direct` 不能消除用户要求的 Worker/Reviewer 分工；`route` 只决定门禁范围，不认证任务复杂度。通道偏离必须在同一 `packages` 信号附 `change.packages`，先声明错误通道再“实际执行与声明一致”不能绕过；未声明通道或未指定角色的旧行为不变。
@@ -54,6 +60,7 @@ related:
 - 不为历史任务自动补写 `route`，不把缺字段改写成默认值，也不提供迁移命令。
 - 不改变三种分流的契约与门禁缺项内容；`route` 一旦声明不可中途切换。`route` 与 `channel` 只是声明和门禁契约，不认证实际任务复杂度、只读事实、真实委派或代码是否集成；不增加自然语言分类器推断该用哪种分流，也不因文件数自动拆包。
 - `canceled` 只表示放弃该包改动，不证明代码已从最终 ref 消失；插件不伪造代码级集成证明，Lead 仍对集成结果负责。PASS 历史事实用于取消门禁、历史 canceled 复核与 waived/审查豁免的已审判定，不证明审查真实发生或代码已集成。诊断包的 `scope`、`reason` 与交付 `note` 只是声明与可定位文本，插件不验证进程实际未写、不提供沙箱，也不检查结论真实性；历史未声明包不回写、不自动补豁免，状态文件 schema 版本不变。
+- 验收矩阵只是交付声明：`verified` 的非空证据不自动证明测试或用户操作真实发生，`deferred` 的同意依据也不是插件对用户意图的识别；内容真实性由 Lead 和 Reviewer 核对。需求条目按 ID 合并保留，不支持借漏传静默删除。
 - 回执消费是宿主/模型行为边界：插件只保证拒绝原因可见、未落盘失败可安全幂等重发，不能保证模型一定阅读回执，也不自动猜测或重放失败信号。
 - 校验只放在协议层，不在 `signal.mjs` 复制一套规则；接收仍只认 PostToolUse 中可核对的直接调用。不覆盖宿主权限真实性的证明，也不代替用户授权；spec 的 Git 调用与预算留在 `src/spec.mjs`，协议只消费生产 Hook 预检的内部结果。`binding` 只随当次预检在内存中传递，不写状态、不做持久缓存；锁内复核的重解析上限独立于 4 秒预检预算，超时按过期处理。
 - 4 秒总预算与 10 秒单次上限只约束 Git 子进程；同步文件读取不检查也无法中断截止时间，其耗时仍会消耗绝对剩余量、缩短后续 Git 可用时间，因此 4 秒不保证整次预检或 Hook 的总时长；宿主自身超时和真实超大仓库的耗时同样不做承诺。不为慢检查新增调度器、持久缓存或 schema 字段。

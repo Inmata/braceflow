@@ -35,7 +35,7 @@ test('R2 真实 CLI role-claim 按 --task 绑定；两个活动任务的同名 W
   const preparation = {
     size: 'complex',
     sizeReason: '两个活动任务共享同名包，需要显式父子绑定',
-    requirements: [{ id: 'A01', summary: '绑定正确任务', acceptance: ['同名包不串写'] }],
+    requirements: [{ id: 'A01', summary: '绑定正确任务', acceptance: ['同名包不串写'], packages: ['W1'], verification: 'node --test test/role-claim-e2e.test.mjs' }],
     research: [{ source: '本仓 protocol.mjs', conclusion: '按 roleTaskId 查找' }],
     solution: { summary: 'role-claim 必须带父任务', decisions: [{ decision: '禁止按包 ID 首匹配', reason: '避免跨任务写入' }] },
     packages: [{ packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/a.mjs', delivers: '可验证实现', dependsOn: [] }],

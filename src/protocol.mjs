@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { deferredLifecycleEvents, digest, fail, id, lifecycleEvents, lifecycleScope, readDeferredLifecycleNote, samePath, SCHEMA_VERSION, WorkflowError } from './store.mjs';
 import { checkSpecs, describeFindings, verifySpecBinding } from './spec.mjs';
-import { mergePreparationSnapshot, normalizePreparation, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath } from './preparation.mjs';
+import { mergePreparationSnapshot, normalizePreparation, preparationConsistencyGaps, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath } from './preparation.mjs';
 import { isCodegChannel, codegWaitInstruction } from './adapters/codeg.mjs';
 
 export const PHASES = ['unknown', 'operation-only', 'executing', 'waiting-user', 'delivering'];
@@ -120,12 +120,58 @@ function channelDeviation(task, next) {
   if (task.route === 'delegated' && next.role === 'worker' && (next.channel === 'lead' || next.handle === 'lead-direct')) return '分工任务的 worker 包改由 Lead 实施';
   return null;
 }
+// 交付声明里的验收状态：verified 有最终证据；manual-pending 要负责人和可操作步骤；
+// blocked 要原因和下一步；deferred 必须写出用户同意依据，不能用“以后再说”冒充通过。
+export const ACCEPTANCE_STATUSES = ['verified', 'manual-pending', 'blocked', 'deferred'];
+const ACCEPTANCE_FIELDS = ['id', 'status', 'evidence', 'owner', 'next', 'reason', 'consent'];
+function acceptanceInput(value) {
+  if (!Array.isArray(value) || value.length > 50) fail('VALIDATION', 'validation.acceptance 需为不超过 50 项的数组');
+  const seen = new Set();
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) fail('VALIDATION', `validation.acceptance[${index}] 需为对象`);
+    const unknown = Object.keys(item).filter(key => !ACCEPTANCE_FIELDS.includes(key));
+    if (unknown.length) fail('VALIDATION', `validation.acceptance[${index}] 不支持字段 ${unknown.join('、')}`);
+    const id = identifier(item.id, `validation.acceptance[${index}].id`);
+    if (seen.has(id)) fail('VALIDATION', `validation.acceptance 不能重复验收 ID：${id}`);
+    seen.add(id);
+    if (!ACCEPTANCE_STATUSES.includes(item.status)) fail('VALIDATION', `validation.acceptance[${index}].status 须为 ${ACCEPTANCE_STATUSES.join('、')}`);
+    const text = (field, label) => {
+      if (item[field] === undefined || item[field] === null) return undefined;
+      textField(item[field], `validation.acceptance[${index}].${label}`);
+      return item[field];
+    };
+    const evidence = item.evidence === undefined ? [] : item.evidence;
+    if (!Array.isArray(evidence) || evidence.length > 50) fail('VALIDATION', `validation.acceptance[${index}].evidence 需为数组`);
+    evidence.forEach((entry, at) => textField(entry, `validation.acceptance[${index}].evidence[${at}]`));
+    const owner = text('owner', 'owner');
+    const next = text('next', 'next');
+    const reason = text('reason', 'reason');
+    const consent = text('consent', 'consent');
+    if (item.status === 'verified' && !evidence.length) fail('VALIDATION', `验收 ${id} 标记 verified 必须给出最终证据`);
+    if (item.status === 'manual-pending' && (!owner || !next)) fail('VALIDATION', `验收 ${id} 标记 manual-pending 必须给出负责人 owner 和可操作步骤 next`);
+    if (item.status === 'blocked' && (!reason || !next)) fail('VALIDATION', `验收 ${id} 标记 blocked 必须给出原因 reason 和下一步 next`);
+    if (item.status === 'deferred' && (!reason || !consent)) fail('VALIDATION', `验收 ${id} 标记 deferred 必须给出原因 reason 和用户同意依据 consent`);
+    return {
+      id,
+      status: item.status,
+      evidence,
+      ...(owner !== undefined ? { owner } : {}),
+      ...(next !== undefined ? { next } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(consent !== undefined ? { consent } : {}),
+    };
+  });
+}
 function validationInput(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('VALIDATION', 'validation 需为 {ref, evidence[]}');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('VALIDATION', 'validation 需为 {ref, evidence[], acceptance[]?}');
   identifier(value.ref, 'validation.ref');
   if (!Array.isArray(value.evidence) || !value.evidence.length || value.evidence.length > 50) fail('VALIDATION', 'validation.evidence 需非空数组');
   value.evidence.forEach((item, index) => textField(item, `validation.evidence[${index}]`));
-  return { ref: value.ref, evidence: value.evidence };
+  return {
+    ref: value.ref,
+    evidence: value.evidence,
+    ...(value.acceptance !== undefined ? { acceptance: acceptanceInput(value.acceptance) } : {}),
+  };
 }
 function waiverInput(value) {
   if (!Array.isArray(value) || value.length > 50) fail('WAIVER', 'waivers 需为数组');
@@ -572,13 +618,80 @@ function specMissing(state, task, finalRef, root, spec) {
   if (report.error) missing.push(`spec-check:${report.error}`);
   return { missing, findings: report.findings };
 }
+// 完整流程才逐条核对验收矩阵；简单任务、operation-only、只读任务和没有 route 的历史任务保持轻量，不制造空矩阵。
+// 复杂 lead-direct 也是完整实施：Lead 自己交付同样要按需求 ID 给出最终证据，不能只做 spec 检查就结束。
+// 需求存在但交付声明没给对应条目时，即使所有工作包都已 PASS，也不能宣称整项需求完成。
+function acceptanceApplies(task) {
+  const requirements = task?.preparation?.requirements;
+  return Array.isArray(requirements) && requirements.length > 0
+    && (task.route === 'lead-direct' || task.route === 'delegated')
+    && task.permissions?.mode !== 'read-only'
+    && task.size !== 'simple';
+}
+export function acceptanceMissing(task) {
+  if (!acceptanceApplies(task) || !task.validation) return [];
+  const requirements = task.preparation.requirements;
+  const entries = Array.isArray(task.validation.acceptance) ? task.validation.acceptance : [];
+  const declared = new Set(entries.map(item => item.id));
+  const known = new Set(requirements.map(item => item.id));
+  const missing = [];
+  for (const requirement of requirements) {
+    if (!declared.has(requirement.id)) missing.push(`acceptance:${requirement.id}`);
+  }
+  for (const entry of entries) {
+    if (!known.has(entry.id)) missing.push(`acceptance-unknown:${entry.id}`);
+  }
+  return missing;
+}
+// 回执只汇总状态与剩余项；内容真实性仍由 Lead 和 Reviewer 核对，非空证据不自动等于真实通过。
+export function acceptanceSummary(task) {
+  if (!acceptanceApplies(task)) return null;
+  const requirements = task.preparation.requirements;
+  const entries = Array.isArray(task.validation?.acceptance) ? task.validation.acceptance : [];
+  const byId = new Map(entries.map(item => [item.id, item]));
+  const counts = { verified: 0, 'manual-pending': 0, blocked: 0, deferred: 0 };
+  const remaining = [];
+  const missing = [];
+  for (const requirement of requirements) {
+    const entry = byId.get(requirement.id);
+    if (!entry) { missing.push(requirement.id); continue; }
+    counts[entry.status] += 1;
+    if (entry.status !== 'verified') {
+      remaining.push({
+        id: entry.id,
+        status: entry.status,
+        ...(entry.owner ? { owner: entry.owner } : {}),
+        ...(entry.next ? { next: entry.next } : {}),
+      });
+    }
+  }
+  return {
+    total: requirements.length,
+    verified: counts.verified,
+    manualPending: counts['manual-pending'],
+    blocked: counts.blocked,
+    deferred: counts.deferred,
+    missing,
+    remaining,
+    allVerified: counts.verified === requirements.length && missing.length === 0,
+    note: '验收状态来自交付声明；verified 仍需 Lead 和 Reviewer 核对证据内容，manual-pending、blocked、deferred 不是全部验收通过。',
+  };
+}
 export function gateReport(state, task, finalRef, root, spec) {
   const missing = [];
   for (const child of Object.values(state.tasks)) {
     if (child.projectId === task.projectId && child.parentTaskId === task.taskId && child.lifecycle === 'active') missing.push(`child:${child.taskId}`);
   }
   const specResult = specMissing(state, task, finalRef, root, spec);
-  if (task.route !== 'delegated') return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic: [] };
+  if (task.route !== 'delegated') {
+    // 复杂 lead-direct 没有 delegated 的包终态/审查门禁，但 validation 与需求验收矩阵同样适用。
+    // 在 route 提前返回前检查，避免“准备里写了需求、交付声明一条不给”也能 task-end。
+    if (acceptanceApplies(task)) {
+      if (!task.validation || (finalRef && task.validation.ref !== finalRef)) missing.push('validation');
+      missing.push(...acceptanceMissing(task));
+    }
+    return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic: [] };
+  }
   const packages = Object.values(task.packages || {});
   for (const item of packages) if (!TERMINAL_PACKAGE.includes(item.status)) missing.push(`terminal:${item.packageId}`);
   const passTargets = passTargetsOf(task);
@@ -597,6 +710,8 @@ export function gateReport(state, task, finalRef, root, spec) {
   }
   // 验证证据必须绑定集成后的最终版本；finalRef 缺省时以 validation.ref 为准。
   if (!task.validation || (finalRef && task.validation.ref !== finalRef)) missing.push('validation');
+  // 版本变化后旧 validation 失效；验收矩阵随交付声明一起重报，不能沿用旧版本证据。
+  missing.push(...acceptanceMissing(task));
   return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic };
 }
 // 豁免可写完整条目（review:pkg-1）或整类步骤（review）；spec 漂移任何豁免都不抵扣。
@@ -604,8 +719,14 @@ export function gateReport(state, task, finalRef, root, spec) {
 // 预检过期（spec-check:stale）不属于“检查不了”，只能重试；类别 spec-check 的旧豁免也不能抵扣它。
 const reviewed = (task, entry) => entry.startsWith('review:') && wasReviewed(task, task.packages?.[entry.slice('review:'.length)]);
 // diagnostic:<id> 是只读诊断包的交付结论缺项：必须补结论，不能用 waiver 抵扣。
-const waived = (task, entry, waivers) => !(entry === 'spec' || entry.startsWith('spec:') || entry === 'spec-check:stale' || entry.startsWith('diagnostic:'))
-  && !reviewed(task, entry) && waivers.some(w => w.step === entry || w.step === entry.split(':')[0]);
+// 适用验收矩阵时，validation 与 acceptance 条目是整项交付的必需记录：不能靠 waiver 抵扣；
+// 真实的人工待验/受阻/延期要用对应状态如实结束，而不是豁免成“通过”。旧任务没有矩阵时保持原豁免兼容。
+const waived = (task, entry, waivers) => {
+  if (entry === 'spec' || entry.startsWith('spec:') || entry === 'spec-check:stale' || entry.startsWith('diagnostic:')) return false;
+  if (reviewed(task, entry)) return false;
+  if (acceptanceApplies(task) && (entry === 'validation' || entry.startsWith('acceptance:') || entry.startsWith('acceptance-unknown:'))) return false;
+  return waivers.some(w => w.step === entry || w.step === entry.split(':')[0]);
+};
 // 准备更新的显式目标：新增准备必须能对得上本次目标与权限，而不仅是“理由非空”。
 function preparationTargetInput(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('PREPARATION', 'preparationTarget 需为 {goal, permissions:{mode, allowedPaths}}');
@@ -720,6 +841,18 @@ function updateTask(payload, task, session, root) {
       if (record.packages.some(item => item.packageId === packageId)) fail('PREPARATION', `工作包 ${packageId} 同时出现在 preparation 与 preparationRemove 中；移除和保留只能选一种`);
     }
     const merged = mergePreparationSnapshot(task.preparation, record, { removePackageIds: removeIds });
+    // 本次记录自身完整不代表合并结果完整：保留的旧需求可能仍指向已被移除的工作包。
+    // 拒绝时点名具体需求与包，不能用“只校验 incoming”或暗删旧需求绕过。
+    const consistency = preparationConsistencyGaps(merged.snapshot);
+    if (consistency.length) preparationFailure(consistency, '合并后的准备记录存在未登记或不匹配的引用');
+    // 需求内容变化后，旧验收证据不再对应当前验收句子/负责包：只失效变化 ID 的声明，
+    // 未变化条目的证据、进度和原顺序继续保留；重新交 task-end 时会按新需求再列缺项。
+    let invalidatedAcceptance = [];
+    if (merged.changedRequirements.length && Array.isArray(task.validation?.acceptance)) {
+      const stale = new Set(merged.changedRequirements);
+      invalidatedAcceptance = task.validation.acceptance.filter(entry => stale.has(entry.id)).map(entry => entry.id);
+      if (invalidatedAcceptance.length) task.validation.acceptance = task.validation.acceptance.filter(entry => !stale.has(entry.id));
+    }
     // 活动包不能被静默换 Agent/范围：先结束或接替该包，再更新准备。
     for (const packageId of merged.changed) {
       const pkg = task.packages?.[packageId];
@@ -747,7 +880,7 @@ function updateTask(payload, task, session, root) {
     }
     if ((goalChanged || scopeExpanded)
       && preparationSnapshotSignature(merged.snapshot) === preparationSnapshotSignature(task.preparation)
-      && !merged.changed.length && !merged.removed.length) {
+      && !merged.changed.length && !merged.removed.length && !merged.changedRequirements.length) {
       preparationFailure([{
         field: 'preparation:update',
         message: '准备记录与上次相比没有实际变化；目标或权限变化需要新增/调整包、移除包或更新计划来源，不能只重放旧记录',
@@ -759,13 +892,24 @@ function updateTask(payload, task, session, root) {
       changed: merged.changed,
       removed: merged.removed,
       preserved: merged.preserved,
+      changedRequirements: merged.changedRequirements,
+      preservedRequirements: merged.preservedRequirements,
+      invalidatedAcceptance,
       before: task.preparation || null,
       after: merged.snapshot,
     });
     task.preparation = merged.snapshot;
     task.size = merged.snapshot.size;
     task.sizeReason = merged.snapshot.sizeReason;
-    preparationChange = { reason: payload.preparationReason.trim(), changed: merged.changed, removed: merged.removed, preserved: merged.preserved };
+    preparationChange = {
+      reason: payload.preparationReason.trim(),
+      changed: merged.changed,
+      removed: merged.removed,
+      preserved: merged.preserved,
+      changedRequirements: merged.changedRequirements,
+      preservedRequirements: merged.preservedRequirements,
+      invalidatedAcceptance,
+    };
   }
   if (goal !== undefined) task.goal = goal;
   if (hasPermissions) task.permissions = { ...task.permissions, ...(mode !== undefined ? { mode } : {}), ...(paths !== undefined ? { allowedPaths: nextPaths } : {}) };
@@ -994,6 +1138,9 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
       else if (task.route === 'delegated') extra = { gate: 'declared-records-consistent' };
       const stale = unchangedPlans(state, task, root);
       if (stale.length) extra = { ...extra, planUnchanged: stale, reminder: planReminder(stale) };
+      // 阶段交付如实区分：门禁通过只表示记录齐全与格式有效，不表示所有验收都已由用户或真实入口证明。
+      const acceptance = acceptanceSummary(task);
+      if (acceptance) extra = { ...extra, acceptance };
     } else if (payload.action !== 'disposition') fail('ACTION', '未知信号动作');
     if (payload.action === 'disposition' || payload.disposition) {
       if (payload.deliveryId !== session.deliveryId || !task.deliveries[payload.deliveryId]) fail('DELIVERY', '交付身份不匹配');

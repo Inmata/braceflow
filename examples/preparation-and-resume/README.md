@@ -38,6 +38,15 @@
 
 示例中的 Agent 和通道只是这一次的用户选择，不是角色默认值；以后重新分包要重新确认。用户只指定 Agent 而当前工具通道唯一时，由 Lead 按可用工具填写通道，不要求用户另一次确认，也不把 Codeg 写成固定入口。
 
+同时保存需求对应表，给每条需求稳定 ID、负责实施包和检查入口：
+
+| 需求 | 验收句子 | 负责包 | 检查入口 |
+| --- | --- | --- | --- |
+| A01 | 取消后旧响应不覆盖新结果，正常登录仍成功 | W1 | `node --test test/login.test.mjs` |
+| A02 | 真实登录页在慢网络下 3 秒内给出反馈 | W1 | 用户按步骤打开登录页操作 |
+
+准备记录中的 `requirements` 要写 `packages: ["W1"]` 和 `verification`；负责包只能是实施包。缺负责包或缺检查入口时，回执按需求 ID 返回 `requirement:A01:packages` 或 `requirement:A01:verification`，不能只用“包都 PASS”说明需求完成。
+
 ### 保存
 
 计划正文写入项目 Markdown，再用 `signal prepare` 保存结构化摘要。源计划是项目内相对路径的 Markdown 文件；程序读取文件并记录内容摘要，不解析 Markdown。
@@ -77,4 +86,23 @@ Lead 先读计划 Markdown，确认其中已有需求、方案、包 ID、依赖
 
 `pending` 表示还没确认的待决事项，按阻塞缺项处理：只要列表非空，回执和入口都显示具体缺项，不能宣称准备已齐；非阻塞说明放到 `solution.assumptions`。
 
-当前边界：`prepare` 只保存准备记录和缺项，不创建任务；记录齐全后，delegated 任务用 `task-start --route delegated` 开工，并把 `size`、源计划摘要和逐包 `role`/`agent`/`channel`/`scope` 固定到任务。开工后的 `packages` 按包逐项核对，实际委派还要带 `workflow-package:<包ID>` 并核对宿主工具 schema；准备未齐、未声明简单或没有准备的新任务在协议层和 PreToolUse 都会被拒。`scope` 是负责范围声明，不是路径/语义沙箱。真实宿主对 `prepare`、`task-start` 和拦截效果的验证以实际运行与定向测试为准，本示例不冒充宿主验收。
+### 阶段交付与再次接续
+
+收尾时按同一批需求 ID 提交 `validation.acceptance`。例如自动测试已过、真实登录页还要用户操作：
+
+```json
+{
+  "validation": {
+    "ref": "abc1234",
+    "evidence": ["node --test test/login.test.mjs: 12 通过"],
+    "acceptance": [
+      { "id": "A01", "status": "verified", "evidence": ["node --test test/login.test.mjs: 12 通过"] },
+      { "id": "A02", "status": "manual-pending", "owner": "用户", "next": "用慢速网络打开登录页，确认 3 秒内出现反馈" }
+    ]
+  }
+}
+```
+
+回执会返回 `verified:1`、`manualPending:1`、`allVerified:false` 和 A02 的负责人/下一步。这是如实的阶段交付，不是全部验收通过；计划里同步写“A01 已验证、A02 人工待验、下一步由用户操作”，下次接续直接从这里继续。如果交付版本从 `abc1234` 变成新提交，旧证据不再匹配，要按新版本重新提交 `validation` 和状态。`deferred` 还必须写用户同意的依据，不能因为换了会话就默认延期获批。
+
+当前边界：`prepare` 只保存准备记录和缺项，不创建任务；记录齐全后，delegated 任务用 `task-start --route delegated` 开工，并把 `size`、源计划摘要、需求/负责包/检查入口和逐包 `role`/`agent`/`channel`/`scope` 固定到任务。开工后的 `packages` 按包逐项核对，实际委派还要带 `workflow-package:<包ID>` 并核对宿主工具 schema；准备未齐、未声明简单或没有准备的新任务在协议层和 PreToolUse 都会被拒。`scope` 是负责范围声明，不是路径/语义沙箱。真实宿主对 `prepare`、`task-start` 和拦截效果的验证以实际运行与定向测试为准，本示例不冒充宿主验收。
