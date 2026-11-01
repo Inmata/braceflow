@@ -10,7 +10,7 @@
 | 需要讨论、调研或拆包 | [准备流程](../references/preparation.md) |
 | 派发 Worker/Reviewer | [协作](../references/delegation.md) |
 | 写计划、建或改 spec、按计划实施、归档计划 | [spec 与计划](../references/spec-plan.md) |
-| UI 工作 | [UI 设计流程](../references/design.md) |
+| UI 工作 | [UI 设计流程](../references/ui-design.md) |
 | 故障诊断 | 本页“诊断” |
 
 ## 要点
@@ -36,4 +36,4 @@
 
 ## 设计
 
-UI 工作按场景选择流程。已指定颜色、间距、文案等局部小改直接改现有组件并给实际效果；新信息架构、流程变化和整体改版保留必要方向确认；用户明确要求用图片选方案时照做。其余流程见 [UI 设计流程](../references/design.md)。
+UI 工作按场景选择流程。已指定颜色、间距、文案等局部小改直接改现有组件并给实际效果；新信息架构、流程变化和整体改版保留必要方向确认；用户明确要求用图片选方案时照做。其余流程见 [UI 设计流程](../references/ui-design.md)。
