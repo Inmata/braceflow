@@ -416,7 +416,7 @@ test('插件在会话中途升级时提示开新会话；旧发布副本的入�
   await mkdir(old, { recursive: true });
   await writeFile(path.join(old, 'workflow.mjs'), '');
   f.turnId = 'turn-2';
-  const payload = { ...await identity(f), taskId: f.taskId, signalId: 'signal-old-entry', action: 'task-start', goal: '旧入口', route: 'lead-direct', permissions: { mode: 'read-only', allowedPaths: [] } };
+  const payload = { ...await identity(f), taskId: f.taskId, signalId: 'signal-old-entry', action: 'task-start', goal: '旧入口', route: 'lead-direct', size: 'simple', sizeReason: '旧入口传输测试', permissions: { mode: 'read-only', allowedPaths: [] } };
   const accepted = await handleHook(f.directory, { hook_event_name: 'PostToolUse', cwd: f.project, session_id: f.sessionId, turn_id: f.turnId, tool_name: 'Bash', tool_input: { command: `node "${path.join(old, 'workflow.mjs')}" signal --base64 e30=` }, tool_response: { output: JSON.stringify({ workflow_signal: payload }) } }, { synthetic: true, entry });
   assert.ok(accepted.hookSpecificOutput.additionalContext.startsWith('workflow 回执：{"accepted":true'), JSON.stringify(accepted));
 });

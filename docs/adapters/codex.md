@@ -23,6 +23,7 @@ Codex 事件带 `turn_id`，用它关联一次用户回合；入口事件缺失�
 | --- | --- |
 | SessionStart | 注入 Lead 入口上下文；`source=compact` 时保留既有任务与预算 |
 | UserPromptSubmit | 开新回合（新票据），注入 Lead 入口上下文 |
+| PreToolUse | 读取父会话的准备/任务状态：未开工时拦业务写入、实施委派和本插件 `task-start`/`packages` 命令；只读、写计划、`prepare` 放行；活动任务按声明的 read-only/plan 权限再核对；worker 实施与 reviewer 审查委派都须带 `workflow-package:<包ID>` 并核对 `spawn_agent` 的 `task_name`/`message`、通道、关联任务与 Agent；带包标记的委派即使声明只读类型也走包核对；diagnostic 包不能借 `spawn_agent` 取得写入 |
 | PostToolUse | 只在命令是直接调用本插件 `signal` 时读取输出并返回回执；委派状态查询只追加等待提示 |
 | Stop | 回合结束核对：有在途包时挡一次要求继续等待或说明暂停；无在途包而任务未 task-end 时挡一次列出缺项；不要求经验处置或追加复盘轮次 |
 | Interrupt | 按中断保存：撤销票据、保留任务待办，不自动续跑 |
@@ -53,6 +54,20 @@ PostToolUse 只在本插件 `signal` 直接调用时读取命令输出；组合�
 | 运行中追加消息 / 暂停 / 取消 / 中断恢复 / 批量 wait | 取决于实际入口；使用 Codeg 委派时见 [Codeg 能力表](codeg.md#宿主能力表) | 工具清单 |
 
 Codex 的计划模式不进入 hook 的 `permission_mode`，插件的计划会话提示和写入保护在 Codex 上只依赖任务声明的 `permissions.mode=plan|read-only`；Lead 在 Plan 模式下开任务须如实声明。
+
+### W2 真实宿主拒绝验收（2026-11-01）
+
+本机 Codex CLI 0.166.0、Node.js 24.19.0，隔离临时项目、`CODEX_HOME` 和状态目录；用当前源码 `install --agent codex` 后由 `codex exec` 实际触发。临时 `CODEX_HOME/config.toml` 的 `hooks.state."…".trusted_hash` 取自该隔离目录的 `hooks/list` `currentHash`，只让隔离副本变为 trusted；未修改真实用户配置，未使用 `--dangerously-bypass-approvals-and-sandbox`、`--dangerously-bypass-hook-trust` 或 `--ignore-user-config`。
+
+| 场景 | 实际结果 |
+| --- | --- |
+| 业务写入 | `apply_patch` 改 `src/a.mjs` 被 `PreToolUse` 拒绝，原文前缀为 `Command blocked by PreToolUse hook: 业务写入被拦下…`；文件未改变 |
+| 实施委派 | `collaborationspawn_agent` 被拒绝，原文前缀为 `Tool call blocked by PreToolUse hook: 实施委派被拦下…`；未启动子代理 |
+| 直接 `task-start` | 无准备、无简单声明时，`exec_command` 中的本插件 `signal task-start` 被拒绝，原文前缀为 `Command blocked by PreToolUse hook: 尚未保存准备记录…`；状态未新增任务 |
+
+权限与未覆盖说明：`codex exec` 非交互默认把 `permission_mode` 报为 `bypassPermissions`，这不是本轮传入的绕过旗标；拒绝发生在工具执行前，不依赖该模式。该隔离环境下 Codex 宿主沙箱仍报告 read-only，`exec_command` 读文件和 `apply_patch` 写计划资料都被宿主以 `blocked by policy` / `read-only sandbox` 先行拒绝，因此本轮没有取得 Codex 的读取放行、计划写入放行或简单任务 `task-start` 放行的真实结果；这些 allow 分支只有合成测试证据。`write_stdin`、命令启动后的外部写入和任意 shell 写文件不触发或无法可靠识别新的 PreToolUse，未做拦截承诺。
+
+后续宿主权限探针见[验收第 10.5 节](../acceptance.md#105-宿主权限隔离验证2026-11-01用户选择-a)：在未安装 workflow hook 的另一组隔离配置中，计划写入成功、必要业务读取被拒，所测 `unelevated` 配置允许改业务。两轮配置、工作根及入口不同，保留各自观察，不能据新结果否定上一轮记录，也不能据此宣称所有 Windows 配置不可行。当前所测组合未满足完整保证，独立复核仍为 NEEDS_FIX。
 
 ## 提问路径
 

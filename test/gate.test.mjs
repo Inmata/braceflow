@@ -10,9 +10,10 @@ import { acceptSignal, gateReport, openTurn, stop, taskKey } from '../src/protoc
 import { codexQuestionFeature, doctor } from '../src/install.mjs';
 import { attachWorktree } from '../src/projects.mjs';
 import { checkSpecs, precheckSpecs, verifySpecBinding } from '../src/spec.mjs';
-import { cli, emit, event, fixture, git, gitFixture, identity, start, temporary } from './helpers.mjs';
+import { cli, emit, event, fixture, git, gitFixture, identity, legacyEmit, start, temporary } from './helpers.mjs';
 
-const delegated = (f, extra = {}) => emit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
+// 显式旧的账本夹具：这些用例只验证分流/门禁机械行为，不验证准备强制。
+const legacyDelegated = (f, extra = {}) => legacyEmit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
 const packages = (f, items, extra = {}) => emit(f, { action: 'packages', packages: items, ...extra });
 const ready = [
   { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'abc123' },
@@ -42,15 +43,16 @@ test('报告内存实验（synthetic）：父任务有活动子任务时 task-en
   const child = openTurn(state, project, 'child', 't1');
   const base = s => ({ schemaVersion: 1, projectId: 'p1', sessionId: s.sessionId, turnId: 't1', ticket: s.ticket, interruptEpoch: 0 });
   const permissions = { mode: 'write', allowedPaths: [] };
-  acceptSignal(state, { ...base(lead), expectedRevision: lead.revision, taskId: 'parent', signalId: 's1', action: 'task-start', goal: '父', route: 'lead-direct', permissions });
-  acceptSignal(state, { ...base(child), expectedRevision: child.revision, taskId: 'sub', signalId: 's2', action: 'task-start', goal: '子', parentTaskId: 'parent', route: 'lead-direct', permissions });
+  const simple = { size: 'simple', sizeReason: '合成父子任务用例' };
+  acceptSignal(state, { ...base(lead), expectedRevision: lead.revision, taskId: 'parent', signalId: 's1', action: 'task-start', goal: '父', route: 'lead-direct', permissions, ...simple });
+  acceptSignal(state, { ...base(child), expectedRevision: child.revision, taskId: 'sub', signalId: 's2', action: 'task-start', goal: '子', parentTaskId: 'parent', route: 'lead-direct', permissions, ...simple });
   assert.throws(() => acceptSignal(state, { ...base(lead), expectedRevision: lead.revision, taskId: 'parent', signalId: 's3', action: 'task-end' }), error => error.code === 'GATE' && error.missing.includes('child:sub'));
   assert.equal(state.tasks[taskKey('p1', 'parent')].lifecycle, 'active');
 });
 
 test('delegated 缺审查、审查版本不符、缺验证均拒绝且状态不变；豁免后接受', async () => {
   const f = await gitFixture(['merge1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', baseRef: 'base0' }]);
   let ended = await emit(f, { action: 'task-end' });
   assert.equal(ended.result.accepted, false);
@@ -79,7 +81,7 @@ test('delegated 缺审查、审查版本不符、缺验证均拒绝且状态不�
 
 test('delegated 记录齐全时接受，验证绑定最终版本', async () => {
   const f = await gitFixture(['merge1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, ready, { validation: { ref: 'merge1', evidence: ['npm test 通过'] } });
   const ended = await emit(f, { action: 'task-end', finalRef: 'merge1' });
   assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
@@ -88,7 +90,10 @@ test('delegated 记录齐全时接受，验证绑定最终版本', async () => {
 test('新任务必须显式合法 route；三种合法分流照常建立，漏填或非法值在 task-start 拒绝且不留任务', async () => {
   for (const route of ['lead-direct', 'operation-only', 'delegated']) {
     const f = await fixture();
-    const started = await emit(f, { action: 'task-start', goal: '轻量路径', route, permissions: { mode: 'write', allowedPaths: [] } });
+    const mode = route === 'operation-only' ? 'read-only' : 'write';
+    // delegated 的新任务走真实准备强制；这里只验证 route 机械行为，用显式旧账本夹具。
+    const start = route === 'delegated' ? legacyEmit : emit;
+    const started = await start(f, { action: 'task-start', goal: '轻量路径', route, permissions: { mode, allowedPaths: [] } });
     assert.equal(started.result.accepted, true, `${route}: ${JSON.stringify(started.result)}`);
     assert.equal((await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)].route, route);
   }
@@ -103,7 +108,7 @@ test('新任务必须显式合法 route；三种合法分流照常建立，漏�
 
 test('历史任务（无 route 记录）可识别续接；接续可补声明，声明前结束只给 route-missing', async () => {
   const f = await fixture();
-  await emit(f, { action: 'task-start', goal: '历史任务', route: 'operation-only', permissions: { mode: 'write', allowedPaths: [] } });
+  await emit(f, { action: 'task-start', goal: '历史任务', route: 'operation-only', permissions: { mode: 'read-only', allowedPaths: [] } });
   const key = taskKey(f.projectId, f.taskId);
   // 模拟旧版本写出的任务记录：字段不存在，而不是新任务漏填。
   await mutate(f.directory, async state => { delete state.tasks[key].route; });
@@ -116,7 +121,7 @@ test('历史任务（无 route 记录）可识别续接；接续可补声明，�
 
   // 另一个历史任务可在接续时补声明一次；声明后同历史版本一样不可更改。
   const g = await fixture();
-  await emit(g, { action: 'task-start', goal: '历史补声明', route: 'operation-only', permissions: { mode: 'write', allowedPaths: [] } });
+  await emit(g, { action: 'task-start', goal: '历史补声明', route: 'operation-only', permissions: { mode: 'read-only', allowedPaths: [] } });
   const gKey = taskKey(g.projectId, g.taskId);
   await mutate(g.directory, async state => { delete state.tasks[gKey].route; });
   assert.equal((await emit(g, { action: 'task-start', route: 'lead-direct' })).result.accepted, true);
@@ -125,7 +130,7 @@ test('历史任务（无 route 记录）可识别续接；接续可补声明，�
 
   // 历史任务补声明 delegated 后，结束按 delegated 门禁核对。
   const h = await fixture();
-  await emit(h, { action: 'task-start', goal: '历史分工', route: 'operation-only', permissions: { mode: 'write', allowedPaths: [] } });
+  await emit(h, { action: 'task-start', goal: '历史分工', route: 'operation-only', permissions: { mode: 'read-only', allowedPaths: [] } });
   const hKey = taskKey(h.projectId, h.taskId);
   await mutate(h.directory, async state => { delete state.tasks[hKey].route; });
   const declared = await emit(h, { action: 'task-start', route: 'delegated' });
@@ -138,7 +143,7 @@ test('历史任务（无 route 记录）可识别续接；接续可补声明，�
 
 test('packages 批量 upsert 幂等，返修自增 attempts 并在超过两轮时提示', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const first = await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }], { signalId: 'pkg-stable' });
   const replay = await emit(f, first.payload);
   assert.equal(replay.result.replayed, true);
@@ -159,7 +164,7 @@ test('packages 批量 upsert 幂等，返修自增 attempts 并在超过两轮�
 
 test('返修计数以交付事实为准：启动失败重派不增长，交付后失败/取消再派仍累计', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   // 连续三次“派发后启动失败、从未产出”的重派不计返修。
@@ -188,7 +193,7 @@ test('返修计数以交付事实为准：启动失败重派不增长，交付�
 
 test('旧状态无 deliveredAt 仍可读取：按既有交付引用/状态推断返修事实，不猜改历史 attempts', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const stateFile = path.join(f.directory, 'state.json');
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [
@@ -220,7 +225,7 @@ test('旧状态无 deliveredAt 仍可读取：按既有交付引用/状态推断
 
 test('已计入的交付/FIX 事实不会被后续启动失败重派重复使用，只有新事实才进入下一轮', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
@@ -254,7 +259,7 @@ test('已计入的交付/FIX 事实不会被后续启动失败重派重复使用
 
 test('旧账本只有 delivered/consumed 状态时，转 failed/canceled 仍补记交付事实，重派照常计数', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const stateFile = path.join(f.directory, 'state.json');
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   // 模拟旧版本账本：只在 status 上留下交付事实，没有 deliveredAt/deliverySeq/countedRepair。
@@ -284,7 +289,7 @@ test('旧账本只有 delivered/consumed 状态时，转 failed/canceled 仍补�
 
   // supersedes 接替旧账本里的交付包时同样先补记事实，再按同一判定累计。
   const g = await fixture();
-  await delegated(g);
+  await legacyDelegated(g);
   const gStateFile = path.join(g.directory, 'state.json');
   await packages(g, [{ packageId: 'old', role: 'worker', status: 'delivered' }]);
   const gState = JSON.parse(await readFile(gStateFile, 'utf8'));
@@ -302,7 +307,7 @@ test('旧账本只有 delivered/consumed 状态时，转 failed/canceled 仍补�
 test('同一批 packages 里审查 FIX 与重派顺序无关，supersedes 同样适用', async () => {
   for (const fixFirst of [true, false]) {
     const f = await fixture();
-    await delegated(f);
+    await legacyDelegated(f);
     const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
     // 包本身从未交付：唯一返修事实是本批的审查 FIX。
     await packages(f, [{ packageId: 'w1', role: 'worker', status: 'failed' }]);
@@ -312,7 +317,7 @@ test('同一批 packages 里审查 FIX 与重派顺序无关，supersedes 同样
     assert.equal((await taskOf()).packages.w1.attempts, 1, `同包重派 fixFirst=${fixFirst}`);
 
     const g = await fixture();
-    await delegated(g);
+    await legacyDelegated(g);
     await packages(g, [{ packageId: 'w1', role: 'worker', status: 'failed' }]);
     const supersede = { packageId: 'w2', role: 'worker', status: 'dispatched', supersedes: 'w1' };
     await packages(g, fixFirst ? [fix, supersede] : [supersede, fix]);
@@ -323,7 +328,7 @@ test('同一批 packages 里审查 FIX 与重派顺序无关，supersedes 同样
 
 test('codeg 路径：交付→FIX→重派后，启动失败以 consumed 收尾不开启新轮次', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w1', status: 'delivered', deliveredRef: 'v1' }]);
@@ -342,7 +347,7 @@ test('codeg 路径：交付→FIX→重派后，启动失败以 consumed 收尾�
 
 test('完整返修轮次：再次交付本身不计数，第二轮交付后重派才累计到 2', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w1', status: 'delivered', deliveredRef: 'v1' }]);
@@ -361,7 +366,7 @@ test('完整返修轮次：再次交付本身不计数，第二轮交付后重�
 
 test('迟到补记同一轮的审查 FIX 或 deliveredRef 不会重复计数', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w1', status: 'delivered', deliveredRef: 'v1' }]);
@@ -375,7 +380,7 @@ test('迟到补记同一轮的审查 FIX 或 deliveredRef 不会重复计数', a
 
   // 先记无引用的交付并重派，之后补记同轮 deliveredRef，同样不多计。
   const g = await fixture();
-  await delegated(g);
+  await legacyDelegated(g);
   const gTaskOf = async () => (await readState(g.directory)).tasks[taskKey(g.projectId, g.taskId)];
   await packages(g, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(g, [{ packageId: 'w1', status: 'delivered' }]);
@@ -391,7 +396,7 @@ test('迟到补记同一轮的审查 FIX 或 deliveredRef 不会重复计数', a
 
 test('只记审查 FIX、没有 delivered 记录的隐含交付计一轮，重复重派不重复计', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w1', status: 'failed' }]);
@@ -406,7 +411,7 @@ test('只记审查 FIX、没有 delivered 记录的隐含交付计一轮，重�
 test('同一批把审查从 FIX 更正为 PASS 并重派，计数与数组顺序无关，supersedes 同样适用', async () => {
   for (const passFirst of [true, false]) {
     const f = await fixture();
-    await delegated(f);
+    await legacyDelegated(f);
     const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
     await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
     await packages(f, [{ packageId: 'w1', status: 'failed' }]);
@@ -417,7 +422,7 @@ test('同一批把审查从 FIX 更正为 PASS 并重派，计数与数组顺序
     assert.equal((await taskOf()).packages.w1.attempts, 0, `同包重派 passFirst=${passFirst}`);
 
     const g = await fixture();
-    await delegated(g);
+    await legacyDelegated(g);
     const gTaskOf = async () => (await readState(g.directory)).tasks[taskKey(g.projectId, g.taskId)];
     await packages(g, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
     await packages(g, [{ packageId: 'w1', status: 'failed' }]);
@@ -430,7 +435,7 @@ test('同一批把审查从 FIX 更正为 PASS 并重派，计数与数组顺序
 
 test('r1 账本的 countedRepair 迁移为轮次标记：已计入的轮次不重复，新交付仍进入下一轮', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const stateFile = path.join(f.directory, 'state.json');
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }]);
@@ -459,7 +464,7 @@ test('r1 账本的 countedRepair 迁移为轮次标记：已计入的轮次不�
 
 test('从未开启交付轮次时 consumed 不写 deliveredAt，同包重派与 supersedes 都不计返修', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   // 启动失败只留 consumed 状态，没有引用也没有交付轮次：不能回填成第 1 轮。
@@ -473,7 +478,7 @@ test('从未开启交付轮次时 consumed 不写 deliveredAt，同包重派与 
   }
   // 换成 supersedes 接替同样没有已交付的轮次，连续接替也不增加。
   const g = await fixture();
-  await delegated(g);
+  await legacyDelegated(g);
   const gTaskOf = async () => (await readState(g.directory)).tasks[taskKey(g.projectId, g.taskId)];
   await packages(g, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   for (const [index, id] of ['w2', 'w3'].entries()) {
@@ -488,7 +493,7 @@ test('从未开启交付轮次时 consumed 不写 deliveredAt，同包重派与 
 
 test('首轮交付后 consumed、FIX、重派，再交付并 PASS：只有第一次重派计 1', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w1', status: 'delivered', deliveredRef: 'v1' }]);
@@ -506,7 +511,7 @@ test('首轮交付后 consumed、FIX、重派，再交付并 PASS：只有第一
 
 test('新包直接以 consumed 建账并带新引用，FIX 后重派计 1（验收文档写法）', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'abc123' }]);
   await packages(f, [{ packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'abc123', verdict: 'FIX' }]);
@@ -518,7 +523,7 @@ test('新包直接以 consumed 建账并带新引用，FIX 后重派计 1（验�
 
 test('第二轮交付未带引用、之后迟到补记新引用：归入同一轮，重派不重复计数', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   const taskOf = async () => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w1', status: 'delivered', deliveredRef: 'v1' }]);
@@ -543,7 +548,7 @@ test('第二轮交付未带引用、之后迟到补记新引用：归入同一�
 
 test('压缩后 compact SessionStart 上下文含紧凑账本且不含结果正文', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ ...ready[0], note: '结果正文不应出现在入口上下文中' }, ready[1]]);
   const output = await event(f, 'SessionStart', { source: 'compact' });
   const context = JSON.parse(output.hookSpecificOutput.additionalContext.slice('workflow 入口：'.length));
@@ -554,7 +559,7 @@ test('压缩后 compact SessionStart 上下文含紧凑账本且不含结果正�
 
 test('task show 只读返回账本与门禁缺项', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   const before = await readFile(path.join(f.directory, 'state.json'), 'utf8');
   const result = cli(['task', 'show', '--task', f.taskId, '--project', f.project, '--state-dir', f.directory]);
@@ -632,7 +637,7 @@ test('doctor --agent codex 只读报告 Default 模式提问开关', async () =>
 
 test('委派状态查询：等待集合含已终态包时提示移出，已结束但未记账时提示记账，状态不写入', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', handle: 'task-a', deliveredRef: 'abc123' },
     { packageId: 'w2', role: 'worker', status: 'dispatched', handle: 'task-b' },
@@ -652,7 +657,7 @@ test('委派状态查询：等待集合含已终态包时提示移出，已结�
 
 test('有包在途时新用户回合提示中途纠正流程，无在途包时不提示', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }]);
   const context = async () => JSON.parse((await event(f, 'SessionStart', { source: 'compact' })).hookSpecificOutput.additionalContext.slice('workflow 入口：'.length));
   assert.match((await context()).instruction, /1 个工作包在途（w1）.*中途纠正/);
@@ -662,7 +667,7 @@ test('有包在途时新用户回合提示中途纠正流程，无在途包时�
 
 test('会话结束挂起的分工任务，新会话入口仍附账本并标出 suspended，不附在途提示', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'deleg-w1' }]);
   await event(f, 'SessionEnd');
   const output = await event(f, 'SessionStart', { source: 'resume', turn_id: 'turn-resume' });
@@ -681,7 +686,7 @@ test('spec 漂移进入门禁：lead-direct 与历史无 route 都检查，opera
       // 旧版本留下的无 route 任务：续接后仍按非 operation-only 检查 spec。
       await mutate(f.directory, async state => { delete state.tasks[key].route; });
     } else {
-      await emit(f, { action: 'task-start', goal: '改搜索', route, permissions: { mode: 'write', allowedPaths: [] } });
+      await emit(f, { action: 'task-start', goal: '改搜索', route, permissions: { mode: route === 'operation-only' ? 'read-only' : 'write', allowedPaths: [] } });
     }
     await driftCommit(f);
     const ended = await emit(f, { action: 'task-end', validation: { ref: 'HEAD', evidence: ['npm test'] } });
@@ -731,13 +736,13 @@ test('task-end 在附加 worktree 时不误用主树的未提交改动', async (
 test('计划基线使用当前 worktree：计划只在附加 worktree 时仍提醒回写', async () => {
   const f = await specProject();
   const w = await worktreeOf(f, 'wt-plan');
-  await mkdir(path.join(w.project, 'docs'), { recursive: true });
-  await writeFile(path.join(w.project, 'docs', 'plan.md'), '# 计划\n- [ ] 第一项\n');
-  const started = await emit(w, { action: 'task-start', goal: '按计划实施', route: 'lead-direct', plans: ['docs/plan.md'], permissions: { mode: 'write', allowedPaths: ['docs/plan.md'] } });
+  await mkdir(path.join(w.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(w.project, 'docs', 'plans', 'plan.md'), '# 计划\n- [ ] 第一项\n');
+  const started = await emit(w, { action: 'task-start', goal: '按计划实施', route: 'lead-direct', plans: ['docs/plans/plan.md'], permissions: { mode: 'write', allowedPaths: ['docs/plans/plan.md'] } });
   assert.equal(started.result.accepted, true, JSON.stringify(started.result));
   const ended = await emit(w, { action: 'task-end' });
   assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
-  assert.deepEqual(ended.result.planUnchanged, ['docs/plan.md']);
+  assert.deepEqual(ended.result.planUnchanged, ['docs/plans/plan.md']);
 });
 test('F05 Stop 按当前 worktree 的 HEAD 检查 spec：附加 worktree 漂移会挡，主树干净也不漏', async () => {
   const f = await specProject();
@@ -1023,7 +1028,7 @@ test('F05 预检 status 后索引被改写：通过报告不复用，门禁按�
 
 test('delegated 门禁同时列出 spec 缺项；task show 显示 spec 发现与变更条数', async () => {
   const f = await specProject();
-  await delegated(f);
+  await legacyDelegated(f);
   await driftCommit(f);
   const change = { summary: '搜索结果改为分页', reason: '用户追加要求', packages: ['w1'] };
   assert.equal((await packages(f, ready, { change, validation: { ref: 'HEAD', evidence: ['npm test'] } })).result.accepted, true);
@@ -1061,8 +1066,8 @@ test('回合结束核对：有缺项挡一次并列出缺项，不改任务状�
 
 test('回合结束核对：在途包挡一次要求继续等待；waiting-user、operation-only 路线、子角色会话、已结束任务都放行；已记豁免照常抵扣', async () => {
   const f = await fixture();
-  await delegated(f);
-  await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'task-abc' }]);
+  await legacyDelegated(f);
+  await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'task-abc', channel: 'codeg:codex' }]);
   const waiting = await event(f, 'Stop');
   assert.equal(waiting.decision, 'block');
   assert.match(waiting.reason, /1 个工作包在途（w1\(task-abc\)）.*wait_ms: 0.*说明为什么暂停/);
@@ -1094,7 +1099,7 @@ test('回合结束核对：在途包挡一次要求继续等待；waiting-user�
 
   // validation 已在早先 task-end 中豁免并记入任务（这里由完整记录提供），Stop 不再列出。
   const v = await fixture();
-  await delegated(v);
+  await legacyDelegated(v);
   await packages(v, ready);
   const reason = (await event(v, 'Stop')).reason;
   assert.match(reason, /validation/);
@@ -1117,41 +1122,41 @@ test('task-start 字段错误时回执点名缺项与放错位置的字段', asy
   assert.match(misplaced.result.message, /缺少 permissions 对象.*mode、allowedPaths 写在了顶层/);
   const badMode = await emit(f, { action: 'task-start', goal: '改搜索', route: 'delegated', permissions: { mode: 'edit', allowedPaths: [] } });
   assert.match(badMode.result.message, /permissions\.mode 须为 write、read-only 或 plan/);
-  assert.equal((await emit(f, { action: 'task-start', goal: '改搜索', route: 'delegated', permissions: { mode: 'write', allowedPaths: [] } })).result.accepted, true);
+  assert.equal((await legacyEmit(f, { action: 'task-start', goal: '改搜索', route: 'delegated', permissions: { mode: 'write', allowedPaths: [] } })).result.accepted, true);
 });
 
 test('关联计划软提醒：计划未改时 Stop 与 task-end 回执提醒回写，不进缺项也不挡 task-end；改过或已移走不提醒', async () => {
   const f = await fixture();
-  await mkdir(path.join(f.project, 'docs'));
-  await writeFile(path.join(f.project, 'docs', 'plan.md'), '# 计划\n- [ ] 第一项\n');
-  const started = await emit(f, { action: 'task-start', goal: '按计划实施', route: 'lead-direct', plans: ['docs/plan.md'], permissions: { mode: 'write', allowedPaths: ['docs/plan.md'] } });
+  await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(f.project, 'docs', 'plans', 'plan.md'), '# 计划\n- [ ] 第一项\n');
+  const started = await emit(f, { action: 'task-start', goal: '按计划实施', route: 'lead-direct', plans: ['docs/plans/plan.md'], permissions: { mode: 'write', allowedPaths: ['docs/plans/plan.md'] } });
   assert.equal(started.result.accepted, true, JSON.stringify(started.result));
   const shown = JSON.parse(cli(['task', 'show', '--task', f.taskId, '--project', f.project, '--state-dir', f.directory]).stdout);
-  assert.deepEqual(shown.planUnchanged, ['docs/plan.md']);
+  assert.deepEqual(shown.planUnchanged, ['docs/plans/plan.md']);
   assert.deepEqual(shown.gateMissing, []);
   const blocked = await event(f, 'Stop');
   assert.equal(blocked.decision, 'block');
-  assert.match(blocked.reason, /已无缺项.*关联计划 docs\/plan\.md 自任务开始后没有改动/);
+  assert.match(blocked.reason, /已无缺项.*关联计划 docs\/plans\/plan\.md 自任务开始后没有改动/);
   // 计划不能改声明，可原样重复。
-  assert.equal((await emit(f, { action: 'task-start', plans: ['docs/other.md'] })).result.reason, 'PLAN');
+  assert.equal((await emit(f, { action: 'task-start', plans: ['docs/plans/other.md'] })).result.reason, 'PLAN');
   const ended = await emit(f, { action: 'task-end' });
   assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
-  assert.deepEqual(ended.result.planUnchanged, ['docs/plan.md']);
+  assert.deepEqual(ended.result.planUnchanged, ['docs/plans/plan.md']);
   assert.match(ended.result.reminder, /回写/);
 
   const g = await fixture();
-  await mkdir(path.join(g.project, 'docs'));
-  await writeFile(path.join(g.project, 'docs', 'plan.md'), '# 计划\n');
-  await writeFile(path.join(g.project, 'docs', 'done.md'), '# 旧计划\n');
-  await emit(g, { action: 'task-start', goal: 'x', route: 'lead-direct', plans: ['docs/plan.md', 'docs/done.md'], permissions: { mode: 'write', allowedPaths: [] } });
-  await writeFile(path.join(g.project, 'docs', 'plan.md'), '# 计划\n- [x] 第一项（abc123）\n');
-  await rm(path.join(g.project, 'docs', 'done.md'));
+  await mkdir(path.join(g.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(g.project, 'docs', 'plans', 'plan.md'), '# 计划\n');
+  await writeFile(path.join(g.project, 'docs', 'plans', 'done.md'), '# 旧计划\n');
+  await emit(g, { action: 'task-start', goal: 'x', route: 'lead-direct', plans: ['docs/plans/plan.md', 'docs/plans/done.md'], permissions: { mode: 'write', allowedPaths: [] } });
+  await writeFile(path.join(g.project, 'docs', 'plans', 'plan.md'), '# 计划\n- [x] 第一项（abc123）\n');
+  await rm(path.join(g.project, 'docs', 'plans', 'done.md'));
   assert.doesNotMatch((await event(g, 'Stop')).reason, /关联计划/);
   const done = await emit(g, { action: 'task-end' });
   assert.equal(done.result.planUnchanged, undefined);
 
   const h = await fixture();
-  for (const plans of [['../outside.md'], ['C:/x.md'], [], 'docs/plan.md']) {
+  for (const plans of [['../outside.md'], ['C:/x.md'], [], 'docs/plans/plan.md']) {
     assert.equal((await emit(h, { action: 'task-start', goal: 'x', route: 'lead-direct', plans, permissions: { mode: 'write', allowedPaths: [] } })).result.reason, 'PLAN');
   }
 });

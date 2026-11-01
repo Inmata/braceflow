@@ -2,7 +2,8 @@ import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { deferredLifecycleEvents, digest, fail, id, lifecycleEvents, lifecycleScope, readDeferredLifecycleNote, samePath, SCHEMA_VERSION, WorkflowError } from './store.mjs';
 import { checkSpecs, describeFindings, verifySpecBinding } from './spec.mjs';
-import { normalizePreparation, preparationSummary } from './preparation.mjs';
+import { mergePreparationSnapshot, normalizePreparation, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath } from './preparation.mjs';
+import { isCodegChannel, codegWaitInstruction } from './adapters/codeg.mjs';
 
 export const PHASES = ['unknown', 'operation-only', 'executing', 'waiting-user', 'delivering'];
 export const ROUTES = ['operation-only', 'lead-direct', 'delegated'];
@@ -10,7 +11,7 @@ export const PERMISSION_MODES = ['write', 'read-only', 'plan'];
 // 宿主自己报告的只读/计划模式优先于任务声明；task-update 不能借信号绕过它。
 const HOST_BLOCKED_MODES = ['plan', 'read-only'];
 // task-update 只接受身份字段与 goal/permissions/allowedPathsMode；其余顶层字段明确拒绝，避免夹带 route/channels/账本。
-const TASK_UPDATE_FIELDS = new Set(['schemaVersion', 'projectId', 'sessionId', 'turnId', 'taskId', 'ticket', 'interruptEpoch', 'expectedRevision', 'signalId', 'action', 'goal', 'permissions', 'allowedPathsMode']);
+const TASK_UPDATE_FIELDS = new Set(['schemaVersion', 'projectId', 'sessionId', 'turnId', 'taskId', 'ticket', 'interruptEpoch', 'expectedRevision', 'signalId', 'action', 'goal', 'permissions', 'allowedPathsMode', 'preparation', 'preparationReason', 'preparationRemove', 'preparationTarget']);
 // prepare 只保存准备记录：除身份字段外只接受 preparation，不能借同一信号创建任务或夹带 packages。
 const PREPARE_FIELDS = new Set(['schemaVersion', 'projectId', 'sessionId', 'turnId', 'taskId', 'ticket', 'interruptEpoch', 'expectedRevision', 'signalId', 'action', 'preparation']);
 export const PACKAGE_STATUSES = ['dispatched', 'delivered', 'consumed', 'canceled', 'failed', 'waived'];
@@ -50,7 +51,7 @@ export function openTurn(state, project, sessionId, turnId, { compact = false, e
     // 准备记录跨回合保留：讨论、调研和写计划的回合不重建业务任务，也不能丢掉已整理的准备资料。
     ...(session?.preparation ? { preparation: session.preparation } : {}),
     // role-claim 声明的子角色跨回合保留；未声明的会话按 Lead 处理。
-    ...(session?.role ? { role: session.role, packageId: session.packageId || null } : {}),
+    ...(session?.role ? { role: session.role, packageId: session.packageId || null, roleTaskId: session.roleTaskId || null } : {}),
   };
   state.sessions[key] = session;
   return session;
@@ -100,7 +101,7 @@ function packageInput(item) {
   if (item.verdict !== undefined && item.verdict !== null && !VERDICTS.includes(item.verdict)) fail('PACKAGE', '未知审查结论');
   if (item.dependsOn !== undefined && (!Array.isArray(item.dependsOn) || item.dependsOn.length > 50)) fail('PACKAGE', 'dependsOn 必须是数组');
   for (const dependency of item.dependsOn || []) identifier(dependency, 'dependsOn');
-  for (const key of ['handle', 'worktree', 'note']) optionalText(item[key], key);
+  for (const key of ['handle', 'worktree', 'note', 'agent', 'scope']) optionalText(item[key], key);
   for (const key of ['baseRef', 'deliveredRef', 'reviewedRef', 'reviews', 'channel', 'supersedes']) optionalRef(item[key], key);
   return item;
 }
@@ -110,8 +111,8 @@ function channelsInput(value) {
   for (const [role, channel] of Object.entries(value)) identifier(channel, `channels.${role}`);
   return { ...value };
 }
-// 当前协议只能比较任务已按角色声明的通道：该角色通道存在时，包通道不同（含未填）算偏离；
-// 未声明角色通道或同一角色各包使用不同通道时没有逐包声明可比，逐包核对留 W2。
+// 任务按角色声明的通道仍是第一层比较：该角色通道存在时，包通道不同（含未填）算偏离。
+// 准备记录固定到任务后，upsertPackages 再按包 ID 核对 role/agent/channel/scope，覆盖同角色各包通道不同的情况。
 // 分工任务里 worker 包由 Lead 实施仍算当前可检出的偏离，同一信号的 change 必须列出该包。
 function channelDeviation(task, next) {
   const expected = task.channels?.[next.role];
@@ -379,12 +380,53 @@ function validateBatch(task, items) {
   }
   return { diagnostics };
 }
+// 开工时固定的准备记录是逐包选择的核对依据；旧任务没有该快照时保持原行为。
+// 新包必须显式带齐 role/agent/channel/scope；返修接替包沿用被接替包的同一套选择，不要求重新分包。
+function preparationPackageGaps(task, item, previous) {
+  const snapshot = task.preparation;
+  if (!snapshot) return [];
+  let declared = (snapshot.packages || []).find(entry => entry.packageId === item.packageId);
+  if (!declared && item.supersedes) declared = (snapshot.packages || []).find(entry => entry.packageId === item.supersedes);
+  if (!declared) {
+    // 简单任务保留最短路径：允许只读诊断包和独立审查包，不允许借 simple 空快照派实施 worker。
+    // 实施包需要先用 task-update 的 preparation 更新为复杂绑定。
+    const role = item.role ?? previous?.role;
+    const readOnly = role === 'reviewer' || (role === 'worker' && Boolean(previous?.diagnostic || item.diagnostic));
+    if (snapshot.size === 'simple' && readOnly) return [];
+    return [{ field: `package:${item.packageId}:undeclared`, message: snapshot.size === 'simple'
+      ? `简单任务只允许只读诊断包或审查包；实施包 ${item.packageId} 需先用 task-update 提供复杂准备记录重新绑定`
+      : `工作包 ${item.packageId} 不在开工时固定的准备记录中；新增、拆分或重新分包需先请用户确认并更新 prepare 记录` }];
+  }
+  const actual = {
+    role: item.role ?? previous?.role,
+    agent: item.agent ?? previous?.agent,
+    channel: item.channel ?? previous?.channel,
+    scope: item.scope ?? previous?.scope,
+  };
+  const labels = { role: '角色', agent: 'Agent', channel: '实际调用通道', scope: '负责范围' };
+  return ['role', 'agent', 'channel', 'scope'].flatMap(key => {
+    if (!declared[key]) return [];
+    if (actual[key] === declared[key]) return [];
+    return [{ field: `package:${item.packageId}:${key}`, message: `工作包 ${item.packageId} 的${labels[key]}与准备记录不一致（准备记录：${declared[key]}；本次：${actual[key] || '未填'}）` }];
+  });
+}
 // 账本只在派发、消费结果、审查结论三个节点记录；批量 upsert，未给出的字段保持原值。
 export function upsertPackages(task, items, change = null) {
   if (!Array.isArray(items) || !items.length || items.length > 50) fail('PACKAGE', 'packages 需为 1-50 项数组');
   task.packages ||= {};
   const repairLimit = [];
   const parsed = items.map(packageInput);
+  // operation-only 不是实施委派豁免：只读诊断仍可登记，实施 worker 包必须改用 lead-direct/delegated。
+  if (task.route === 'operation-only') {
+    const implementation = parsed.filter(item => item.role === 'worker' && !item.diagnostic).map(item => item.packageId);
+    if (implementation.length) fail('PERMISSION', `operation-only 任务不能登记实施工作包（${implementation.join('、')}）；需要实施或委派时结束本任务，按 lead-direct 或 delegated 重新准备开工`);
+  }
+  const prepGaps = parsed.flatMap(item => preparationPackageGaps(task, item, task.packages[item.packageId]));
+  if (prepGaps.length) {
+    const error = new WorkflowError('PREPARATION', `准备记录逐包核对未通过：${prepGaps.map(gap => gap.message).join('；')}`);
+    error.missing = prepGaps.map(gap => gap.field);
+    throw error;
+  }
   // 先落单调的曾 PASS 事实，再预校验：同一批或后续信号把审查改 FIX 也不能让已审包取消。
   rememberPassTargets(task, parsed);
   const { diagnostics } = validateBatch(task, parsed);
@@ -399,7 +441,7 @@ export function upsertPackages(task, items, change = null) {
     if (previous && item.supersedes !== undefined && item.supersedes !== previous.supersedes) fail('PACKAGE', 'supersedes 只能在新建工作包时声明');
     if (previous?.supersededBy && item.status !== undefined && item.status !== previous.status) fail('PACKAGE', `工作包 ${previous.packageId} 已被 ${previous.supersededBy} 接替，不能再改状态`);
     const next = { attempts: 0, dependsOn: [], ...previous, packageId: item.packageId };
-    for (const key of ['role', 'status', 'handle', 'channel', 'worktree', 'baseRef', 'deliveredRef', 'reviewedRef', 'reviews', 'verdict', 'dependsOn', 'note', 'supersedes']) {
+    for (const key of ['role', 'status', 'handle', 'channel', 'agent', 'scope', 'worktree', 'baseRef', 'deliveredRef', 'reviewedRef', 'reviews', 'verdict', 'dependsOn', 'note', 'supersedes']) {
       if (item[key] !== undefined) next[key] = item[key];
     }
     if (item.diagnostic !== undefined) next.diagnostic = diagnostics.get(item);
@@ -457,11 +499,18 @@ export function upsertPackages(task, items, change = null) {
   return repairLimit;
 }
 // 关联计划只作软提醒：task-start 记下计划文件摘要，结束时没变就提醒回写进度；不进 missing，不挡 task-end。
-function planInput(value) {
+function planInput(value, root) {
   if (!Array.isArray(value) || !value.length || value.length > 10) fail('PLAN', 'plans 需为 1-10 项相对路径数组');
   return value.map((item, index) => {
     const relative = textField(item, `plans[${index}]`).replaceAll('\\', '/');
     if (path.isAbsolute(relative) || /^[A-Za-z]:/.test(relative) || relative.split('/').includes('..')) fail('PLAN', `计划路径须为项目内相对路径：${item}`);
+    // 关联计划与准备源计划同规则：只认 docs/plans 下的 Markdown，并拒绝 symlink/junction 别名。
+    if (root) {
+      const checked = resolvePlanPath(root, relative);
+      if (checked.error === 'symlink') fail('PLAN', `计划路径不能是符号链接或 junction：${item}`);
+      if (checked.error === 'scope') fail('PLAN', `计划须位于 docs/plans/ 下的 Markdown 文件：${item}`);
+      if (checked.error === 'suffix') fail('PLAN', `计划须为 Markdown 文件：${item}`);
+    }
     return relative;
   });
 }
@@ -557,16 +606,39 @@ const reviewed = (task, entry) => entry.startsWith('review:') && wasReviewed(tas
 // diagnostic:<id> 是只读诊断包的交付结论缺项：必须补结论，不能用 waiver 抵扣。
 const waived = (task, entry, waivers) => !(entry === 'spec' || entry.startsWith('spec:') || entry === 'spec-check:stale' || entry.startsWith('diagnostic:'))
   && !reviewed(task, entry) && waivers.some(w => w.step === entry || w.step === entry.split(':')[0]);
+// 准备更新的显式目标：新增准备必须能对得上本次目标与权限，而不仅是“理由非空”。
+function preparationTargetInput(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) fail('PREPARATION', 'preparationTarget 需为 {goal, permissions:{mode, allowedPaths}}');
+  const unknown = Object.keys(value).filter(key => !['goal', 'permissions'].includes(key));
+  if (unknown.length) fail('PREPARATION', `preparationTarget 不支持字段 ${unknown.join('、')}`);
+  textField(value.goal, 'preparationTarget.goal');
+  const permissions = value.permissions;
+  if (!permissions || typeof permissions !== 'object' || Array.isArray(permissions)) fail('PREPARATION', 'preparationTarget.permissions 需为 {mode, allowedPaths}');
+  if (!PERMISSION_MODES.includes(permissions.mode)) fail('PREPARATION', 'preparationTarget.permissions.mode 须为 write、read-only 或 plan');
+  if (!Array.isArray(permissions.allowedPaths) || permissions.allowedPaths.some(item => typeof item !== 'string' || !item.trim())) fail('PREPARATION', 'preparationTarget.permissions.allowedPaths 须为非空字符串数组');
+  return { goal: value.goal, permissions: { mode: permissions.mode, allowedPaths: [...new Set(permissions.allowedPaths)] } };
+}
+function preparationRemoveInput(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 50) fail('PREPARATION', 'preparationRemove 需为 1-50 项 packageId 数组');
+  const ids = value.map(item => identifier(item, 'preparationRemove'));
+  if (new Set(ids).size !== ids.length) fail('PREPARATION', 'preparationRemove 不能重复 packageId');
+  return ids;
+}
+const sameStringSet = (left, right) => {
+  const a = [...new Set(left)].sort();
+  const b = [...new Set(right)].sort();
+  return a.length === b.length && a.every((item, index) => item === b[index]);
+};
 // task-update：同任务显式改 goal 与 permissions。沿用同一身份/修订/回执与失败回滚；
 // 只改本机任务声明，不碰 route/channels/账本，也不改宿主全局配置。调用方须已有用户授权，插件只记录声明。
-function updateTask(payload, task, session) {
+function updateTask(payload, task, session, root) {
   const misplaced = ['mode', 'allowedPaths'].filter(field => Object.hasOwn(payload, field));
   if (misplaced.length) fail('PERMISSION', `${misplaced.join('、')} 应放进 permissions；task-update 格式为 {goal?, permissions:{mode?, allowedPaths?}, allowedPathsMode?}`);
   const unsupported = Object.keys(payload).filter(field => !TASK_UPDATE_FIELDS.has(field));
   if (unsupported.length) fail('UNSUPPORTED', `task-update 首版只改 goal 与 permissions；不支持 ${unsupported.join('、')}`);
   const hasGoal = payload.goal !== undefined;
   const hasPermissions = payload.permissions !== undefined;
-  if (!hasGoal && !hasPermissions) fail('INPUT', 'task-update 至少给出 goal 或 permissions');
+  if (!hasGoal && !hasPermissions && payload.preparation === undefined) fail('INPUT', 'task-update 至少给出 goal、permissions 或 preparation');
   if (!task.permissions || typeof task.permissions !== 'object' || !Array.isArray(task.permissions.allowedPaths)) fail('PERMISSION', '任务缺少可更新的权限声明');
   const previous = { goal: task.goal, mode: task.permissions.mode, allowedPaths: [...task.permissions.allowedPaths] };
   let goal;
@@ -606,9 +678,94 @@ function updateTask(payload, task, session) {
       nextPaths = unique;
     }
   }
+  // operation-only 不是写入豁免：不能借 task-update 取得 write 或扩大写入范围。
+  if (task.route === 'operation-only' && (nextMode === 'write' || added.length)) {
+    fail('PERMISSION', 'operation-only 任务不能取得业务写入权限或扩大写入范围；需要写业务文件时结束本任务，按 lead-direct 或 delegated 重新准备开工');
+  }
   // 宿主只读/计划模式优先：信号只能记录声明，不能把实际写入权限抬到宿主之上。
   if (HOST_BLOCKED_MODES.includes(session.permissionMode) && ((nextMode === 'write' && previous.mode !== 'write') || added.length)) {
     fail('PERMISSION', `宿主当前为 ${session.permissionMode} 模式：task-update 不能提升宿主权限；回到可写模式后再更新`);
+  }
+  // 目标或权限范围确实变化时，不能拿开工时那份旧声明继续走；必须显式提交与该变化关联的准备更新。
+  // 只更新进度、路径或同步事实不要求重新确认；旧任务没有准备快照时保持兼容。
+  const goalChanged = goal !== undefined && goal !== previous.goal;
+  const scopeExpanded = (nextMode === 'write' && previous.mode !== 'write') || added.length > 0;
+  const hasPreparation = payload.preparation !== undefined;
+  const hasRemove = payload.preparationRemove !== undefined;
+  const hasTarget = payload.preparationTarget !== undefined;
+  if (hasPreparation && (typeof payload.preparationReason !== 'string' || !payload.preparationReason.trim())) {
+    fail('PREPARATION', '更新任务准备需要 preparationReason（说明这次变化及用户确认依据）');
+  }
+  if (!hasPreparation && payload.preparationReason !== undefined) fail('PREPARATION', 'preparationReason 需要与 preparation 一起使用');
+  if (!hasPreparation && (hasRemove || hasTarget)) fail('PREPARATION', 'preparationRemove 与 preparationTarget 需要与 preparation 一起使用');
+  if ((goalChanged || scopeExpanded) && task.preparation && !hasPreparation) {
+    preparationFailure([{ field: 'preparation:update', message: '任务目标或权限范围发生变化，需要在同一 task-update 显式提供 preparation 与 preparationReason；仅同步进度、日志或路径不需要重问' }], '准备检查未通过');
+  }
+  let preparationChange = null;
+  if (hasPreparation) {
+    const record = normalizePreparation(payload.preparation, { root: root || session.root });
+    const gaps = preparationMissing(record);
+    if (gaps.length) preparationFailure(gaps, '任务准备更新前，记录还有缺项');
+    if (task.preparation?.size === 'complex' && record.size !== 'complex') {
+      preparationFailure([{ field: 'preparation:size', message: '复杂任务的准备记录不能降为简单任务后再扩大范围' }], '准备检查未通过');
+    }
+    const removeIds = hasRemove ? preparationRemoveInput(payload.preparationRemove) : [];
+    const previousIds = new Set((task.preparation?.packages || []).map(item => item.packageId));
+    for (const packageId of removeIds) {
+      if (!previousIds.has(packageId)) fail('PREPARATION', `preparationRemove 要求移除未在准备记录中的包 ${packageId}`);
+      const pkg = task.packages?.[packageId];
+      if (pkg && !TERMINAL_PACKAGE.includes(pkg.status) && !pkg.supersededBy) {
+        fail('PREPARATION', `工作包 ${packageId} 仍在 ${pkg.status}，不能从准备记录移除；先结束或接替该包`);
+      }
+      if (record.packages.some(item => item.packageId === packageId)) fail('PREPARATION', `工作包 ${packageId} 同时出现在 preparation 与 preparationRemove 中；移除和保留只能选一种`);
+    }
+    const merged = mergePreparationSnapshot(task.preparation, record, { removePackageIds: removeIds });
+    // 活动包不能被静默换 Agent/范围：先结束或接替该包，再更新准备。
+    for (const packageId of merged.changed) {
+      const pkg = task.packages?.[packageId];
+      if (pkg && !TERMINAL_PACKAGE.includes(pkg.status) && !pkg.supersededBy) {
+        fail('PREPARATION', `工作包 ${packageId} 仍在 ${pkg.status}，不能改写它的准备选择；先结束或接替该包，再更新准备记录`);
+      }
+    }
+    // 目标/权限变化必须由本次准备的实际变化支撑：仅重放旧记录和一条理由不算。
+    // 程序不判断自然语言授权真伪，只核对声明、目标与可审计差异。
+    const resultingGoal = goal !== undefined ? goal : task.goal;
+    const resultingPaths = paths !== undefined ? nextPaths : previous.allowedPaths;
+    if (hasTarget) {
+      const target = preparationTargetInput(payload.preparationTarget);
+      if (target.goal !== resultingGoal || target.permissions.mode !== nextMode || !sameStringSet(target.permissions.allowedPaths, resultingPaths)) {
+        preparationFailure([{
+          field: 'preparation:target',
+          message: `preparationTarget 与本次目标/权限不一致（目标：${resultingGoal}；模式：${nextMode}；路径：${resultingPaths.join('、') || '空'}）`,
+        }], '准备检查未通过');
+      }
+    } else if (goalChanged || scopeExpanded) {
+      preparationFailure([{
+        field: 'preparation:update',
+        message: '任务目标或权限范围变化时，同一 task-update 的 preparation 需要同时给出 preparationTarget{goal,permissions}，并与本次目标/权限完全一致',
+      }], '准备检查未通过');
+    }
+    if ((goalChanged || scopeExpanded)
+      && preparationSnapshotSignature(merged.snapshot) === preparationSnapshotSignature(task.preparation)
+      && !merged.changed.length && !merged.removed.length) {
+      preparationFailure([{
+        field: 'preparation:update',
+        message: '准备记录与上次相比没有实际变化；目标或权限变化需要新增/调整包、移除包或更新计划来源，不能只重放旧记录',
+      }], '准备检查未通过');
+    }
+    (task.preparationUpdates ||= []).push({
+      at: new Date().toISOString(),
+      reason: payload.preparationReason.trim(),
+      changed: merged.changed,
+      removed: merged.removed,
+      preserved: merged.preserved,
+      before: task.preparation || null,
+      after: merged.snapshot,
+    });
+    task.preparation = merged.snapshot;
+    task.size = merged.snapshot.size;
+    task.sizeReason = merged.snapshot.sizeReason;
+    preparationChange = { reason: payload.preparationReason.trim(), changed: merged.changed, removed: merged.removed, preserved: merged.preserved };
   }
   if (goal !== undefined) task.goal = goal;
   if (hasPermissions) task.permissions = { ...task.permissions, ...(mode !== undefined ? { mode } : {}), ...(paths !== undefined ? { allowedPaths: nextPaths } : {}) };
@@ -620,6 +777,7 @@ function updateTask(payload, task, session) {
     if (paths !== undefined) permissions.allowedPaths = { mode: pathsMode, added, removed };
     if (Object.keys(permissions).length) change.permissions = permissions;
   }
+  if (preparationChange) change.preparation = preparationChange;
   // 追加审计记录，不修改既有会话回执；旧任务没有 updates 字段按空处理。
   if (Object.keys(change).length) (task.updates ||= []).push({ at: new Date().toISOString(), change });
   return {
@@ -629,6 +787,21 @@ function updateTask(payload, task, session) {
     hostPermissionMode: session.permissionMode,
     note: '已更新本机任务声明；实际写入仍受宿主当前只读/计划权限约束，插件只记录声明，不自动证明用户授权真实存在',
   };
+}
+function preparationFailure(gaps, intro) {
+  const detail = gaps.map(gap => gap.message).join('；');
+  const error = new WorkflowError('PREPARATION', `${intro}：${detail}。继续讨论、调研或写计划补齐；简单任务可在 task-start 用 --size simple --size-reason 声明`);
+  error.missing = gaps.map(gap => gap.field);
+  throw error;
+}
+function bindTaskPreparation(task, record, simpleReason) {
+  const snapshot = record ? preparationSnapshot(record) : {
+    schemaVersion: 1, size: 'simple', sizeReason: simpleReason, preparedAt: new Date().toISOString(), source: null, packages: [],
+  };
+  task.size = snapshot.size;
+  task.sizeReason = snapshot.sizeReason;
+  task.preparation = snapshot;
+  return snapshot;
 }
 // options.root 只接受入口用 resolveProject 核对过的当前 worktree；payload 里的路径不参与检查根选择。
 // 本函数就地修改 state，且可能在门禁拒绝前已写入部分字段（例如 task.validation）。协议函数不自行回滚；
@@ -652,8 +825,24 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
     const own = session.taskId ? state.tasks[taskKey(project.projectId, session.taskId)] : null;
     if (own?.lifecycle === 'active') fail('ROLE', '会话有自己的活动任务，不能改为子角色');
     if (payload.packageId !== undefined) identifier(payload.packageId, 'packageId');
+    // 角色会话必须显式绑定到父任务：只凭包 ID 在多个活动任务里首匹配会把写入记到错误任务。
+    // 新声明一律要求 --task；旧状态里已存在、没有 roleTaskId 的声明仍可读，但写入会被 hooks 拒绝并提示重发。
+    const boundTaskId = payload.taskId && state.tasks[taskKey(project.projectId, payload.taskId)] ? payload.taskId : null;
+    if (!boundTaskId) {
+      const error = new WorkflowError('ROLE', `role-claim 需要 --task <父活动任务ID>：本次给出的 ${payload.taskId || 'taskId'} 不是当前项目的已有任务；先由 Lead 用 packages 登记 dispatched 包，再带 --task 重新声明`);
+      error.missing = ['taskId'];
+      throw error;
+    }
+    const bound = state.tasks[taskKey(project.projectId, boundTaskId)];
+    if (bound.lifecycle !== 'active') fail('ROLE', `role-claim 绑定的任务 ${boundTaskId} 不是活动任务；先由 Lead 确认任务并重新声明`);
+    if (!payload.packageId) {
+      const error = new WorkflowError('ROLE', 'role-claim 绑定活动任务时必须同时给出 packageId；先由 Lead 用 packages 登记 dispatched 包');
+      error.missing = ['packageId'];
+      throw error;
+    }
     session.role = payload.role;
-    session.packageId = payload.packageId || null;
+    session.packageId = payload.packageId;
+    session.roleTaskId = boundTaskId;
   } else if (session.role) {
     fail('ROLE', `当前会话已声明为 ${session.role}；业务任务和账本由 Lead 维护`);
   } else if (payload.action === 'prepare') {
@@ -682,11 +871,56 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
         const detail = !permissions ? '缺少 permissions 对象' : !PERMISSION_MODES.includes(permissions.mode) ? 'permissions.mode 须为 write、read-only 或 plan' : 'permissions.allowedPaths 须为字符串数组（可为空数组）';
         fail('PERMISSION', `任务需明确 mode 与 allowedPaths：${detail}${misplaced.length ? `；${misplaced.join('、')} 写在了顶层，应放进 permissions` : ''}`);
       }
-      const plans = payload.plans === undefined ? null : planInput(payload.plans);
+      const plans = payload.plans === undefined ? null : planInput(payload.plans, root || project.root);
       const channels = payload.channels === undefined ? null : channelsInput(payload.channels);
+      if (payload.size !== undefined && !PREPARATION_SIZES.includes(payload.size)) fail('PREPARATION', 'task-start 的 size 只能是 simple 或 complex');
+      if (payload.sizeReason !== undefined && (typeof payload.sizeReason !== 'string' || !payload.sizeReason.trim())) fail('PREPARATION', 'task-start 的 sizeReason 必须是非空字符串');
+      if (payload.size === undefined && payload.sizeReason !== undefined) fail('PREPARATION', 'sizeReason 需要与 size 一起使用');
+      const requestedSize = payload.size;
+      const prepared = session.preparation;
+      const preparedGaps = prepared ? preparationMissing(prepared) : null;
+      let boundPreparation = null;
+      let operationOnlyUnbound = false;
+      if (payload.route === 'operation-only') {
+        // 纯操作任务不进入实施门禁；仍在准备阶段时也允许明确开始查看/发布类操作。
+        // 但 operation-only 不是业务写入豁免：不能借它取得 write 权限或实施委派。
+        if (permissions.mode === 'write') {
+          const error = new WorkflowError('PERMISSION', 'operation-only 只用于例行操作和事务，不能声明业务写入权限；需要写业务文件时改用 lead-direct 或 delegated，并按准备要求开工');
+          error.missing = ['permissions.mode'];
+          throw error;
+        }
+        if (requestedSize === 'complex') {
+          preparationFailure([{ field: 'preparation', message: '复杂实施任务不能按 operation-only 开始' }], '准备检查未通过');
+        }
+        operationOnlyUnbound = !prepared;
+      } else if (requestedSize === 'simple') {
+        if (payload.route === 'delegated') fail('PREPARATION', '分工任务不能只声明简单任务；请先保存完整的复杂准备记录');
+        if (!payload.sizeReason || !payload.sizeReason.trim()) preparationFailure([{ field: 'size:reason', message: '简单任务必须写明判断理由' }], '准备检查未通过');
+        if (prepared?.size === 'complex') preparationFailure([{ field: 'preparation:size', message: '已经保存复杂准备记录，不能改按简单任务开始；按该记录开工，或先把准备记录改为简单任务' }], '准备检查未通过');
+        if (preparedGaps?.length) preparationFailure(preparedGaps, '准备记录还有缺项，不能用简单声明绕过');
+        boundPreparation = prepared || { size: 'simple', sizeReason: payload.sizeReason, packages: [] };
+      } else if (requestedSize === 'complex') {
+        if (!prepared) preparationFailure([{ field: 'preparation', message: '复杂任务开始前需要先用 prepare 保存完整准备记录' }], '准备检查未通过');
+        if (preparedGaps.length) preparationFailure(preparedGaps, '准备记录尚未齐全');
+        if (prepared.size !== 'complex') preparationFailure([{ field: 'preparation:size', message: '已保存的是简单任务记录，不能用于复杂任务开工' }], '准备检查未通过');
+        boundPreparation = prepared;
+      } else if (prepared) {
+        // 没有显式再声明大小时，沿用已保存的准备记录；记录不齐不能开工，避免先 task-start 再补准备。
+        if (preparedGaps.length) preparationFailure(preparedGaps, '准备记录尚未齐全');
+        if (payload.route === 'delegated' && prepared.size !== 'complex') {
+          preparationFailure([{ field: 'preparation:size', message: '分工任务需要完整准备记录（simple 记录不足以覆盖逐包选择）' }], '准备检查未通过');
+        }
+        boundPreparation = prepared;
+      } else {
+        // 新任务不能再用“未绑定准备”直接开工；旧任务续接在下面的分支保留兼容。
+        // 显式简单声明必须带理由，复杂任务必须已有完整 prepare 记录。
+        preparationFailure([{ field: 'preparation', message: '新任务开始前需要先用 prepare 保存完整准备记录，或用 task-start --size simple --size-reason "<理由>" 声明简单任务' }], '准备检查未通过');
+      }
       task = { projectId: project.projectId, taskId: payload.taskId, goal: payload.goal, parentTaskId: payload.parentTaskId || null, route: payload.route || null, lifecycle: 'active', repairIssued: false, deliveries: {}, candidates: {}, packages: {}, permissions, createdAt: new Date().toISOString() };
       if (plans) task.plans = planBaselines(root || project.root, plans);
       if (channels) task.channels = channels;
+      if (boundPreparation) bindTaskPreparation(task, boundPreparation, payload.sizeReason);
+      if (operationOnlyUnbound) extra = { warning: 'operation-only-unbound' };
       state.tasks[key] = task;
     } else {
       if (!['active', 'suspended'].includes(task.lifecycle) && !Object.values(state.pending).some(p => p.projectId === project.projectId && p.taskId === payload.taskId && p.kind === 'knowledge-pending' && p.status === 'open')) fail('TASK', '已完成任务无待接续知识');
@@ -695,7 +929,7 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
       if (payload.route) task.route = payload.route;
       // 计划同样只能首次或补声明；补声明时以当时内容为基线。
       if (payload.plans !== undefined) {
-        const plans = planInput(payload.plans);
+        const plans = planInput(payload.plans, root || project.root);
         if (task.plans?.length && JSON.stringify(task.plans.map(p => p.path)) !== JSON.stringify(plans)) fail('PLAN', '任务已声明其他计划');
         task.plans ||= planBaselines(root || project.root, plans);
       }
@@ -734,7 +968,7 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
       if (change) (task.changes ||= []).push(change);
       if (repairLimit.length) extra = { repairLimit: true, repairLimitPackages: repairLimit };
     } else if (payload.action === 'task-update') {
-      extra = updateTask(payload, task, session);
+      extra = updateTask(payload, task, session, root || project.root);
     } else if (payload.action === 'task-end') {
       if (payload.validation !== undefined) task.validation = validationInput(payload.validation);
       if (payload.finalRef !== undefined) identifier(payload.finalRef, 'finalRef');
@@ -798,7 +1032,7 @@ function planDeliveryReason(task) {
   const ask = task.route === 'lead-direct'
     ? '若本回合交付完整实施计划且由 Lead 直接执行，没有 Worker，不需要询问 Worker；若计划还需要 Reviewer 或其他角色，仍按包请用户指定 Agent 与通道，不套角色默认值。'
     : '若本回合交付完整实施计划，先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值。';
-  const channelNote = 'task-start 的 channels 只能按角色各记一个；同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包 channel 和 packages 的实际 channel 为准。当前协议只在任务已声明该角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时检出偏离并要求 change；逐包核对留 W2。';
+  const channelNote = 'task-start 的 channels 只能按角色各记一个；同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包 channel 和 packages 的实际 channel 为准。开工时会固定准备记录，packages 按包 ID 核对 role、agent、channel、scope；新增、拆分或重新分包需先请用户确认并更新 prepare 记录。已声明角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时，仍按原规则要求 change。';
   return `workflow 计划交付核对：本回合已进入计划交付但尚未向用户提问确认。若本回合在交付完整实施计划，请列出建议分流与工作包划分（分几个包、每包范围与依赖，或说明免拆包理由），并说明执行顺序与串并行关系。只交付纯技术方案时，按用户给定范围停在方案，不要求分包或逐包选择。${existing}${ask}${channelNote}并在计划末尾写明 spec 影响（无影响写“无”）；结构化提问工具会自动记 waiting-user，文本提问先发 signal phase --phase waiting-user。若本回合只是回答讨论而非交付计划，直接回复即可（本回合不再重复阻挡）。`;
 }
 // 回合结束核对：Lead 没发 task-end 就收尾时，按门禁算一次缺项并挡下一轮。只读任务状态，只在 session 上记“本回合已挡”。
@@ -822,11 +1056,18 @@ export function stop(state, project, session, event = {}, { root, spec } = {}) {
     let reason = '';
     if (inflight.length) {
       const list = inflight.map(([id, item]) => item.handle ? `${id}(${item.handle})` : id).join('、');
-      // 宿主内置子代理结束时会通知父会话，只需说明在等什么；其余（Codeg 或未填通道）必须同回合阻塞等待。
+      // 宿主内置子代理结束时会通知父会话，只需说明在等什么；Codeg 才给 Codeg 专有等待方法。
+      // 其他通道（含未填）按当前工具能力处理，不把“非 builtin”一概当成 Codeg。
       const builtin = inflight.every(([, item]) => item.channel?.startsWith('builtin:'));
+      const codeg = inflight.every(([, item]) => isCodegChannel(item.channel));
+      const someCodeg = inflight.some(([, item]) => isCodegChannel(item.channel));
       const how = builtin
         ? '这些包由宿主内置子代理执行，结束时宿主会通知本会话：向用户说明在等哪些包、结果回来后做什么，再结束回合。'
-        : '宿主不会在子任务结束时唤醒本会话，结束回合就收不到结果。二选一：用阻塞等待（Codeg get_delegation_status 批量传入在途 task_id、wait_ms: 0；若 MCP 空闲超时断开而任务仍在运行则重调续等，等待期间不轮询、不跑无关命令）等到终态或 blocked_on 再收结果；或者向用户说明为什么暂停、何时由谁接续。';
+        : codeg
+          ? codegWaitInstruction()
+          : someCodeg
+            ? `其中 Codeg 包按 Codeg 方式等待：${codegWaitInstruction()} 其他通道按各自入口支持的方式等待；` + '内置子代理包结束时宿主会通知本会话。'
+            : '按当前通道实际支持的方式等待结果；如果该入口不会在子任务结束时通知本会话，结束回合就收不到结果。二选一：用该通道支持的阻塞等待/查询方式等到终态，或者向用户说明在等哪些包、为什么暂停、结果回来后由谁接续。';
       reason = `workflow 回合结束核对：任务 ${task.taskId} 仍有 ${inflight.length} 个工作包在途（${list}）。${how}`;
     }
     if (planDelivery && planning) reason = reason ? `${reason} 另：${planDeliveryReason(task)}` : planDeliveryReason(task);

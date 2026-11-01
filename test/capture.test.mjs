@@ -28,7 +28,7 @@ async function taskEnd(f, transcriptPath, signalId = 'signal-' + crypto.randomUU
   return { payload, result: JSON.parse(text.slice('workflow 回执：'.length)) };
 }
 async function taskStartWithTranscript(f, transcriptPath, learning = true) {
-  const payload = { ...await identity(f), taskId: f.taskId, signalId: crypto.randomUUID(), action: 'task-start', goal: '任务范围提取', route: 'lead-direct', permissions: { mode: 'write', allowedPaths: ['README.md'], learning } };
+  const payload = { ...await identity(f), taskId: f.taskId, signalId: crypto.randomUUID(), action: 'task-start', goal: '任务范围提取', route: 'lead-direct', size: 'simple', sizeReason: '提取测试的显式简单声明', permissions: { mode: 'write', allowedPaths: ['README.md'], learning } };
   const output = await event(f, 'PostToolUse', { transcript_path: transcriptPath, tool_name: 'Bash', tool_input: { command: `node "${entry}" signal --base64 e30=` }, tool_response: { output: JSON.stringify({ workflow_signal: payload }) } });
   const result = JSON.parse(output.hookSpecificOutput.additionalContext.slice('workflow 回执：'.length));
   assert.equal(result.accepted, true, JSON.stringify(result));

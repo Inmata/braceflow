@@ -80,15 +80,17 @@ hook 提供 project/session/turn/ticket/interruptEpoch/expectedRevision。contex
 常用动作用子命令，一条命令完成，不需要临时文件（`<sessionId>`、`<turnId>` 取本次入口的 identity；`--id` 是 signalId，每个新动作唯一，重试同一动作时命令保持不变）：
 
 ```powershell
+# delegated 开工前必须已有完整 prepare 记录；尚未准备时先执行 prepare（格式见下方“准备记录”）
+node '<本次hook提供的bin/workflow.mjs>' signal prepare --session <sessionId> --turn <turnId> --id prep-1 --input prep.json --plan docs/plans/plan.md
 node '<本次hook提供的bin/workflow.mjs>' signal task-start --session <sessionId> --turn <turnId> --id start-1 --task task-readme --route delegated --goal "本次已授权目标" --mode write --paths README.md,LESSONS.md
-node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-1 --package w1 --role worker --status dispatched --channel codeg:claude_code --handle <委派ID>
+node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-1 --package w1 --role worker --status dispatched --package-agent "Claude Code" --channel codeg:claude_code --scope "src/hooks.mjs" --handle <委派ID>
 node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-2 --package w1 --status consumed --ref <交付提交>
-node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-3 --package r1 --role reviewer --status dispatched --channel codeg:codex --handle <委派ID> --reviews w1
+node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-3 --package r1 --role reviewer --status dispatched --package-agent "Codex" --channel codeg:codex --scope "独立审查 w1" --handle <委派ID> --reviews w1
 node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-4 --package r1 --status consumed --verdict PASS --ref <被审提交>
 node '<本次hook提供的bin/workflow.mjs>' signal task-end --session <sessionId> --turn <turnId> --id end-1 --final-ref <交付提交> --evidence "npm test 250/250 通过" --evidence "npm run check 0 错误"
 ```
 
-CLI 只读当前状态补齐 projectId、ticket、epoch 和 revision，输出信号，由当前 PostToolUse 接受；字段参数见[协议](design/protocol.md#信号)。便捷参数一次只表达一个工作包：`--ref` 对 worker 记 `deliveredRef`、对 reviewer 记 `reviewedRef`，新包需要同时给 `--role`；单包便捷字段必须配 `--package`，否则直接返回 INPUT，不会静默丢弃。task-end 的 `validation.ref` 缺省取 `--final-ref`，`--evidence` 可重复。一次消费并派下一阶段等**同批多个包**、`change`、`waivers`、`diagnostic` 以及 disposition 等深层结构仍写进 UTF-8 JSON 文件，用 `--input` 附上（文件只放业务字段，不放身份字段）：
+CLI 只读当前状态补齐 projectId、ticket、epoch 和 revision，输出信号，由当前 PostToolUse 接受；字段参数见[协议](design/protocol.md#信号)。便捷参数一次只表达一个工作包：`--ref` 对 worker 记 `deliveredRef`、对 reviewer 记 `reviewedRef`，新包需要同时给 `--role`；`--package-agent` 记包的 Agent，`--scope` 记负责范围（`--agent` 是宿主选择，不用于包 Agent）；单包便捷字段必须配 `--package`，否则直接返回 INPUT，不会静默丢弃。审查包和 worker 包一样登记 `agent`/`channel`/`scope`；两者都按同一套逐包核对。`scope` 是准备记录里的负责范围声明，不是机器验证过的路径或语义沙箱，也不证明 prompt 已被范围校验。task-end 的 `validation.ref` 缺省取 `--final-ref`，`--evidence` 可重复。一次消费并派下一阶段等**同批多个包**、`change`、`waivers`、`diagnostic` 以及 disposition 等深层结构仍写进 UTF-8 JSON 文件，用 `--input` 附上（文件只放业务字段，不放身份字段）：
 
 ```powershell
 node "<入口>" signal packages --session <sessionId> --turn <turnId> --id pkg-batch-1 --input "<同批 packages/change JSON文件>"
@@ -122,6 +124,14 @@ node "<本次hook提供的bin/workflow.mjs>" signal --input "<任务JSON文件>"
 
 task-start 必须显式声明 route（CLI `--route`，完整 payload 的 `route`）：`operation-only` 用于无经验回执要求的例行操作，`lead-direct` 用于 Lead 自己实施，`delegated` 用于分工并核对包终态、审查与 validation。新任务漏填或值非法返回 `ROUTE`，不建立任务；已存在任务续接可省略 route；旧版本留下、记录中没有 route 的历史任务照常续接，也可在接续时补声明一次，声明后不可改（返回 `ROUTE`）。非 operation-only 的 lead-direct、delegated 与历史无 route 任务照常做 spec 检查。route 只决定门禁与检查范围，不是任务复杂度认证：用户明确要求 Worker/Reviewer 时，不能改用 `operation-only` 或 `lead-direct` 消除已要求的分工。
 
+明确的小修改可直接开始，但新任务要说明为什么不需要完整准备：
+
+```powershell
+node "<入口>" signal task-start ... --route lead-direct --goal "修一处文案" --mode write --paths README.md --size simple --size-reason "只改一处文案，无需调研和分包"
+```
+
+`--size` 只接受 `simple`/`complex`，`--size-reason` 必须同时给出且非空；`delegated` 不能用简单声明，已有复杂准备记录也不能用简单声明绕过。需要讨论、调研或拆包时先用 `prepare`，完整记录绑定后再 `task-start`；不齐时回执按字段拒绝，例如 `package:W2:agent`、`package:W2:channel`。`read-only`/`plan` 任务保留只读或计划路径；`plan` 活动任务只放行准备资料写入，业务写入被 `PreToolUse` 拒绝。
+
 `action=phase` 声明 executing/operation-only/waiting-user/delivering；delivering 加 deliveryId，可同时提交 disposition。普通查看、指定提交 push、明确快进 pull 用 operation-only，默认零 Worker/Reviewer；低风险单点 Lead 实施，是否独立审查按行为与失败代价决定。结构化提问工具由 hook 自动记 waiting-user；普通文本反问和未识别工具先发 phase waiting-user。
 
 旧交付处置保留兼容：`no-new-learning`、引用真实成功事务的 `updated`、引用已保存待办的 `pending-recovery`。新任务无需每次提交处置，Stop 不追加经验轮次。出现有据材料时按[经验学习](learning.md)采集，复盘由独立调度决定。
@@ -144,7 +154,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 
 换会话、换电脑或换状态目录时，读取同一份计划重新提交同形记录即可恢复包、逐包 Agent 和实际调用通道；稳定包 ID、项目相对路径和代码基线是可携带依据，原会话 ID、票据和本机绝对路径不参与。计划只改进度或证据链接时，不取消已确认的需求、方案、Agent 和通道选择；原计划只写了 Agent 时，按新入口实际可用工具补 `channel`，不要求用户重选。
 
-当前实现边界：`prepare` 只保存记录、来源摘要和缺项；复杂任务开工绑定、工具执行前拦截和宿主 hooks 属于后续实施。在那些检查落地前，`task-start` 不会因准备缺项自动拒绝，Lead 仍须按准备流程自行判断，不能把“已保存草案”说成“准备完成”或“已获授权实施”。
+当前实现边界：`prepare` 保存记录、来源摘要和缺项；新任务的 `task-start` 必须已有完整准备、带理由的简单声明或 `operation-only`，不再以 `preparation-unbound` 新建；只有已有旧任务续接保留兼容。`operation-only` 只用于例行操作/事务，不能声明 write、不能登记实施 worker 包，也不能在 `task-update` 中取得业务写权限；只读诊断包仍可登记。固定后的逐包 `role`/`agent`/`channel`/`scope` 是后续 `packages` 的核对依据。简单任务用 `--size simple --size-reason "<理由>"` 声明；空包快照只允许 reviewer 和带 `diagnostic` 的只读 worker 包，实施 worker 需用 `task-update` 显式升级为复杂准备绑定。两个已注册的宿主在 `PreToolUse` 拒绝未开工的业务写入、实施委派和本插件直接 `task-start`/`packages` 命令；普通读取、`docs/plans/plan.md`、已绑定源计划或已登记关联计划和 `prepare` 放行。计划只接受 `docs/plans/` 下的 Markdown，路径链上任何 symlink/junction 都拒绝，且解析后的真实路径仍须在真实 `docs/plans/` 内；`.local`、任意后缀、业务文件和项目外目标不放行。活动任务的实际委派（worker 实施或 reviewer 审查）必须在输入中带 `workflow-package:<包ID>`（或 `packageId`），关联到已 dispatched 且角色匹配的包，并按该宿主工具 schema 核对 Agent/通道/任务/角色；无法关联或缺少必需字段时拒绝。Codeg `delegate_to_agent` 只要出现非空 `assistant_id` 就拒绝（包括同时给 `agent_type`），因为 workflow 没有可靠的 assistant→Agent 映射；Codeg 的 `codeg:<agent_type>` 通道编码实际 Agent，委派入口的 Agent 必须同时匹配准备记录 `agent` 和通道尾部，只匹配其中一个会被拒绝。仅不带包标记的 `Explore`/`Plan` 明确只读子代理可不带包关联；一旦带 `workflow-package:<包ID>`，即使是 Explore/Plan 也必须按包核对状态、通道与 Agent。带 `diagnostic` 声明的工作包也只能派给这两类子代理，不能借 general-purpose 或 Codeg 委派取得写入。声明范围不是沙箱：程序核对包、Agent、通道和声明字段，不解析 prompt 语义或验证路径。任意 shell 业务写入、Codex `write_stdin` 和命令启动后的外部写入不在 workflow 拦截范围内；Claude 主用路径由启动方严格权限配置兜底（见 [Claude 适配](adapters/claude.md)），Codex/Codeg ACP 未验。不能把“已保存草案”说成“准备完成”或“已获授权实施”。
 
 中断或 SessionEnd 将未完任务标为 suspended 并撤销票据，保留业务未完成记录；显式 task-start 才恢复。重发 task-start 接续沿用原 goal 与 permissions，回执带 `kept:{goal,permissions}` 和提示；本次附带的 goal/permissions 不生效。挂起任务不再以 active 永久挡住升级，未辨认的写事务仍需恢复。
 
@@ -159,9 +169,24 @@ node "<入口>" signal task-update --session <sessionId> --turn <turnId> --id up
 node "<入口>" signal task-update ... --id update-2 --mode write
 # 追加路径（去重）；省略 --paths-mode 时按 replace 整体替换
 node "<入口>" signal task-update ... --id update-3 --paths docs/new.md --paths-mode append
+# 目标/权限变化并更新准备：新字段只能走 --input
+node "<入口>" signal task-update ... --id update-4 --goal "扩大后的目标" --input update.json
 ```
 
-`permissions` 可只给 `mode` 或 `allowedPaths`；`allowedPathsMode=append` 追加去重，`replace`（缺省）用新集合替换。命令行与 `--input` 同时给出 `permissions` 时按 mode、allowedPaths 子字段合并（同一子字段两处值不同返回 `INPUT`）；`task-update` 只接受 `--goal`、`--mode`、`--paths`、`--paths-mode`，给出 `--route`、`--channels` 等其他动作的参数返回 `UNSUPPORTED`。宿主当前为只读/计划模式时，把 mode 提到 write 或追加路径返回 `PERMISSION`（缩小范围和只改 goal 仍可记录）：插件只更新本机任务声明，不改宿主全局配置。首版不改 route/channels/计划/历史工作包，也不替代用户授权。
+`update.json` 只放业务字段，至少包含完整 `preparation`、`preparationReason` 和与本次结果完全一致的 `preparationTarget`：
+
+```json
+{
+  "preparation": {"size": "complex", "sizeReason": "...", "requirements": [], "research": [], "solution": {}, "packages": [], "verification": [], "confirmation": {}, "pending": [], "source": {}},
+  "preparationReason": "用户确认新增 W2 并扩大目标",
+  "preparationTarget": {"goal": "扩大后的目标", "permissions": {"mode": "write", "allowedPaths": ["src/a.mjs", "src/b.mjs"]}},
+  "preparationRemove": ["W9"]
+}
+```
+
+`permissions` 可只给 `mode` 或 `allowedPaths`；`allowedPathsMode=append` 追加去重，`replace`（缺省）用新集合替换。命令行与 `--input` 同时给出 `permissions` 时按 mode、allowedPaths 子字段合并（同一子字段两处值不同返回 `INPUT`）；`task-update` 的便捷参数只接受 `--goal`、`--mode`、`--paths`、`--paths-mode`，给出 `--route`、`--channels` 等其他动作的参数返回 `UNSUPPORTED`，准备更新与 `preparationTarget`/`preparationRemove` 用 `--input`。宿主当前为只读/计划模式时，把 mode 提到 write 或追加路径返回 `PERMISSION`（缩小范围和只改 goal 仍可记录）：插件只更新本机任务声明，不改宿主全局配置。
+
+目标变化或写权限扩张时，必须在同一 `task-update` 提供完整 `preparation`、非空 `preparationReason` 和 `preparationTarget`；`preparationTarget` 的 goal/mode/allowedPaths 必须与本次更新后的结果完全一致。准备记录还必须相对上次有可审计的实际变化（新增/调整包、移除包或更新计划来源）；比较前按 `packageId` 排序包数组，并归一化 `dependsOn` 等无意义集合顺序，只重放旧记录（包括倒序重放相同包）再加一条理由会以 `PREPARATION` 拒绝，非空理由不等于用户授权证明。未列出的旧包默认保留；`preparationRemove` 显式移除包，但仍在 dispatched 等非终态且未被接替的包不能移除。回执与 `preparationUpdates` 记录 `changed`/`removed`/`preserved` 和 before/after。只同步进度、日志或路径不要求重问。不改 route/channels/历史工作包，也不替代用户授权。
 
 回执返回有效权限和变更摘要，例如：
 
@@ -169,11 +194,11 @@ node "<入口>" signal task-update ... --id update-3 --paths docs/new.md --paths
 {"accepted":true,"revision":8,"taskId":"task-1","goal":"新目标","permissions":{"mode":"write","allowedPaths":["README.md","docs/new.md"]},"change":{"permissions":{"mode":{"from":"plan","to":"write"},"allowedPaths":{"mode":"append","added":["docs/new.md"],"removed":[]}}},"hostPermissionMode":"default","note":"已更新本机任务声明；实际写入仍受宿主当前只读/计划权限约束，插件只记录声明，不自动证明用户授权真实存在"}
 ```
 
-变更追加到任务的 `updates`（`task show` 显示条数）；历史回执不改写，旧任务兼容。权限收缩不追溯取消已完成的产物，后续知识/对齐写入按新范围检查；直接 Edit/Write 不受本插件拦截。
+变更追加到任务的 `updates`（`task show` 显示条数），准备更新另记 `preparationUpdates`；历史回执不改写，旧任务兼容。权限收缩不追溯取消已完成的产物，后续知识/对齐写入按新范围检查。已绑定准备记录的任务改目标或扩大权限范围时，必须按本任务已绑定的准备记录重新核对并提交上述实际变化；复杂任务不能降成简单记录后扩大范围。PreToolUse 对活动任务的 `read-only`/`plan` 声明再核对写入，任意 shell 写文件仍由宿主权限/沙箱约束。
 
-Lead 的活动任务结束回合时，Stop 会挡一次（等待用户、本回合已挡过时不挡）：有在途工作包时要求继续阻塞等待结果（`wait_ms: 0`），或向用户说明为什么暂停（在途包全是 `builtin:` 通道时，宿主会通知结果，只要求说明在等什么）；没有在途包而未发 task-end 时给出缺项，按提示补齐后发 task-end，或向用户说明还没完成的部分。计划模式下，仅本回合显式 task-start/phase 才核对计划交付：交付完整实施计划时一次列明分包，先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。历史 `plans` 和普通解释、讨论不因 `mode=plan` 单独挡，也不落到通用门禁阻挡。
+Lead 的活动任务结束回合时，Stop 会挡一次（等待用户、本回合已挡过时不挡）：有在途工作包时要求继续等待结果：`codeg:` 包给出 `get_delegation_status` 的 `wait_ms: 0` 阻塞等待，`builtin:` 包说明宿主会通知结果，其他通道要求按当前入口实际支持的方式等待；或向用户说明为什么暂停（在途包全是 `builtin:` 时只要求说明在等什么）；没有在途包而未发 task-end 时给出缺项，按提示补齐后发 task-end，或向用户说明还没完成的部分。计划模式下，仅本回合显式 task-start/phase 才核对计划交付：交付完整实施计划时一次列明分包，先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。历史 `plans` 和普通解释、讨论不因 `mode=plan` 单独挡，也不落到通用门禁阻挡。
 
-用户指定了各角色用哪个智能体时，task-start 可选带 `"channels": {"worker": "codeg:claude_code", "reviewer": "codeg:codex"}`，每个工作包填实际 `channel`。`channels` 每角色只能声明一个；同一角色各包通道不同时省略该角色键，必要时整项不带，以准备记录的逐包 `agent`/`channel` 和每次 `packages` 的 `channel` 为准。当前协议只在任务已声明该角色通道而包通道不同（含未填），或 delegated 任务的 worker 包由 Lead 实施（`channel: "lead"` 或 `handle: "lead-direct"`）时判偏离：须在同一 packages 信号附 `change` 列出该包，否则回执 `CHANNEL`。未声明角色通道或同一角色各包使用不同通道时，程序没有逐包声明可比，仍须先向用户说明并记录，逐包核对留 W2；不能先声明错误通道，再以实际执行与声明一致为由通过。换新 packageId 返修时新包带 `"supersedes": "<旧包>"`，只能在创建时声明；已交付或审查要求修订的轮次累计（同一交付轮次只计一次，同一轮迟到的交付引用或 FIX 不重复累计）、旧包自动收尾；从未产出的启动失败重派不增加返修。同包返修再次交付后，旧 `reviewedRef` 不再匹配新的 `deliveredRef`，必须重新送审。当前账本仍有审查结论的 worker 包（PASS/FIX/BLOCKED；含它接替过的旧包），审查缺项不能用 waivers 豁免，也不能改标 waived。waived 预校验同时看批前当前结论与本批合并后的最终结论：同一批把审查对象从 A 改指 B 时，A 的批前 FIX/BLOCKED 仍参与；重指须在单独信号成功落盘后，后续信号才不再保留旧 FIX/BLOCKED。历史只有 PASS 单调保留，并跨信号沿 supersedes 链保留；审查对象改指其他包后，历史 PASS 仍算已审。曾有 PASS 的包不能改 canceled（即使审查后来改成 FIX/BLOCKED，返回 `PACKAGE`）；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消。处理方式是重新送审最终交付版本，或用 supersedes 接替。同一批 packages 不允许重复 packageId（返回 `PACKAGE` 并整批回滚）。同一批新建 worker 包并直接标 canceled 时，若同批 PASS 指向它或 supersedes 链上有 PASS，整批返回 `PACKAGE`，与数组顺序无关。`task show` 显示 `channels` 与 `diagnostic`。
+用户指定了各角色用哪个智能体时，task-start 可选带 `"channels": {"worker": "codeg:claude_code", "reviewer": "codeg:codex"}`，每个工作包填实际 `channel`。`channels` 每角色只能声明一个；同一角色各包通道不同时省略该角色键，必要时整项不带，以准备记录的逐包 `agent`/`channel` 和每次 `packages` 的 `channel` 为准。当前协议只在任务已声明该角色通道而包通道不同（含未填），或 delegated 任务的 worker 包由 Lead 实施（`channel: "lead"` 或 `handle: "lead-direct"`）时判偏离：须在同一 packages 信号附 `change` 列出该包，否则回执 `CHANNEL`。准备记录在 `task-start` 固定到任务后，`packages` 还会按包 ID 核对 `role`/`agent`/`channel`/`scope`：新包未在准备记录中声明，或字段与开工时选择不一致，返回 `PREPARATION` 和具体 `missing`；新增、拆分、合并或更换包需先请用户确认：尚未开工时更新 `prepare`；任务已开工则用 `task-update` 的 `preparation` 与 `preparationReason` 更新已绑定快照（目标或范围变化时同时给 `preparationTarget`）。`scope` 是可核对的负责范围文本，不是路径所有权沙箱。换新 packageId 返修时新包带 `"supersedes": "<旧包>"`，只能在创建时声明；已交付或审查要求修订的轮次累计（同一交付轮次只计一次，同一轮迟到的交付引用或 FIX 不重复累计）、旧包自动收尾；从未产出的启动失败重派不增加返修。同包返修再次交付后，旧 `reviewedRef` 不再匹配新的 `deliveredRef`，必须重新送审。当前账本仍有审查结论的 worker 包（PASS/FIX/BLOCKED；含它接替过的旧包），审查缺项不能用 waivers 豁免，也不能改标 waived。waived 预校验同时看批前当前结论与本批合并后的最终结论：同一批把审查对象从 A 改指 B 时，A 的批前 FIX/BLOCKED 仍参与；重指须在单独信号成功落盘后，后续信号才不再保留旧 FIX/BLOCKED。历史只有 PASS 单调保留，并跨信号沿 supersedes 链保留；审查对象改指其他包后，历史 PASS 仍算已审。曾有 PASS 的包不能改 canceled（即使审查后来改成 FIX/BLOCKED，返回 `PACKAGE`）；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消。处理方式是重新送审最终交付版本，或用 supersedes 接替。同一批 packages 不允许重复 packageId（返回 `PACKAGE` 并整批回滚）。同一批新建 worker 包并直接标 canceled 时，若同批 PASS 指向它或 supersedes 链上有 PASS，整批返回 `PACKAGE`，与数组顺序无关。`task show` 显示 `channels` 与 `diagnostic`。
 
 只读诊断包（不产生项目写入的调查、复现或资料核对）可在**首次创建**时声明免审，避免为简单诊断重复派 Reviewer：同一批 packages 不允许重复 packageId，不能先消费再在批内改 `dispatched` 补挂；同一 packages 信号给新包带 `"diagnostic": {"purpose": "核对 README 与发布说明是否一致", "scope": ["README.md", "docs/usage.md"], "reason": "只读比对，不修改文件"}`，包须为 `dispatched` 的 worker，不能带 `deliveredRef` 或 `supersedes`。实现包、审查包、事后补声明或修改声明、空理由、空/绝对/含 `..` 的范围都返回 `PACKAGE`。交付时在 `note` 写可定位结论与证据，例如 `"note": "结论：一致；证据：README.md 第 1 行、docs/usage.md"`；门禁缺结论会列 `diagnostic:<id>`，不能用 waiver 抵扣。声明只表示事先约定与信任，不证明进程实际未写；历史未声明包仍要求审查。
 

@@ -1,41 +1,33 @@
 import path from 'node:path';
+import { realpathSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { archiveLifecycleEvents, canonical, digest, id, mutate, observeHost, readState, recordLifecycleEvent, samePath, within } from './store.mjs';
 import { acceptSignal, consumeLifecycleEvents, interrupt, LIFECYCLE_EVENTS, openTurn, pendingFor, sessionKey, stop, taskKey, TERMINAL_PACKAGE } from './protocol.mjs';
 import { resolveProject } from './projects.mjs';
 import { precheckSpecs } from './spec.mjs';
 import { projectContext, readOptionalContext, signalUsage } from './context.mjs';
-import { PRODUCT_ROOT, PRODUCT_VERSION } from './entry.mjs';
+import { hostTool, PRODUCT_ROOT, PRODUCT_VERSION, TRANSPORT_FLAG, transportArguments } from './entry.mjs';
 import { findExtraction, markExtractionStart, registerExtraction } from './capture.mjs';
+import { PLAN_DIRECTORY, preparationMissing, resolvePlanPath } from './preparation.mjs';
+import { CODEG_DELEGATION_STATUS_TOOLS, CODEG_DELEGATION_TERMINAL, CODEG_DELEGATION_TOOLS, CODEG_QUESTION_TOOLS, delegationTasks } from './adapters/codeg.mjs';
 
-export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd', 'PreCompact', 'PostCompact'];
+export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd', 'PreCompact', 'PostCompact'];
 // Claude Code 没有 Interrupt 事件；StopFailure 承担中断保存语义，其余同名事件语义与 Codex 对齐。
-export const CLAUDE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Stop', 'StopFailure', 'SessionEnd', 'PreCompact', 'PostCompact'];
+export const CLAUDE_EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'StopFailure', 'SessionEnd', 'PreCompact', 'PostCompact'];
 export const HOST_EVENTS = { codex: EVENTS, claude: CLAUDE_EVENTS };
 export const HOSTS = ['codex', 'claude'];
 // 提问工具名按宿主分表。Claude 依据本机 transcript 与 hooks 文档（MCP 名保留服务器连字符）；
 // Codex 原生名来自本机 rollout，hook 中 MCP 名按源码为原始服务器名，下划线形式是模型可见名，保留兼容。
+// Codeg 专有名称来自适配模块，公共流程只关心“这是否是当前宿主的提问工具”。
 export const QUESTION_TOOLS = {
-  codex: ['request_user_input', 'request_user_input_async', 'mcp__codeg-mcp__ask_user_question', 'mcp__codeg_mcp__ask_user_question'],
-  claude: ['AskUserQuestion', 'mcp__codeg-mcp__ask_user_question'],
+  codex: ['request_user_input', 'request_user_input_async', ...CODEG_QUESTION_TOOLS],
+  claude: ['AskUserQuestion', ...CODEG_QUESTION_TOOLS],
 };
 // 宿主内置子代理（Claude Agent 工具、Codex spawn_agent）的事件带 agent_id 并共享父 session_id；
 // 这些事件不属于 Lead 回合，直接放行。`--agent` 启动的主会话只有 agent_type，不在此列。
 export const isSubagentEvent = event => typeof event.agent_id === 'string' && event.agent_id.length > 0;
 // Codeg 委派状态工具；两种写法对应 Claude（保留连字符）与 Codex（规范为下划线）。
-export const DELEGATION_STATUS_TOOLS = ['mcp__codeg-mcp__get_delegation_status', 'mcp__codeg_mcp__get_delegation_status'];
-const TERMINAL_DELEGATION = ['completed', 'failed', 'canceled'];
-// 只取宿主返回的 {tasks:[{task_id,status}]} 结构，不扫描结果正文。
-function delegationTasks(response, depth = 0) {
-  if (depth > 5 || response === null || response === undefined) return [];
-  if (typeof response === 'string') { const parsed = parseText(response); return parsed ? delegationTasks(parsed, depth + 1) : []; }
-  if (Array.isArray(response)) return response.flatMap(item => delegationTasks(item, depth + 1));
-  if (typeof response !== 'object') return [];
-  if (Array.isArray(response.tasks)) return response.tasks.filter(t => typeof t?.task_id === 'string').map(t => ({ taskId: t.task_id, status: t.status }));
-  if (typeof response.text === 'string') return delegationTasks(response.text, depth + 1);
-  if (Array.isArray(response.content)) return delegationTasks(response.content, depth + 1);
-  if (Object.hasOwn(response, 'output')) return delegationTasks(response.output, depth + 1);
-  return [];
-}
+export const DELEGATION_STATUS_TOOLS = [...CODEG_DELEGATION_STATUS_TOOLS];
 // 等待集合里仍有账本已记为终态的 handle 时提醒移出，避免重复带回已消费结果；只追加提示，不改宿主输出。
 function delegationHint(state, project, event, turnId) {
   const session = state.sessions[sessionKey(project.projectId, event.session_id)];
@@ -47,7 +39,7 @@ function delegationHint(state, project, event, turnId) {
   for (const item of delegationTasks(event.tool_response)) {
     const pkg = byHandle.get(item.taskId);
     if (pkg && TERMINAL_PACKAGE.includes(pkg.status)) settled.push(pkg.packageId);
-    else if (pkg && TERMINAL_DELEGATION.includes(item.status) && pkg.status === 'dispatched') unrecorded.push(pkg.packageId);
+    else if (pkg && CODEG_DELEGATION_TERMINAL.includes(item.status) && pkg.status === 'dispatched') unrecorded.push(pkg.packageId);
   }
   const notes = [];
   if (settled.length) notes.push(`等待集合含账本已终态的包（${settled.join('、')}）：下次查询移出这些 task_id，不重读结果。`);
@@ -136,6 +128,13 @@ export function signalCommand(event) {
   // PowerShell 的直接调用可以带前导调用运算符 `&`；组合命令仍由 shellTokens 拒绝。
   return raw.trim().replace(/^&\s+/, '');
 }
+// CLI 用 transportArguments 还原 command() 为 PowerShell 5.1 编码的参数；Hook 必须用同一解码，
+// 否则含空格/引号的入口、--input 路径或载荷会被当成另一条命令而漏检。
+function signalTokens(event) {
+  const tokens = shellTokens(signalCommand(event));
+  if (!tokens) return null;
+  return tokens.includes(TRANSPORT_FLAG) ? transportArguments(tokens) : tokens;
+}
 // 升级前开的会话可能仍持有旧发布副本的入口；状态根 releases 下的副本同属本插件，signal 输出格式一致，照常接受。
 async function ownEntry(file, entry, directory) {
   const actual = await canonical(file);
@@ -146,7 +145,7 @@ async function ownEntry(file, entry, directory) {
 }
 export async function isSignalInvocation(event, entry = path.join(PRODUCT_ROOT, 'bin', 'workflow.mjs'), directory) {
   if (!['Bash', 'exec_command', 'PowerShell', 'powershell', 'pwsh'].includes(event.tool_name)) return false;
-  const tokens = shellTokens(signalCommand(event));
+  const tokens = signalTokens(event);
   if (!tokens || tokens.length < 3) return false;
   const nodeToken = tokens[0];
   if (!['node', 'node.exe'].includes(nodeToken.toLowerCase()) && !samePath(path.resolve(nodeToken), process.execPath)) return false;
@@ -159,7 +158,365 @@ function isComposedSignal(event) {
   if (!['Bash', 'exec_command', 'PowerShell', 'powershell', 'pwsh'].includes(event.tool_name)) return false;
   const raw = signalCommand(event);
   // 入口可能藏在变量里（$wf=...; node $wf signal），命令里同时出现本插件入口和 signal 的输入参数或子命令就回执。
-  return typeof raw === 'string' && /workflow\.mjs/.test(raw) && /\bsignal\s+(?:--(?:base64|input)\b|(?:task-start|task-update|task-end|phase|packages|role-claim|disposition)\s+--)/.test(raw);
+  // command() 生成的命令可能把入口路径编码成 workflow-arg64: 标记，此时传输开关本身就是本插件生成的证据。
+  const entry = typeof raw === 'string' && (/workflow\.mjs/.test(raw) || raw.includes(TRANSPORT_FLAG));
+  return entry && /\bsignal\s+(?:--(?:base64|input)\b|(?:task-start|task-update|task-end|phase|packages|role-claim|disposition|prepare)\s+--)/.test(raw);
+}
+// PreToolUse 的类型集合只描述“能否在动作发生前判断”，不依赖某个产品的自然语言。
+// 写入工具按宿主实测名称收列；命令工具只有确认是本插件直接 signal 时才读取状态。
+const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch', 'write_file', 'delete_file']);
+const DELEGATION_TOOLS = new Set(['Agent', 'Task', 'collaborationspawn_agent', 'spawn_agent', ...CODEG_DELEGATION_TOOLS]);
+const COMMAND_TOOLS = new Set(['Bash', 'exec_command', 'PowerShell', 'powershell', 'pwsh']);
+const READ_ONLY_SUBAGENTS = new Set(['Explore', 'Plan']);
+function preToolUseDeny(message) {
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'deny',
+      permissionDecisionReason: message,
+    },
+    systemMessage: message,
+  };
+}
+// apply_patch 的路径写在补丁文本里；只取明确的文件指令，不解析自然语言补丁内容。
+function patchPaths(text) {
+  if (typeof text !== 'string') return [];
+  const paths = [];
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+?)\s*$/.exec(line);
+    if (match) paths.push(match[1].replace(/^"(.*)"$/, '$1'));
+  }
+  return paths;
+}
+function toolTargets(event) {
+  const { name, input } = hostTool(event);
+  if (name === 'apply_patch') return patchPaths(input.command ?? input.patch);
+  const value = input.file_path ?? input.notebook_path ?? input.path;
+  return typeof value === 'string' && value ? [value] : [];
+}
+// 准备阶段只允许维护指定源计划或 docs/plans 下的 Markdown；业务源码、测试、.local 和任意后缀都不在范围内。
+// 与 preparation.normalizeSource 共用 resolvePlanPath：字面路径和真实路径都必须是 docs/plans 下的 Markdown，
+// 且路径链上不能有 symlink/junction，所以“字面 md、实际指业务文件”的别名不会因 realpath 相等而放行。
+function isPreparationTarget(resolved, rawPath, preparation, plans = []) {
+  if (!rawPath || typeof rawPath !== 'string') return false;
+  let realRoot;
+  try { realRoot = realpathSync(resolved.worktree); } catch { return false; }
+  const literal = path.resolve(resolved.cwd || resolved.worktree, rawPath);
+  if (!within(realRoot, literal)) return false;
+  const relative = path.relative(realRoot, literal).replaceAll('\\', '/');
+  if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return false;
+  // exact docs/plans/plan.md 是准备阶段唯一固定候选；仍走同一真实路径与链接检查。
+  const target = resolvePlanPath(realRoot, relative);
+  if (target.error) return false;
+  if (relative === `${PLAN_DIRECTORY}/plan.md`) return true;
+  const allowed = [preparation?.source?.path, ...(Array.isArray(plans) ? plans : [])].filter(Boolean);
+  for (const plan of allowed) {
+    const declared = resolvePlanPath(realRoot, plan);
+    if (declared.error) continue;
+    if (samePath(target.realPath, declared.realPath)) return true;
+  }
+  return false;
+}
+// 角色会话只按显式 roleTaskId 找父任务；没有绑定或包不存在时返回具体原因，不再跨活动任务按包 ID 首匹配。
+function packageForSession(state, projectId, session) {
+  if (!session?.packageId) return { reason: 'no-package' };
+  if (!session.roleTaskId) return { reason: 'unbound' };
+  const task = state.tasks[taskKey(projectId, session.roleTaskId)];
+  if (!task) return { reason: 'task-missing' };
+  if (task.lifecycle !== 'active') return { reason: 'task-inactive', task };
+  const pkg = task.packages?.[session.packageId];
+  if (!pkg) return { reason: 'package-missing', task };
+  if (pkg.role !== session.role) return { reason: 'role-mismatch', task, pkg };
+  return { task, pkg };
+}
+const DELEGATION_PACKAGE_MARK = /^workflow-package\s*[:：]\s*([A-Za-z0-9][A-Za-z0-9_.:-]{0,199})/i;
+const DELEGATION_PACKAGE_KEYS = ['packageId', 'package_id'];
+const DELEGATION_TEXT_KEYS = ['description', 'title', 'task_name', 'name', 'message', 'prompt', 'task'];
+// 委派输入没有统一的包字段；只接受显式结构化关联：packageId/package_id，或 description/title/task_name/
+// prompt/task/message 首行的 workflow-package:<id>。不解析自然语言叙述。多个标记不一致时拒绝，避免同时踩两个包。
+function delegationPackageMarkers(input) {
+  const markers = [];
+  for (const key of DELEGATION_PACKAGE_KEYS) {
+    if (typeof input[key] === 'string' && input[key].trim()) markers.push(input[key].trim());
+  }
+  for (const key of DELEGATION_TEXT_KEYS) {
+    if (typeof input[key] !== 'string') continue;
+    const match = DELEGATION_PACKAGE_MARK.exec(input[key].trim());
+    if (match) markers.push(match[1]);
+  }
+  return [...new Set(markers)];
+}
+const normalizeAgent = value => typeof value === 'string' ? value.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
+// 每个委派工具按当前适配/宿主 schema 核对必需字段与 Agent 来源；没有可解析 Agent 的入口不能静默跳过比较。
+const DELEGATION_ENTRIES = new Map([
+  ['Agent', { channel: 'builtin:', required: ['description', 'prompt', 'subagent_type'], agentField: 'subagent_type' }],
+  ['Task', { channel: 'builtin:', required: ['description', 'prompt', 'subagent_type'], agentField: 'subagent_type' }],
+  ['collaborationspawn_agent', { channel: 'builtin:', required: ['task_name', 'message'], impliedAgent: 'codex' }],
+  ['spawn_agent', { channel: 'builtin:', required: ['task_name', 'message'], impliedAgent: 'codex' }],
+  ...CODEG_DELEGATION_TOOLS.filter(name => name.endsWith('delegate_to_agent')).map(name => [name, {
+    channel: 'codeg:', required: ['task'], agentField: 'agent_type', assistantField: 'assistant_id', oneOf: ['agent_type', 'assistant_id'],
+  }]),
+  ...CODEG_DELEGATION_TOOLS.filter(name => name.endsWith('create_work_task')).map(name => [name, {
+    channel: 'codeg:', required: ['title', 'prompt'], agentField: 'agent_type',
+  }]),
+]);
+function requestedDelegationAgent(name, input) {
+  const entry = DELEGATION_ENTRIES.get(name);
+  if (entry?.agentField) return input[entry.agentField] ?? null;
+  return entry?.impliedAgent ?? null;
+}
+// 委派入口的 schema 缺项与关联任务/角色核对；prompt/task 正文只作 opaque 输入，不解析语义或路径范围。
+function delegationSchemaDenial(task, pkg, name, input) {
+  const entry = DELEGATION_ENTRIES.get(name);
+  if (!entry) return `未知委派入口 ${name}；先更新宿主适配，不能按未核对的入口派发`;
+  const missing = entry.required.filter(key => typeof input[key] !== 'string' || !input[key].trim());
+  if (entry.oneOf && !entry.oneOf.some(key => typeof input[key] === 'string' && input[key].trim())) missing.push(entry.oneOf.join('/'));
+  if (missing.length) return `委派入口 ${name} 缺少可核对的必需字段：${missing.join('、')}；按该工具的真实参数补齐后再派发`;
+  // Codeg delegate_to_agent 的 assistant_id 由宿主决定实际 Agent，workflow 没有可靠的 assistant→Agent 映射。
+  // 只要出现 assistant_id 就拒绝，即使同时给了 agent_type：双字段不能证明最终执行者与准备记录一致。
+  if (entry.assistantField) {
+    const assistant = input[entry.assistantField];
+    if (assistant !== undefined && assistant !== null && String(assistant).trim() !== '') {
+      return `委派入口 ${name} 提供了 ${entry.assistantField}=${assistant}，但 workflow 没有可靠的 assistant→Agent 映射，无法核对工作包 ${pkg.packageId} 的 Agent；请移除 ${entry.assistantField} 并直接用 ${entry.agentField} 指定 Agent`;
+    }
+  }
+  if (entry.agentField && !entry.oneOf && !(typeof input[entry.agentField] === 'string' && input[entry.agentField].trim())) {
+    return `委派入口 ${name} 未给出 ${entry.agentField}，无法核对工作包 ${pkg.packageId} 的 Agent；显式指定 ${entry.agentField}，或更新准备记录`;
+  }
+  const requestedAgent = requestedDelegationAgent(name, input);
+  if (entry.agentField && !requestedAgent) {
+    return `委派入口 ${name} 未给出可解析的 ${entry.agentField}，无法核对工作包 ${pkg.packageId} 的 Agent；改用带 ${entry.agentField} 的入口`;
+  }
+  const taskRef = input.taskId ?? input.task_id;
+  if (taskRef !== undefined && taskRef !== task.taskId) {
+    return `委派输入关联的任务 ${taskRef} 与当前活动任务 ${task.taskId} 不一致；不能把包派到其他任务`;
+  }
+  // 仅在工具确实带角色字段时才比较，不按自然语言猜角色。
+  const roleRef = input.role ?? input.packageRole;
+  if (roleRef !== undefined && roleRef !== pkg.role) {
+    return `委派输入声明角色 ${roleRef}，与工作包 ${pkg.packageId} 的角色 ${pkg.role || '未填'} 不一致`;
+  }
+  return null;
+}
+// 委派必须有可核验的工作包关联：已登记、dispatched、worker/reviewer、依赖已终态、入口通道与 Agent 一致。
+// 审查派工同样是合法委派；只有 role-claimed reviewer 会话自身不能写或再委派。
+function delegationDenial(task, pkg, name, input) {
+  if (!pkg) return `委派缺少可核验的工作包关联：在委派输入的 description/title/task_name 或 prompt/task/message 首行写 workflow-package:<packageId>，并先在活动任务 packages 中登记该包；准备记录里的 scope 只是关联包声明，不是机器验证过的路径或语义沙箱`;
+  if (pkg.status !== 'dispatched') return `工作包 ${pkg.packageId} 当前状态为 ${pkg.status}，不是 dispatched；不能据此发起委派`;
+  if (pkg.supersededBy) return `工作包 ${pkg.packageId} 已被 ${pkg.supersededBy} 接替；改为派发接替包`;
+  if (!['worker', 'reviewer'].includes(pkg.role)) return `工作包 ${pkg.packageId} 的角色是 ${pkg.role || '未填'}，委派只能关联 worker 或 reviewer 包`;
+  for (const dependency of pkg.dependsOn || []) {
+    const item = task.packages?.[dependency];
+    if (!item) return `工作包 ${pkg.packageId} 的依赖 ${dependency} 未登记；先核对准备记录和包清单`;
+    if (!TERMINAL_PACKAGE.includes(item.status)) return `工作包 ${pkg.packageId} 的依赖 ${dependency} 尚未终态（${item.status}）；先等依赖完成`;
+  }
+  if (!pkg.channel) return `工作包 ${pkg.packageId} 未记录实际调用通道；先按准备记录补齐 channel 再派发`;
+  const entry = DELEGATION_ENTRIES.get(name);
+  if (!entry) return `未知委派入口 ${name}；先更新宿主适配，不能按未核对的入口派发`;
+  if (!pkg.channel.startsWith(entry.channel)) return `工作包 ${pkg.packageId} 的通道是 ${pkg.channel}，与委派入口 ${name} 要求的 ${entry.channel}* 不一致；先用该通道的委派工具，或更新准备绑定`;
+  if (!pkg.agent) return `工作包 ${pkg.packageId} 未记录 Agent；先按准备记录补齐再派发`;
+  if (!pkg.scope) return `工作包 ${pkg.packageId} 未记录负责范围；先按准备记录补齐再派发`;
+  const schemaDenial = delegationSchemaDenial(task, pkg, name, input);
+  if (schemaDenial) return schemaDenial;
+  const requested = requestedDelegationAgent(name, input);
+  // 只读诊断包只能用宿主能明确识别的只读子代理；不能拿 general-purpose/Codeg 委派借免审声明取得写入能力。
+  // 诊断包按“实际子代理只读”派发，准备记录里的 Agent 是声明选择，不再要求它与 Explore/Plan 字面相等。
+  if (pkg.diagnostic) {
+    const readOnlyNative = (name === 'Agent' || name === 'Task') && READ_ONLY_SUBAGENTS.has(requested);
+    if (!readOnlyNative) return `工作包 ${pkg.packageId} 是只读诊断包：只能用明确只读的 Explore/Plan 子代理派发，不能使用 ${name}（${requested || '未指定'}）；诊断包不提供写入授权`;
+    return null;
+  }
+  const expected = normalizeAgent(requested);
+  const declared = normalizeAgent(pkg.agent);
+  const channelAgent = normalizeAgent(String(pkg.channel).split(':').slice(1).join(':'));
+  // Codeg 的通道本身编码实际 agent_type，必须同时匹配准备 Agent 与通道中的 Agent；
+  // 只匹配其中一个会让“准备 agent=codex、channel=codeg:claude_code、实际 claude_code”通过。
+  // 通道尾部没有可归一化 Agent 时保守拒绝，不为未知名称新建映射框架。
+  if (entry.channel === 'codeg:') {
+    if (!channelAgent) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；Codeg 委派需要 codeg:<agent_type> 形式的实际通道，先更新准备记录`;
+    if (!expected || expected !== declared || expected !== channelAgent) {
+      return `工作包 ${pkg.packageId} 的 Agent 与本次委派不一致（准备记录：${pkg.agent}；通道：${pkg.channel}；委派：${requested}）；Codeg 委派必须同时匹配准备 Agent 与通道中的 Agent`;
+    }
+    return null;
+  }
+  if (!expected || (expected !== declared && expected !== channelAgent)) {
+    return `工作包 ${pkg.packageId} 的 Agent 与本次委派不一致（准备记录：${pkg.agent}；委派：${requested}）`;
+  }
+  return null;
+}
+function signalInvocationDetails(event) {
+  const tokens = signalTokens(event);
+  if (!tokens) return null;
+  let index = 2;
+  while (tokens[index] === '--state-dir') index += 2;
+  if (tokens[index] !== 'signal') return null;
+  const flags = {};
+  let action = tokens[index + 1];
+  if (action?.startsWith('--')) action = null;
+  for (let at = action ? index + 2 : index + 1; at < tokens.length; at++) {
+    const token = tokens[at];
+    if (!token.startsWith('--')) continue;
+    const key = token.slice(2);
+    if (tokens[at + 1] !== undefined && !tokens[at + 1].startsWith('--')) {
+      flags[key] = tokens[at + 1];
+      at++;
+    } else flags[key] = true;
+  }
+  return { action, flags };
+}
+async function signalInput(event, details) {
+  if (!details) return null;
+  try {
+    if (details.flags.input && typeof details.flags.input === 'string') {
+      const file = path.resolve(event.cwd, details.flags.input);
+      const text = await readFile(file, 'utf8');
+      return JSON.parse(text.replace(/^﻿/, ''));
+    }
+    if (details.flags.base64 && typeof details.flags.base64 === 'string') {
+      return JSON.parse(Buffer.from(details.flags.base64, 'base64').toString('utf8'));
+    }
+  } catch { /* 输入文件不可读或不是 JSON：CLI 会拒绝，PreToolUse 不抢先猜。 */ }
+  return null;
+}
+function preparationGapText(gaps) {
+  return gaps.map(gap => gap.message).join('、');
+}
+// 任务声明的只读/计划权限是实际写入的上限；宿主模式仍是更高优先级的约束，这里只补任务声明这一层。
+// 计划模式只继续允许准备资料维护，不把计划任务变成业务写入授权。
+function taskModeDenial(task, name, event, resolved, preparation) {
+  const mode = task?.permissions?.mode;
+  if (mode !== 'read-only' && mode !== 'plan') return null;
+  if (DELEGATION_TOOLS.has(name)) {
+    // 只读委派按宿主声明的子代理类型判断；不是按名字猜诊断身份。Codex/Codeg 没有可信只读类型时仍拒绝。
+    const type = requestedDelegationAgent(name, hostTool(event).input);
+    if ((name === 'Agent' || name === 'Task') && READ_ONLY_SUBAGENTS.has(type)) return null;
+    return `任务权限为 ${mode}：不能派实施包或启动实施子代理；只读 Explore/Plan 子代理除外，先由 Lead 用 task-update 取得用户授权并改为可写。`;
+  }
+  if (!WRITE_TOOLS.has(name)) return null;
+  if (mode === 'read-only') return '任务权限为 read-only：不能修改文件；只做读取、检索和结论交付，确需写入先由 Lead 用 task-update 取得用户授权。';
+  const targets = toolTargets(event);
+  if (!targets.length) return '任务权限为 plan：无法识别这次写入目标；计划模式只允许维护准备资料。';
+  const blocked = targets.filter(target => !isPreparationTarget(resolved, target, preparation, task.plans?.map(plan => plan.path)));
+  return blocked.length ? `任务权限为 plan：不能修改业务文件（${blocked.join('、')}）；计划模式只允许维护准备资料。` : null;
+}
+// PreToolUse 只做三类可判定的事：未开工时的业务写入、实施委派、本插件 task-start/packages 命令。
+// 读、检索、写计划、prepare 以及普通 shell 命令不读取状态直接放行；普通 shell 里的任意文件写入无法可靠区分。
+async function preToolUse(directory, event, options, agent) {
+  const { name, input } = hostTool(event);
+  const relevant = WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || COMMAND_TOOLS.has(name);
+  if (!relevant) return {};
+  // 宿主明确标记为 Explore/Plan 的只读子代理共享父会话身份，也不能写文件或继续委派；
+  // 其他子代理的实际包所有权由发起时的 workflow-package 关联核对，这里不按 agent_id 猜包。
+  if (isSubagentEvent(event) && READ_ONLY_SUBAGENTS.has(event.agent_type) && (WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name))) {
+    return preToolUseDeny(`只读子代理 ${event.agent_type} 不能修改文件或继续委派；只做读取、检索和结论交付。`);
+  }
+  // 命令工具先用命令文本筛掉明显不是本插件入口的调用，再确认确实是直接 signal。
+  if (COMMAND_TOOLS.has(name)) {
+    const raw = signalCommand(event);
+    if (typeof raw !== 'string' || (!raw.includes('workflow.mjs') && !raw.includes(TRANSPORT_FLAG))) return {};
+    if (!await isSignalInvocation(event, options.entry, directory)) return {};
+  }
+  const state = await readState(directory);
+  const resolved = await resolveProject(state, event.cwd);
+  if (!resolved) return {};
+  const projectId = resolved.project.projectId;
+  const session = state.sessions[sessionKey(projectId, event.session_id)];
+  if (!session) return {};
+  // 子代理的 PreToolUse 已在上层按 agent_id 放行；委派子会话若声明了角色，按包所有权核对。
+  if (session.role) {
+    if (!WRITE_TOOLS.has(name) && !DELEGATION_TOOLS.has(name)) return {};
+    if (session.role === 'reviewer') return preToolUseDeny('Reviewer 只读审查：不能修改源码、测试或配置；把审查结论交回 Lead。');
+    const owned = packageForSession(state, projectId, session);
+    const hints = {
+      'no-package': 'role-claim 未给出 packageId；用 signal role-claim --role worker --package <包ID> --task <活动任务ID> 重新声明',
+      unbound: `会话没有绑定父任务；用 signal role-claim --role ${session.role} --package ${session.packageId || '<包ID>'} --task <活动任务ID> 重新声明`,
+      'task-missing': `role-claim 绑定的任务 ${session.roleTaskId} 不存在；先由 Lead 核对任务 ID 再重新声明`,
+      'task-inactive': `role-claim 绑定的任务 ${session.roleTaskId} 不是活动任务；先由 Lead 确认当前任务再重新声明`,
+      'package-missing': `任务 ${session.roleTaskId} 没有工作包 ${session.packageId}；先由 Lead 用 packages 登记 dispatched 包，再开始实施`,
+    };
+    if (!owned.pkg) return preToolUseDeny(`已声明为 ${session.role}，但无法关联工作包：${hints[owned.reason] || hints.unbound}。`);
+    if (owned.pkg.role !== session.role) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 的角色是 ${owned.pkg.role || '未填'}，与会话声明 ${session.role} 不一致；先由 Lead 核对 role-claim。`);
+    if (owned.pkg.status !== 'dispatched') return preToolUseDeny(`工作包 ${owned.pkg.packageId} 当前状态为 ${owned.pkg.status}，不是 dispatched；工作结束后不能继续直接写入，返修由 Lead 重新派发。`);
+    // 只读诊断包即使以 worker 角色声明也只读：不能借免审声明写业务，也不再向下委派。
+    if (owned.pkg.diagnostic) {
+      if (WRITE_TOOLS.has(name)) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能修改文件；把结论写在交付 note 交回 Lead。`);
+      if (DELEGATION_TOOLS.has(name)) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能继续委派子代理；只做范围内的读取和结论交付。`);
+    }
+    const modeDenied = taskModeDenial(owned.task, name, event, resolved, session.preparation || null);
+    if (modeDenied) return preToolUseDeny(modeDenied);
+    return {};
+  }
+  const task = session.taskId ? state.tasks[taskKey(projectId, session.taskId)] : null;
+  const active = task?.lifecycle === 'active';
+  const preparation = session.preparation || null;
+  const gaps = preparation ? preparationMissing(preparation) : null;
+  const taskMessage = plan => `${plan}。准备阶段可以继续读代码、检索和写计划（docs/plans/plan.md、已绑定源计划或已登记关联计划）；完整准备保存后先 task-start；简单任务用 task-start --size simple --size-reason "<理由>" 声明。`;
+  if (COMMAND_TOOLS.has(name)) {
+    const details = signalInvocationDetails(event);
+    if (!details) return {};
+    const inputPayload = await signalInput(event, details);
+    const action = details.action || inputPayload?.action || null;
+    if (action === 'prepare') return {};
+    if (action === 'packages') {
+      if (active) return {};
+      return preToolUseDeny('尚未开始任务：packages 只能在活动任务上记账；先完整准备并 task-start，或按简单任务声明后 task-start。');
+    }
+    if (action !== 'task-start') return {};
+    if (active) return {}; // 接续已有任务，准备记录已在开工时绑定。
+    const route = details.flags.route ?? inputPayload?.route;
+    if (route === 'operation-only') {
+      // operation-only 不是业务写入豁免；协议层同样拒绝，这里在动作前直接给出缺项。
+      const mode = details.flags.mode ?? inputPayload?.permissions?.mode;
+      if (mode === 'write') return preToolUseDeny('operation-only 只用于例行操作和事务，不能声明业务写入权限；需要写业务文件时改用 lead-direct 或 delegated 并按准备要求开工。');
+      return {};
+    }
+    if (preparation && gaps.length) return preToolUseDeny(preparationGapText(gaps) + '。' + taskMessage('准备记录尚未齐全，不能开始实施'));
+    if (preparation && gaps.length === 0) {
+      if (route === 'delegated' && preparation.size !== 'complex') return preToolUseDeny('分工任务需要完整的复杂准备记录；当前只有简单任务记录，不能开始派包。');
+      return {};
+    }
+    const size = details.flags.size ?? inputPayload?.size;
+    const sizeReason = details.flags['size-reason'] ?? inputPayload?.sizeReason;
+    if (size === 'simple' && typeof sizeReason === 'string' && sizeReason.trim()) return {};
+    if (size === 'complex') return preToolUseDeny('复杂任务开始前先用 prepare 保存完整准备记录，再 task-start。');
+    return preToolUseDeny(taskMessage('尚未保存准备记录，也没有声明简单任务'));
+  }
+  // 业务写入：没有活动任务时，只允许准备资料维护；已有活动任务则沿用任务权限/包所有权，不把准备齐当成任意写入。
+  if (WRITE_TOOLS.has(name)) {
+    if (active) {
+      const modeDenied = taskModeDenial(task, name, event, resolved, preparation);
+      return modeDenied ? preToolUseDeny(modeDenied) : {};
+    }
+    const targets = toolTargets(event);
+    if (!targets.length) return preToolUseDeny(taskMessage('无法识别这次写入的目标文件'));
+    const blocked = targets.filter(target => !isPreparationTarget(resolved, target, preparation, task?.plans?.map(plan => plan.path)));
+    if (!blocked.length) return {};
+    if (preparation && gaps.length) return preToolUseDeny(preparationGapText(gaps) + '。' + taskMessage(`业务写入被拦下：${blocked.join('、')}`));
+    return preToolUseDeny(taskMessage(`业务写入被拦下：${blocked.join('、')}`));
+  }
+  // 实施委派：没有活动任务时只放行明确只读的子代理；Codex 的 spawn 参数不含可核对的只读标记，故一律要求先开工。
+  if (DELEGATION_TOOLS.has(name)) {
+    if (active) {
+      const modeDenied = taskModeDenial(task, name, event, resolved, preparation);
+      if (modeDenied) return preToolUseDeny(modeDenied);
+      // 先解析包标记：只读子代理只有在没有声明工作包时才保留免关联豁免。
+      // 带了 workflow-package:<id> 就必须按该包核对状态、通道、Agent 和角色，不能借 Explore/Plan 绕过。
+      const markers = delegationPackageMarkers(input);
+      if (markers.length > 1) return preToolUseDeny(`委派输入同时给出多个工作包标记（${markers.join('、')}）；一次委派只能关联一个包。`);
+      if (!markers.length && (name === 'Agent' || name === 'Task') && READ_ONLY_SUBAGENTS.has(requestedDelegationAgent(name, input))) return {};
+      const packageId = markers[0] || null;
+      const pkg = packageId ? task.packages?.[packageId] : null;
+      const denial = delegationDenial(task, pkg, name, input);
+      return denial ? preToolUseDeny(denial) : {};
+    }
+    if (name === 'Agent' || name === 'Task') {
+      const type = input.subagent_type ?? input.agent_type;
+      // 未开工时也只放行没有包标记的明确只读子代理；有标记就说明在冒充已登记委派。
+      if (READ_ONLY_SUBAGENTS.has(type) && !delegationPackageMarkers(input).length) return {};
+    }
+    return preToolUseDeny(taskMessage('实施委派被拦下'));
+  }
+  return {};
 }
 // 宿主 hook 超时：Codex 的 Interrupt/SessionEnd 只有 3 秒，其余 10 秒。锁等待预算必须留出
 // 启动、解析和落盘余量，预算耗尽时保守放行，不越过宿主上限。
@@ -186,10 +543,16 @@ export async function handleHook(directory, event, options = {}) {
     const name = event.hook_event_name;
     if (process.env.WORKFLOW_REVIEW === '1') return {};
     if (isSubagentEvent(event)) {
+      // 子代理内部工具调用沿用父会话的任务/准备状态做执行前检查；它没有自己的 workflow 身份，
+      // 因此不建立回执，也不让它的 signal 被记账。只读子代理的 Read/Grep 仍直接放行。
+      if (name === 'PreToolUse') return await preToolUse(directory, event, options, agent);
       // 内置子代理没有 workflow 身份：它发的 signal 不记录，回一句说明，免得它反复重发或停下等回执。
       if (name === 'PostToolUse' && (await isSignalInvocation(event, options.entry, directory) || isComposedSignal(event))) return contextOutput(name, 'workflow 未接受：宿主内置子代理与 Lead 共用会话，没有自己的 workflow 身份，信号不记录。不要重发 role-claim 或其他信号；按工作包和对应角色指引完成工作，把结果交回 Lead，由 Lead 记账。');
       return {};
     }
+    // 工具执行前检查不进入状态锁：只读状态并返回允许/拒绝，避免在动作前扩大写入与锁竞争。
+    // 未接入目录、无关工具和普通读取在 preToolUse 内部先行放行。
+    if (name === 'PreToolUse') return await preToolUse(directory, event, options, agent);
     const hostMode = typeof event.permission_mode === 'string' && event.permission_mode.trim() ? event.permission_mode : null;
     const question = QUESTION_TOOLS[agent].includes(event.tool_name);
     const signalInvocation = name === 'PostToolUse' && await isSignalInvocation(event, options.entry, directory);

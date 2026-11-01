@@ -8,6 +8,8 @@ import assert from 'node:assert/strict';
 import { enableProject } from '../src/projects.mjs';
 import { getContext } from '../src/context.mjs';
 import { handleHook } from '../src/hooks.mjs';
+import { mutate, readState } from '../src/store.mjs';
+import { sessionKey, taskKey } from '../src/protocol.mjs';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const entry = path.join(root, 'bin', 'workflow.mjs');
@@ -62,25 +64,65 @@ export async function claudeEvent(f, name, extra = {}) {
   return handleHook(f.directory, { hook_event_name: name, cwd: f.project, session_id: f.sessionId, prompt_id: f.promptId, permission_mode: 'default', ...extra }, { synthetic: true, entry, agent: 'claude' });
 }
 export async function identity(f) { return (await getContext(f.directory, f.project, 'lead', f.sessionId)).identity; }
-export async function emit(f, value) {
+// 合成用例主要验证账本和门禁，不再用 operation-only 冒名建立再改 route：
+// lead-direct 走真实的显式简单声明（size=simple + 理由），由协议正常建立并绑定简单快照。
+// 旧任务接续不再由通用 emit 暗中注入；需要历史账本的用例必须显式调用 legacyEmit。
+// 显式给出 size 的用例保持真实新任务路径，由它们覆盖准备强制逻辑。
+async function taskStartFixture(f, value) {
+  if (value?.action !== 'task-start' || value.size !== undefined || value.route !== 'lead-direct') return { value };
+  // 已保存准备记录的会话不能再补简单声明（协议会按复杂记录拒绝），先用真实准备开工。
+  const state = await readState(f.directory);
+  const session = state.sessions[sessionKey(f.projectId, f.sessionId)];
+  const key = taskKey(f.projectId, f.taskId);
+  if (session?.preparation || state.tasks[key]) return { value };
+  return { value: { ...value, size: 'simple', sizeReason: '合成夹具：仅验证账本与门禁的显式简单声明' } };
+}
+async function emitRaw(f, value, claude) {
   const payload = { ...await identity(f), taskId: f.taskId, signalId: `signal-${crypto.randomUUID()}`, ...value };
-  const output = await event(f, 'PostToolUse', {
-    tool_name: 'Bash', tool_input: { command: `node "${entry}" signal --base64 e30=` },
-    tool_response: { output: JSON.stringify({ workflow_signal: payload }) },
-  });
+  const output = claude
+    ? await claudeEvent(f, 'PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: `node "${entry}" signal --base64 e30=` },
+      tool_response: { stdout: JSON.stringify({ workflow_signal: payload }), stderr: '', interrupted: false },
+    })
+    : await event(f, 'PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: `node "${entry}" signal --base64 e30=` },
+      tool_response: { output: JSON.stringify({ workflow_signal: payload }) },
+    });
   const text = output.hookSpecificOutput?.additionalContext;
   assert.ok(text?.startsWith('workflow 回执：'), JSON.stringify(output));
-  return { payload, result: JSON.parse(text.slice('workflow 回执：'.length)) };
+  const result = JSON.parse(text.slice('workflow 回执：'.length));
+  return { payload, result };
+}
+export async function emit(f, value) {
+  const fixture = await taskStartFixture(f, value);
+  return emitRaw(f, fixture.value, false);
 }
 export async function claudeEmit(f, value) {
-  const payload = { ...await identity(f), taskId: f.taskId, signalId: `signal-${crypto.randomUUID()}`, ...value };
-  const output = await claudeEvent(f, 'PostToolUse', {
-    tool_name: 'Bash', tool_input: { command: `node "${entry}" signal --base64 e30=` },
-    tool_response: { stdout: JSON.stringify({ workflow_signal: payload }), stderr: '', interrupted: false },
-  });
-  const text = output.hookSpecificOutput?.additionalContext;
-  assert.ok(text?.startsWith('workflow 回执：'), JSON.stringify(output));
-  return { payload, result: JSON.parse(text.slice('workflow 回执：'.length)) };
+  const fixture = await taskStartFixture(f, value);
+  return emitRaw(f, fixture.value, true);
+}
+// 显式命名的旧任务夹具：只用于升级前无 preparation/channels/size 的账本兼容用例。
+// 新任务测试必须走真实 prepare→task-start→packages，不能借这个入口绕过准备强制。
+export async function legacyEmit(f, value) {
+  if (value?.action === 'task-start') {
+    const state = await readState(f.directory);
+    const key = taskKey(f.projectId, f.taskId);
+    if (!state.tasks[key]) {
+      if (!value.goal || !value.permissions || !['write', 'read-only', 'plan'].includes(value.permissions.mode)
+        || !Array.isArray(value.permissions.allowedPaths)) throw new Error('legacyEmit 需要完整的 goal/permissions');
+      await mutate(f.directory, async current => {
+        current.tasks[key] = {
+          projectId: f.projectId, taskId: f.taskId, goal: value.goal, parentTaskId: value.parentTaskId || null,
+          route: value.route ?? null, lifecycle: 'active', repairIssued: false, deliveries: {}, candidates: {}, packages: {},
+          permissions: value.permissions, createdAt: new Date().toISOString(),
+        };
+      });
+      // 旧任务已经存在，后续 task-start 是续接；不向载荷注入准备或历史字段。
+      const { goal: _goal, permissions: _permissions, ...continuation } = value;
+      return emitRaw(f, { ...continuation, action: 'task-start' }, false);
+    }
+  }
+  return emitRaw(f, value, false);
 }
 export async function claudeStart(f, permissions = { mode: 'write', allowedPaths: ['README.md', 'LESSONS.md', 'docs/说明.md'] }) {
   const result = await claudeEmit(f, { action: 'task-start', goal: 'Claude 隔离验证任务', route: 'lead-direct', permissions });

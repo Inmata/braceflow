@@ -45,9 +45,9 @@ const help = {
     'context --role lead|worker|reviewer [--project <目录>] [--session <sessionId>]',
     'task show --task <taskId> [--project <目录>]（只读查看分流、工作包账本、变更条数与门禁缺项）',
     'spec check [--project <目录>] [--ref <提交>]（只读检查 .spec 管辖文件是否漂移；指定 ref 时 spec 与代码均取自该提交，HEAD 仍按当前 worktree；有发现或失败时退出码 1）',
-    'signal <task-start|task-update|phase|role-claim|task-end|packages|prepare> --session <id> --turn <id> --id <signalId> [--task <id>] [--goal --route --mode --paths a,b --paths-mode replace|append --plans a,b --channels worker=x,reviewer=y --parent | --phase --delivery | --role --package | --final-ref | --plan --sections] [--input <补充字段 JSON>]（推荐：身份由本机状态补齐；task-update 仅该任务有效 Lead 可用，只改本机任务声明）',
+    'signal <task-start|task-update|phase|role-claim|task-end|packages|prepare> --session <id> --turn <id> --id <signalId> [--task <id>] [--goal --route --size simple|complex --size-reason "<理由>" --mode --paths a,b --paths-mode replace|append --plans a,b --channels worker=x,reviewer=y --parent | --phase --delivery | --role --package | --final-ref | --plan --sections] [--input <补充字段 JSON>]（推荐：身份由本机状态补齐；新任务须有完整准备、带理由的简单声明或 operation-only；task-update 仅该任务有效 Lead 可用，目标/范围变化时用 --input 同时给 preparation、preparationReason 与 preparationTarget；移除包用 preparationRemove）',
     'signal prepare ... --input <准备记录 JSON> [--plan <项目内计划路径>] [--sections <章节,逗号分隔>]（准备记录可在尚无业务任务时保存，不创建任务或工作包）',
-    'signal packages ... --package <id> [--role --status --channel --handle --ref --depends-on a,b --supersedes --verdict --reviews --base-ref --note --worktree]（单个包；同批多个包或 change 仍用 --input）',
+    'signal packages ... --package <id> [--role --status --package-agent <Agent> --scope --channel --handle --ref --depends-on a,b --supersedes --verdict --reviews --base-ref --note --worktree]（单个包；同批多个包或 change 仍用 --input；开工时固定的准备记录会按包核对 role/agent/channel/scope）',
     'signal task-end ... [--final-ref <提交>] [--validation-ref <提交> --evidence "<证据>" ...]（validation.ref 缺省取 --final-ref；waivers 等仍用 --input）',
     'signal --input <JSON文件> | --base64 <UTF-8 JSON>（完整 payload，兼容写法）',
     'knowledge inspect --path <资料路径> [--project <目录>]',
@@ -70,9 +70,9 @@ const help = {
 allowed.add('path');
 for (const key of ['global', 'now', 'query', 'run', 'version', 'task', 'ref', 'keep', 'discard']) allowed.add(key);
 // signal 便捷子命令的字段参数；身份字段（ticket、epoch、revision）不接受命令行传入，只从状态补齐。
-for (const key of ['turn', 'id', 'goal', 'route', 'mode', 'paths', 'paths-mode', 'plans', 'channels', 'parent', 'phase', 'delivery', 'package', 'final-ref', 'plan', 'sections']) allowed.add(key);
+for (const key of ['turn', 'id', 'goal', 'route', 'size', 'size-reason', 'mode', 'paths', 'paths-mode', 'plans', 'channels', 'parent', 'phase', 'delivery', 'package', 'final-ref', 'plan', 'sections']) allowed.add(key);
 // 单个工作包与 task-end validation 的便捷字段；同批多包/深层结构仍走 --input。
-for (const key of ['status', 'channel', 'handle', 'depends-on', 'supersedes', 'verdict', 'reviews', 'base-ref', 'note', 'worktree', 'validation-ref', 'evidence']) allowed.add(key);
+for (const key of ['status', 'channel', 'package-agent', 'scope', 'handle', 'depends-on', 'supersedes', 'verdict', 'reviews', 'base-ref', 'note', 'worktree', 'validation-ref', 'evidence']) allowed.add(key);
 // knowledge capture 的单条材料字段；--explicit、--verified 在解析器里按开关处理。
 for (const key of ['kind', 'summary', 'conditions', 'knowledge', 'incident', 'explicit', 'verified']) allowed.add(key);
 async function structuredSignal(directory, root, action, options) {
@@ -101,11 +101,11 @@ async function showTask(state, root, taskId) {
   if (!resolved) fail('PROJECT', '当前目录没有有效项目绑定');
   const task = state.tasks[taskKey(resolved.project.projectId, taskId)];
   if (!task) fail('TASK', '任务不存在或不属于当前项目');
-  const { taskId: id, goal, parentTaskId, route = null, channels = null, lifecycle, packages = {}, validation = null, waivers = [], finalRef = null, changes = [], updates = [] } = task;
+  const { taskId: id, goal, parentTaskId, route = null, channels = null, size = null, sizeReason = null, preparation = null, lifecycle, packages = {}, validation = null, waivers = [], finalRef = null, changes = [], updates = [] } = task;
   const gate = lifecycle === 'active' ? gateReport(state, task, finalRef, resolved.worktree) : { missing: [], findings: [], diagnostic: [] };
   const plans = (task.plans || []).map(plan => plan.path);
   const planUnchanged = lifecycle === 'active' ? unchangedPlans(state, task, resolved.worktree) : [];
-  return { taskId: id, goal, parentTaskId, route, channels, lifecycle, packages: Object.values(packages), validation, waivers, finalRef, changes: changes.length, updates: updates.length, gateMissing: gate.missing, specFindings: gate.findings, diagnostic: gate.diagnostic || [], plans, planUnchanged, note: '门禁核对声明记录一致性，不证明审查或测试真实发生，也不证明诊断包进程实际未写' };
+  return { taskId: id, goal, parentTaskId, route, channels, size, sizeReason, preparation, lifecycle, packages: Object.values(packages), validation, waivers, finalRef, changes: changes.length, updates: updates.length, gateMissing: gate.missing, specFindings: gate.findings, diagnostic: gate.diagnostic || [], plans, planUnchanged, note: '门禁核对声明记录一致性，不证明审查或测试真实发生，也不证明诊断包进程实际未写' };
 }
 // spec check 的检查根：先按本机绑定找到当前 worktree（与 hook 同一解析，--project 已在此前的 root 中生效），
 // 未接入或不在绑定时退回 Git 顶层目录；都不是 Git 目录就按给定目录检查。

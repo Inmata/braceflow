@@ -252,7 +252,7 @@ test('源计划的目录链接指向项目外时仍按项目边界拒绝', async
   const receipt = JSON.parse(output.hookSpecificOutput.additionalContext.slice('workflow 回执：'.length));
   assert.equal(receipt.accepted, false);
   assert.equal(receipt.reason, 'PLAN');
-  assert.match(receipt.message, /项目内/);
+  assert.match(receipt.message, /docs\/plans|项目内/);
   assert.equal((await stored(f)).preparation, undefined);
 });
 

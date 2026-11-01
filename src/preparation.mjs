@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { digest, fail } from './store.mjs';
 
 // 准备记录是 Lead 从项目 Markdown 整理出的可核对声明，不是用户批准的自动证明。
@@ -17,7 +17,46 @@ const PACKAGE_FIELDS = ['packageId', 'role', 'agent', 'channel', 'scope', 'deliv
 const CONFIRMATION_FIELDS = ['scope', 'basis'];
 const SOURCE_FIELDS = ['path', 'sections'];
 // 源计划是供阅读、整理和跨电脑接续的 Markdown；与项目惯例一致，接受常见 Markdown 后缀。
-const MARKDOWN_EXTENSIONS = ['.md', '.markdown', '.mdown', '.mkd', '.mkdn', '.mdwn'];
+// 计划目录与 hooks 共用同一规则：授权计划只能落在 docs/plans 下的 Markdown，不能拿业务文件或链接别名顶替。
+export const PLAN_DIRECTORY = 'docs/plans';
+export const MARKDOWN_EXTENSIONS = ['.md', '.markdown', '.mdown', '.mkd', '.mkdn', '.mdwn'];
+export function isMarkdownPath(relative) {
+  return typeof relative === 'string' && MARKDOWN_EXTENSIONS.includes(path.extname(relative).toLowerCase());
+}
+// 把项目内相对计划路径解析成真实路径，同时核对：
+// 1. 字面路径与真实路径都是 Markdown；2. 字面路径位于 docs/plans；3. 路径链上任何一级都不能是 symlink/junction。
+// 返回 { realPath, missing } 或 { error }。missing 表示路径尚未创建，但父链已经核验通过。
+export function resolvePlanPath(root, relative) {
+  if (!isMarkdownPath(relative)) return { error: 'suffix' };
+  const normalized = relative.replaceAll('\\', '/');
+  if (!normalized.startsWith(`${PLAN_DIRECTORY}/`)) return { error: 'scope' };
+  let realRoot;
+  try { realRoot = realpathSync(root); } catch { return { error: 'io' }; }
+  const parts = normalized.split('/').filter(Boolean);
+  for (let index = 0; index < parts.length; index++) {
+    const current = path.join(realRoot, ...parts.slice(0, index + 1));
+    let stat;
+    try { stat = lstatSync(current); } catch (error) {
+      if (error.code !== 'ENOENT') return { error: 'io' };
+      // 最近存在的父目录已按字面逐级核验且不是链接；不存在的尾部按真实父目录拼接。
+      const parent = path.join(realRoot, ...parts.slice(0, index));
+      const rest = parts.slice(index).join(path.sep);
+      let joined;
+      try { joined = path.join(realpathSync(parent), rest); } catch { return { error: 'io' }; }
+      return { realPath: joined, missing: true };
+    }
+    // 目录 junction 在 Node 的 lstat 里也是 symbolic link；整条链都拒绝，避免链接别名指向业务文件。
+    if (stat.isSymbolicLink()) return { error: 'symlink' };
+  }
+  let realPath;
+  try { realPath = realpathSync(path.join(realRoot, ...parts)); } catch { return { error: 'io' }; }
+  if (!isMarkdownPath(realPath)) return { error: 'suffix' };
+  // 链接已在上面整条拒绝；真实路径仍须落在真实 docs/plans 内，不能只靠“后缀是 md”通过。
+  const realPlanDir = path.join(realRoot, PLAN_DIRECTORY);
+  const inside = path.relative(realPlanDir, realPath);
+  if (!inside || inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return { error: 'scope' };
+  return { realPath };
+}
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 function fields(value, allowed, label) {
@@ -65,31 +104,32 @@ function normalizeSource(value, root) {
     fail('PLAN', `源计划须为项目内相对路径：${value.path}`);
   }
   // 源计划是可阅读、可接续的 Markdown；package.json 等结构化文件不能顶替计划正文。
-  if (!MARKDOWN_EXTENSIONS.includes(path.extname(relative).toLowerCase())) {
+  if (!isMarkdownPath(relative)) {
     fail('PLAN', `源计划须为 Markdown 文件（${MARKDOWN_EXTENSIONS.join('、')}）：${value.path}`);
+  }
+  if (!relative.startsWith(`${PLAN_DIRECTORY}/`)) {
+    fail('PLAN', `源计划须位于 ${PLAN_DIRECTORY}/ 下的 Markdown 计划：${value.path}`);
   }
   const source = { path: relative, sections: readTextArray(value.sections, 'source.sections'), digest: null };
   // 没有项目根时只做结构归一化（用于预览或单元测试）；acceptSignal 始终传入项目根并计算摘要。
   if (!root) return source;
-  let realSource;
-  let realRoot;
-  try {
-    realSource = realpathSync(path.resolve(root, relative));
-    realRoot = realpathSync(root);
-  } catch {
+  // 字面路径与真实路径同规则核对：链接别名不能把业务文件伪装成已授权计划。
+  const resolved = resolvePlanPath(root, relative);
+  if (resolved.error === 'symlink') fail('PLAN', `源计划路径不能是符号链接或 junction：${value.path}`);
+  if (resolved.error === 'scope') fail('PLAN', `源计划须位于 ${PLAN_DIRECTORY}/ 下的 Markdown 计划：${value.path}`);
+  if (resolved.error === 'suffix') fail('PLAN', `源计划须为 Markdown 文件（${MARKDOWN_EXTENSIONS.join('、')}）：${value.path}`);
+  if (resolved.error) {
     source.missing = true;
     return source;
   }
-  // 项目内路径仍可能是符号链接；跟随真实路径后必须仍在项目内，保持原有边界。
-  const relation = path.relative(realRoot, realSource);
-  if (relation === '' || relation === '..' || relation.startsWith(`..${path.sep}`) || path.isAbsolute(relation)) {
-    fail('PLAN', `源计划须位于项目内：${value.path}`);
-  }
-  try {
-    source.digest = digest(readFileSync(realSource));
-  } catch {
-    // 目录或不可读文件仍按“源计划读取不到”记录，结构校验和入口行为保持原样。
-    source.missing = true;
+  source.missing = Boolean(resolved.missing);
+  if (!resolved.missing) {
+    try {
+      source.digest = digest(readFileSync(resolved.realPath));
+    } catch {
+      // 目录或不可读文件仍按“源计划读取不到”记录，结构校验和入口行为保持原样。
+      source.missing = true;
+    }
   }
   return source;
 }
@@ -192,33 +232,109 @@ export function preparationMissing(record) {
     gaps.push(gap(`pending:${index}`, `待决事项尚未确认：${item}`));
   }
   if (record?.size !== 'complex') return gaps;
-  if (!record.requirements.length) gaps.push(gap('requirements', '尚未记录需求与验收条目'));
-  for (const item of record.requirements) {
+  // 旧状态或手工构造的草案可能缺数组字段；缺项应落到具体字段，而不是在检查时抛类型错误。
+  const requirements = Array.isArray(record.requirements) ? record.requirements : [];
+  const research = Array.isArray(record.research) ? record.research : [];
+  const packages = Array.isArray(record.packages) ? record.packages : [];
+  const verification = Array.isArray(record.verification) ? record.verification : [];
+  const confirmation = record.confirmation && typeof record.confirmation === 'object' ? record.confirmation : {};
+  const source = record.source && typeof record.source === 'object' ? record.source : {};
+  const solution = record.solution && typeof record.solution === 'object' ? record.solution : {};
+  if (!requirements.length) gaps.push(gap('requirements', '尚未记录需求与验收条目'));
+  for (const item of requirements) {
     if (!item.summary) gaps.push(gap(`requirement:${item.id}:summary`, `需求 ${item.id} 尚未写摘要`));
-    if (!item.acceptance.length) gaps.push(gap(`requirement:${item.id}:acceptance`, `需求 ${item.id} 尚未写可检查的验收条目`));
+    if (!Array.isArray(item.acceptance) || !item.acceptance.length) gaps.push(gap(`requirement:${item.id}:acceptance`, `需求 ${item.id} 尚未写可检查的验收条目`));
   }
-  if (!record.research.length) gaps.push(gap('research', '尚未记录调研来源与结论'));
-  if (!record.solution.summary) gaps.push(gap('solution', '尚未记录选定方案'));
-  if (!record.solution.decisions.length) gaps.push(gap('solution:decisions', '尚未记录关键决定及理由'));
-  if (!record.packages.length) gaps.push(gap('packages', '尚未拆分工作包'));
-  const known = new Set(record.packages.map(item => item.packageId));
-  for (const item of record.packages) {
+  if (!research.length) gaps.push(gap('research', '尚未记录调研来源与结论'));
+  if (!solution.summary) gaps.push(gap('solution', '尚未记录选定方案'));
+  if (!Array.isArray(solution.decisions) || !solution.decisions.length) gaps.push(gap('solution:decisions', '尚未记录关键决定及理由'));
+  if (!packages.length) gaps.push(gap('packages', '尚未拆分工作包'));
+  const known = new Set(packages.map(item => item.packageId));
+  for (const item of packages) {
     if (!item.role) gaps.push(gap(`package:${item.packageId}:role`, `工作包 ${item.packageId} 尚未指定角色`));
     if (!item.agent) gaps.push(gap(`package:${item.packageId}:agent`, `工作包 ${item.packageId} 尚未指定 Agent`));
     // 准备记录保存用户选择的实际调用通道；程序不猜默认通道，缺通道时按包点名，恢复时才能按逐包安排接续。
     if (!item.channel) gaps.push(gap(`package:${item.packageId}:channel`, `工作包 ${item.packageId} 尚未填写实际调用通道`));
     if (!item.scope) gaps.push(gap(`package:${item.packageId}:scope`, `工作包 ${item.packageId} 尚未写明负责范围`));
     if (!item.delivers) gaps.push(gap(`package:${item.packageId}:delivers`, `工作包 ${item.packageId} 尚未写明完成后可独立验证的完整行为`));
-    for (const dependency of item.dependsOn) {
+    for (const dependency of Array.isArray(item.dependsOn) ? item.dependsOn : []) {
       if (!known.has(dependency)) gaps.push(gap(`package:${item.packageId}:dependsOn`, `工作包 ${item.packageId} 的依赖 ${dependency} 未登记为工作包`));
     }
   }
-  if (!record.verification.length) gaps.push(gap('verification', '尚未记录验证入口'));
-  if (!record.confirmation.scope.length) gaps.push(gap('confirmation:scope', '尚未记录用户确认的范围'));
-  if (!record.confirmation.basis) gaps.push(gap('confirmation:basis', '尚未记录确认依据（用户原话或计划位置）'));
-  if (!record.source.path) gaps.push(gap('source', '尚未绑定源计划 Markdown'));
-  else if (record.source.missing) gaps.push(gap('source:unreadable', `源计划 ${record.source.path} 读取不到`));
+  if (!verification.length) gaps.push(gap('verification', '尚未记录验证入口'));
+  if (!Array.isArray(confirmation.scope) || !confirmation.scope.length) gaps.push(gap('confirmation:scope', '尚未记录用户确认的范围'));
+  if (!confirmation.basis) gaps.push(gap('confirmation:basis', '尚未记录确认依据（用户原话或计划位置）'));
+  if (!source.path) gaps.push(gap('source', '尚未绑定源计划 Markdown'));
+  else if (source.missing) gaps.push(gap('source:unreadable', `源计划 ${source.path} 读取不到`));
   return gaps;
+}
+
+// 开工时把会话准备记录固定到任务上：之后会话再讨论、改计划或换会话，都按已绑定的选择核对实际派包。
+// 这不是用户批准证明，只保存“本次开工依据的是哪份结构化声明”。
+export function preparationSnapshot(record) {
+  if (!record) return null;
+  return {
+    schemaVersion: 1,
+    size: record.size,
+    sizeReason: record.sizeReason || '',
+    preparedAt: record.preparedAt || null,
+    source: record.source?.path ? { path: record.source.path, digest: record.source.digest || null } : null,
+    packages: (record.packages || []).map(item => ({
+      packageId: item.packageId,
+      role: item.role || '',
+      agent: item.agent || '',
+      channel: item.channel || '',
+      scope: item.scope || '',
+      delivers: item.delivers || '',
+      dependsOn: Array.isArray(item.dependsOn) ? [...item.dependsOn] : [],
+    })),
+  };
+}
+
+// 比较前把无意义顺序归一化：包数组按 packageId 排序，依赖列表按字符串排序。
+// 否则同一份记录倒序提交会被误当作“实际变化”，让目标变化通过重放门槛。
+const canonicalPackage = item => ({
+  packageId: item.packageId,
+  role: item.role || '',
+  agent: item.agent || '',
+  channel: item.channel || '',
+  scope: item.scope || '',
+  delivers: item.delivers || '',
+  dependsOn: Array.isArray(item.dependsOn) ? [...item.dependsOn].sort() : [],
+});
+const canonicalPackages = items => (items || []).map(canonicalPackage)
+  .sort((left, right) => left.packageId < right.packageId ? -1 : left.packageId > right.packageId ? 1 : 0);
+// 任务准备更新只覆盖本次明确给出的包，其余旧选择继续有效；显式 removePackageIds 才能移除，未列出的包保留。
+// 历史快照由调用方另存，避免把旧证据改写成新记录。
+export function mergePreparationSnapshot(previous, record, { removePackageIds = [] } = {}) {
+  const next = preparationSnapshot(record);
+  if (!previous) return { snapshot: next, changed: next.packages.map(item => item.packageId), removed: [], preserved: [] };
+  const before = new Map((previous.packages || []).map(item => [item.packageId, item]));
+  const incoming = new Map(next.packages.map(item => [item.packageId, item]));
+  const remove = new Set(removePackageIds);
+  const removed = (previous.packages || []).filter(item => !incoming.has(item.packageId) && remove.has(item.packageId));
+  const preserved = (previous.packages || []).filter(item => !incoming.has(item.packageId) && !remove.has(item.packageId));
+  const changed = [];
+  for (const item of next.packages) {
+    const old = before.get(item.packageId);
+    if (!old || JSON.stringify(canonicalPackage(old)) !== JSON.stringify(canonicalPackage(item))) changed.push(item.packageId);
+  }
+  return {
+    snapshot: { ...next, packages: [...next.packages, ...preserved] },
+    changed,
+    removed: removed.map(item => item.packageId),
+    preserved: preserved.map(item => item.packageId),
+  };
+}
+// 判断“这次准备是否真的带来可审计变化”。preparedAt/sizeReason 等元数据每次可能重写，不能算变化；
+// 只比较 source 与实际包内容，且包数组与依赖列表的无意义顺序不产生差异。
+// 目标或权限变化必须伴随至少一项实际内容、显式移除或 source 变化，原样或倒序重放会被拒绝。
+export function preparationSnapshotSignature(snapshot) {
+  if (!snapshot) return null;
+  return JSON.stringify({
+    source: snapshot.source ? { path: snapshot.source.path, digest: snapshot.source.digest || null } : null,
+    packages: canonicalPackages(snapshot.packages),
+  });
 }
 
 const STEP_ORDER = [
@@ -239,15 +355,16 @@ export function preparationStep(record) {
 // context 只带当前步骤、缺项字段和简短说明；完整正文留在计划 Markdown，不逐回合注入。
 export function preparationSummary(record) {
   const gaps = preparationMissing(record);
+  const source = record.source && typeof record.source === 'object' ? record.source : {};
   return {
     ready: gaps.length === 0,
     step: preparationStep(record),
     size: record.size,
     missing: gaps.map(item => item.field),
     messages: gaps.map(item => item.message),
-    pending: record.pending,
-    source: record.source.path ? { path: record.source.path, digest: record.source.digest } : null,
-    packages: record.packages.map(item => ({ packageId: item.packageId, role: item.role, agent: item.agent, channel: item.channel, dependsOn: item.dependsOn })),
+    pending: Array.isArray(record.pending) ? record.pending : [],
+    source: source.path ? { path: source.path, digest: source.digest } : null,
+    packages: (Array.isArray(record.packages) ? record.packages : []).map(item => ({ packageId: item.packageId, role: item.role, agent: item.agent, channel: item.channel, dependsOn: Array.isArray(item.dependsOn) ? item.dependsOn : [] })),
     preparedAt: record.preparedAt,
   };
 }

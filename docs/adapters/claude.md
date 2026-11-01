@@ -21,6 +21,7 @@ Claude Code 事件没有 `turn_id`，用宿主 `prompt_id` 关联一次用户输
 | --- | --- |
 | SessionStart | 注入 Lead 入口上下文；`source=compact` 时保留既有任务与预算 |
 | UserPromptSubmit | 开新回合（新票据），注入 Lead 入口上下文 |
+| PreToolUse | 读取父会话的准备/任务状态：未开工时拦业务写入、实施委派和本插件 `task-start`/`packages` 命令；只读、指定准备计划、`prepare` 放行；活动任务按声明的 read-only/plan 权限再核对；worker 实施与 reviewer 审查委派都须带 `workflow-package:<包ID>` 关联到 dispatched 包，并按 Agent/Task schema 核对 `subagent_type`、通道、任务和可解析角色；仅不带包标记的 `Explore`/`Plan` 免包关联，带标记时也必须按包核对，diagnostic 包也只能派给它们；角色会话按 `roleTaskId`+`packageId` 核对 |
 | PostToolUse | 只在命令是直接调用本插件 `signal` 时读取 stdout 中的信号并返回回执 |
 | Stop | 回合结束核对：有在途包时挡一次要求继续等待或说明暂停；无在途包而任务未 task-end 时挡一次列出缺项；不要求经验处置或追加复盘轮次 |
 | StopFailure | 按中断保存：撤销票据、保留任务待办，不自动续跑 |
@@ -63,6 +64,72 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 | 信号载荷脱敏 | 长 base64 串可能被宿主当作密钥脱敏成占位符，信号随之变成无效 JSON（记录：Codeg Claude ACP Lead 会话）；推荐常用动作用 `signal <action>` 子命令，结构化字段先写 JSON 文件再 `--input` | 记录 |
 | 运行中追加消息 / 暂停 / 取消 / 中断恢复 / 批量 wait（Codeg 委派） | 见 [Codeg 能力表](codeg.md#宿主能力表) | — |
 
-插件据此：带 `agent_id` 的事件整体放行，子代理调用本插件 signal 时只回一条“没有 workflow 身份、信号不记录”的说明；内置子代理结束时宿主会通知父会话，派给它的包填 `channel: builtin:<类型>`，Stop 不再要求阻塞等待。Codeg 委派子会话按工作包 `role-claim`；`AskUserQuestion` 与 Codeg MCP 名称在 PostToolUse 自动置 waiting-user，同一回合不重复修改。若某路径 PostToolUse 实际不触发，Lead 显式发 waiting-user。
+插件据此：带 `agent_id` 的 PreToolUse 仍按父会话的任务/准备状态检查写入和委派，避免子代理绕过未开工检查；其他事件整体放行，子代理调用本插件 signal 时只回一条“没有 workflow 身份、信号不记录”的说明。内置子代理结束时宿主会通知父会话，派给它的包填 `channel: builtin:<类型>`，Stop 不再要求阻塞等待。Codeg 委派子会话按工作包 `role-claim --task <父活动任务ID>` 绑定；`AskUserQuestion` 与 Codeg MCP 名称在 PostToolUse 自动置 waiting-user，同一回合不重复修改。若某路径 PostToolUse 实际不触发，Lead 显式发 waiting-user。
+
+### W2 真实宿主拒绝验收（2026-11-01）
+
+本机 Claude Code 2.1.316、Node.js 24.19.0，隔离临时项目、`CLAUDE_CONFIG_DIR` 和状态目录；用当前源码 `install --agent claude` 后由 `claude -p` 实际触发，未修改真实用户配置，未使用 `--dangerously-skip-permissions`。结果：
+
+| 场景 | 实际结果 |
+| --- | --- |
+| 普通读取 | `Read README.md` 放行并返回内容 |
+| 准备资料写入 | `Write docs/plans/note.md` 放行，文件实际创建 |
+| 业务写入 | `Write src/a.mjs` 被 `PreToolUse` 拒绝，原文前缀为 `PreToolUse:Write hook error: 业务写入被拦下…`，文件未改变 |
+| 直接 `task-start` | 无准备、无简单声明时，Bash 中的本插件 `signal task-start` 被拒绝，原文前缀为 `PreToolUse:Bash hook error: 尚未保存准备记录…`；状态未新增任务 |
+| 简单任务 | `--size simple --size-reason` 通过 hook；补 `--mode read-only` 后协议接受并建立简单任务，随后 `task-end` 接受 |
+| 实施委派 | `Agent(general-purpose)` 被拒绝，原文前缀为 `PreToolUse:Agent hook error: 实施委派被拦下…`；未启动子代理 |
+| 只读子代理 | `Agent(Explore)` 放行并实际执行 `Grep` |
+
+本节是旧宽配置下的原始记录，不是当前候选：当时准备资料可写整个 `docs/plans/`，当前代码与后续验证只放行 `docs/plans/plan.md`、已绑定源计划和已登记关联计划；命令入口的兜底也由下节的宿主权限配置承担。
+
+未覆盖：`Bash`/PowerShell 里任意写文件不做命令解析，只拦本插件直接 `signal`；宿主自己的权限/审批仍是这类命令的写入边界。子代理 PreToolUse 按父会话任务/准备状态检查，不单独证明其工作包范围所有权。`--permission-mode plan` 下宿主会在 hook 前阻止写入，没有单独的 hook 事件可作证据。
+
+### 宿主权限隔离收紧验证（2026-11-01）
+
+本机用隔离临时项目、隔离 `CLAUDE_CONFIG_DIR` 和真实 `claude -p` 对 Claude Code 2.1.316 做了一轮收紧配置验证；Codex 仍是独立 Reviewer，不因本节改动。去敏配置、逐项事件、拒绝原文前缀、文件核对和未测边界见 [验收第 10.6 节](../acceptance.md#106-claude-收紧配置定向续接2026-11-01)；10.5 的旧宽配置仅作历史证据，不再作为候选。原始 `stream-json` 与凭据副本已删除。
+
+**联合验证（2026-11-01）：** 在隔离项目同时安装当前 workflow hook 并应用 v2 配置后，真实 `claude -p` 会话中业务 Read、指定 `docs/plans/plan.md` 的 Write/Edit 放行；业务 Write/Edit 与 `Agent(general-purpose)` 由 `PreToolUse` 拒绝，Bash 与 Skill 由宿主 `dontAsk` 拒绝，业务文件保持 `ORIGINAL`。逐项事件见[验收 10.7](../acceptance.md#107-真实-workflow-hook--claude-v2-严格权限联合验证2026-11-01)。
+
+**候选配置（v2）：**
+
+```json
+{
+  "permissions": {
+    "allow": ["Edit(docs/plans/plan.md)"],
+    "ask": ["Bash", "PowerShell", "Monitor", "Agent", "Task", "SendMessage", "Workflow", "NotebookEdit", "Skill", "mcp__*"]
+  }
+}
+```
+
+启动：`claude -p --permission-mode dontAsk ...`。`allow` 只保留一个精确计划文件；`dontAsk` 会自动放行工作目录内的 `Read`/`Glob`/`Grep`，所以不整类放行读取。`ask` 在 `dontAsk` 下立即拒绝，但保留工具在上下文中，便于验证“实际调用被拒”而不是工具被移除。
+
+实测结果（全部为实际工具调用，被拒后继续下一项）：
+
+| 场景 | 结果 |
+| --- | --- |
+| `Read src/business.txt` | 放行，返回 `ORIGINAL` |
+| `Write docs/plans/plan.md` | 放行，内容变为 `PLAN2` |
+| `Edit docs/plans/plan.md` | 放行，内容变为 `PLAN3` |
+| `Write` / `Edit src/business.txt` | 均拒绝：`Permission to use Write/Edit has been denied because Claude Code is running in don't ask mode.`；业务仍 `ORIGINAL` |
+| `Bash: cat src/business.txt` | 拒绝，工具名 `Bash`；只读命令也未被自动放行 |
+| 独立 `PowerShell` 写业务 | 拒绝，工具名 `PowerShell` |
+| `Monitor` 启动 Node 写业务 | 拒绝，工具名 `Monitor` |
+| `Write docs/plans/other.md` | 拒绝；文件不存在 |
+| `Agent(general-purpose)` / `Agent(Explore)` | 均拒绝，工具名 `Agent`；未启动子代理 |
+| `SendMessage` / `Workflow` | 均拒绝，工具名分别为 `SendMessage`、`Workflow` |
+| `Skill(workflow-authoring)` | 未列 `Skill` 时放行；加入 `ask` 后实际调用被拒 |
+| 目录 junction 指向含业务硬链接的计划 | `Read` 放行；`Write`/`Edit` 拒绝，业务未变 |
+| `plan.md` 为业务硬链接 | 写入放行但原子替换链接，业务未变 |
+| `plan.md` 为文件符号链接 | 未建立：当前 OS 权限不足（需管理员），未测 |
+
+注意事项与限制：
+
+- **`dontAsk` 不是“不在 allow 就全拒”**：工作目录内读取和内置只读 Bash 会自动放行；必须显式 `ask`/`deny` 才能拒绝整个命令类。
+- 官方权限文档明确 `Write(path)`、`NotebookEdit(path)`、`Glob(path)` 路径规则从不匹配；文件权限只按 `Edit(path)`/`Read(path)` 检查，`Edit(path)` 同时覆盖 Write 和 NotebookEdit。10.5 中的 `Write(...)` 路径规则是无效规则，本节已改用 `Edit(docs/plans/plan.md)`。
+- 独立 `PowerShell`、`Monitor`、`SendMessage`、`Workflow`、`Skill` 是实际工具入口，旧的单点 `Agent(general-purpose)`/`Task(general-purpose)` 覆盖不了；本节按整类 `ask` 处理并取得实际拒绝事件。
+- 未测：文件符号链接的真实目标解析、真实 MCP 工具与 Codeg MCP 委派（隔离会话未加载 MCP server）、`NotebookEdit` 实际调用、未显式 ask 的其他需审批工具、无审批的状态/调度工具。`ToolSearch` 可放行并加载被 ask 的工具，但加载后调用仍被拒绝。
+- 不是 OS 沙箱：Claude 原生 OS 沙箱不支持 Windows（官方仅 macOS/Linux/WSL2）；本保证只覆盖所列 Claude Code 权限规则和工具入口，不是任意代码或已启动进程的隔离。
+- 这是准备会话的候选配置，需由启动方设置，不代表已修改真实用户配置或信任。准备阶段不依赖 `signal` CLI；跨会话准备以 Markdown 计划文件为来源。启动方确认准备内容后，另开一个实施权限会话：Lead 读取已确认 Markdown，整理并提交 `prepare`，再 `task-start`；workflow 不自动解析 Markdown，也不在同一次运行中翻转宿主权限。
+- 联合 hook 的最小验证已在 10.7 完成；真实 MCP（隔离会话未加载）、文件符号链接、`NotebookEdit` 实际调用和 Codex/Codeg ACP 仍未验，不能写成完整任意工具面或 OS 隔离。
 
 Codeg/ACP 侧的角色分工与委派约定见[Codeg 适配](codeg.md)。

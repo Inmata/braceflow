@@ -345,7 +345,7 @@ export async function uninstall(directory, { agent = 'codex' } = {}) {
 // 只读核对 Codex 的 Default 模式提问开关；不写用户配置。只认 [features] 段内的布尔赋值，其余写法报告 unknown。
 export async function codexQuestionFeature(userDir = HOSTS.codex.defaultUserDir()) {
   const text = await readText(path.join(userDir, 'config.toml')).catch(() => undefined);
-  const note = '未开启时也可通过 Codeg MCP ask_user_question 或文本编号问题提问；是否开启由用户决定。';
+  const note = '未开启时也可用当前入口可用的结构化提问工具，或改用文本编号问题；是否开启由用户决定。';
   if (text === null) return { setting: 'default_mode_request_user_input', status: 'config-missing', note };
   if (text === undefined) return { setting: 'default_mode_request_user_input', status: 'unknown', note };
   let section = '', value;

@@ -1,12 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { mutate, readState } from '../src/store.mjs';
+import { digest, mutate, readState } from '../src/store.mjs';
 import { buildSignal } from '../src/signal.mjs';
-import { sessionKey } from '../src/protocol.mjs';
+import { sessionKey, taskKey } from '../src/protocol.mjs';
 import { resolveProject } from '../src/projects.mjs';
-import { cli, emit, entry, event, fixture, gitFixture, start } from './helpers.mjs';
+import { cli, emit, entry, event, fixture, gitFixture, legacyEmit, start as baseStart } from './helpers.mjs';
+
+// 本文件的 packages/task-update/validation 用例主要验证 CLI→Post 传输与账本。
+// 普通 start 是真实简单任务；只有明确验证旧任务兼容的用例调用 legacyStart，不再删改已建立的准备快照。
+async function start(f, permissions) {
+  return baseStart(f, permissions);
+}
+async function legacyStart(f, permissions = { mode: 'write', allowedPaths: ['README.md', 'LESSONS.md', 'docs/说明.md'] }) {
+  return legacyEmit(f, { action: 'task-start', goal: '隔离验证任务', route: 'lead-direct', permissions });
+}
 
 // 便捷子命令：CLI 只读状态拼 payload，交给 PostToolUse 接受；返回 CLI 结果与 hook 回执。
 function build(f, action, args = [], session = f) {
@@ -20,12 +29,13 @@ async function acceptCommand(f, action, args, commandArgs, session = f) {
   const output = await event({ ...f, sessionId: session.sessionId, turnId: session.turnId }, 'PostToolUse', { tool_name: 'Bash', tool_input: { command }, tool_response: { output: run.stdout } });
   const text = output.hookSpecificOutput?.additionalContext;
   assert.ok(text?.startsWith('workflow 回执：'), JSON.stringify(output));
-  return { payload: JSON.parse(run.stdout).workflow_signal, receipt: JSON.parse(text.slice('workflow 回执：'.length)) };
+  const receipt = JSON.parse(text.slice('workflow 回执：'.length));
+  return { payload: JSON.parse(run.stdout).workflow_signal, receipt };
 }
 async function accept(f, action, args, session = f) {
   return acceptCommand(f, action, args, args.map(quote).join(' '), session);
 }
-const startArgs = (id, extra = []) => ['--id', id, '--task', 'task-1', '--route', 'lead-direct', '--goal', '便捷 信号', '--mode', 'write', '--paths', 'README.md', ...extra];
+const startArgs = (id, extra = []) => ['--id', id, '--task', 'task-1', '--route', 'lead-direct', '--goal', '便捷 信号', '--mode', 'write', '--paths', 'README.md', '--size', 'simple', '--size-reason', 'CLI 回执链的显式简单声明', ...extra];
 
 test('lead-direct 两条子命令完成任务；CLI 本身不写状态', async () => {
   const f = await fixture();
@@ -41,6 +51,93 @@ test('lead-direct 两条子命令完成任务；CLI 本身不写状态', async (
   const task = Object.values((await readState(f.directory)).tasks)[0];
   assert.equal(task.lifecycle, 'complete');
   assert.equal(task.route, 'lead-direct');
+});
+test('空白状态真实 CLI prepare→delegated task-start→packages 全链经 PostToolUse 接受并保留准备快照', async () => {
+  const f = await fixture();
+  const planPath = 'docs/plans/signal-cli-e2e.md';
+  const planText = `# 信号链计划
+
+## 实施步骤
+
+1. 保存准备记录。
+2. 按包派发并核对。
+
+## Agent 选择表
+
+| 包 | Agent |
+| --- | --- |
+| W1 | Claude Code |
+| R1 | Codex |
+`;
+  await mkdir(path.dirname(path.join(f.project, planPath)), { recursive: true });
+  await writeFile(path.join(f.project, planPath), planText);
+  const preparation = {
+    size: 'complex',
+    sizeReason: '真实 CLI→Post 链需要完整准备与逐包核对',
+    requirements: [{ id: 'A01', summary: '准备记录绑定到新任务', acceptance: ['task-start 后快照仍在'] }],
+    research: [{ source: '本仓 src/signal.mjs', conclusion: 'CLI 只拼 payload，由 PostToolUse 接受写入' }],
+    solution: {
+      summary: 'prepare 保存会话记录，task-start 绑定快照，packages 按包核对',
+      decisions: [{ decision: '复用真实 CLI 与 PostToolUse', reason: '同时覆盖参数传输与协议写入' }],
+      tradeoffs: ['不直接改状态，避免绕过接受路径'],
+      assumptions: ['准备记录由 Lead 从计划整理'],
+    },
+    packages: [
+      { packageId: 'W1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/signal.mjs', delivers: '可验证的包登记', dependsOn: [], verification: 'node --test test/signal.test.mjs' },
+      { packageId: 'R1', role: 'reviewer', agent: 'Codex', channel: 'codeg:codex', scope: '独立审查 W1', delivers: '对 W1 的独立审查结论', dependsOn: ['W1'], verification: '读取 W1 交付与测试结果' },
+    ],
+    verification: ['node --test test/signal.test.mjs'],
+    confirmation: { scope: ['需求', '方案', '分包', '逐包 Agent 与通道'], basis: '用户要求补齐 W2 真实 CLI 链路用例' },
+    pending: [],
+    source: { path: planPath, sections: ['实施步骤', 'Agent 选择表'] },
+  };
+  const file = path.join(f.area, 'preparation.json');
+  await writeFile(file, JSON.stringify({ preparation }));
+  // 三步都只通过真实 CLI 生成 payload、再由真实 PostToolUse 接受；不调用 legacyEmit，也不直接注入状态。
+  const prepared = await accept(f, 'prepare', ['--id', 'prep-cli', '--input', file]);
+  assert.equal(prepared.receipt.accepted, true, JSON.stringify(prepared.receipt));
+  assert.equal(prepared.receipt.ready, true, JSON.stringify(prepared.receipt));
+  assert.equal(prepared.payload.taskId, 'preparation');
+  assert.equal(Object.keys((await readState(f.directory)).tasks).length, 0);
+  const started = await accept(f, 'task-start', ['--id', 'start-cli', '--task', f.taskId, '--route', 'delegated', '--goal', '真实 CLI 派包', '--mode', 'write', '--paths', 'src/signal.mjs']);
+  assert.equal(started.receipt.accepted, true, JSON.stringify(started.receipt));
+  const task = Object.values((await readState(f.directory)).tasks)[0];
+  assert.equal(task.route, 'delegated');
+  // 旧任务夹具不会生成 preparation；这里的快照由真实 task-start 从会话准备记录绑定而来。
+  assert.ok(task.preparation, '真实 task-start 必须绑定准备快照');
+  assert.equal(task.preparation.size, 'complex');
+  assert.equal(task.preparation.source.path, planPath);
+  assert.equal(task.preparation.source.digest, digest(planText));
+  assert.equal(task.preparation.packages.length, 2);
+  const snapshot = structuredClone(task.preparation);
+  const pkg = await accept(f, 'packages', ['--id', 'pkg-cli', '--task', f.taskId, '--package', 'W1', '--role', 'worker', '--status', 'dispatched', '--package-agent', 'Claude Code', '--scope', 'src/signal.mjs', '--channel', 'builtin:agent']);
+  assert.equal(pkg.receipt.accepted, true, JSON.stringify(pkg.receipt));
+  const after = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.deepEqual(after.preparation, snapshot);
+  assert.deepEqual(
+    { status: after.packages.W1.status, role: after.packages.W1.role, agent: after.packages.W1.agent, channel: after.packages.W1.channel, scope: after.packages.W1.scope },
+    { status: 'dispatched', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/signal.mjs' },
+  );
+});
+test('简单任务通过 --size/--size-reason 声明；packages 便捷字段携带 agent 与 scope', async () => {
+  const f = await fixture();
+  const simple = await accept(f, 'task-start', startArgs('s1'));
+  assert.equal(simple.receipt.accepted, true, JSON.stringify(simple.receipt));
+  assert.equal(simple.payload.size, 'simple');
+  assert.equal(simple.payload.sizeReason, 'CLI 回执链的显式简单声明');
+  const task = Object.values((await readState(f.directory)).tasks)[0];
+  assert.equal(task.size, 'simple');
+  assert.equal(task.preparation.size, 'simple');
+
+  const g = await fixture();
+  // 这一段的目的是验证 packages 便捷字段；使用显式旧账本夹具，避免依赖隐式续接。
+  const delegated = await legacyEmit(g, { action: 'task-start', goal: '派包', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
+  assert.equal(delegated.result.accepted, true, JSON.stringify(delegated.result));
+  const pkg = await accept(g, 'packages', ['--id', 'p1', '--package', 'w1', '--role', 'worker', '--status', 'dispatched', '--package-agent', 'Claude Code', '--scope', 'src/a.mjs', '--channel', 'builtin:agent']);
+  assert.equal(pkg.receipt.accepted, true, JSON.stringify(pkg.receipt));
+  assert.equal(pkg.payload.packages[0].agent, 'Claude Code');
+  assert.equal(pkg.payload.packages[0].scope, 'src/a.mjs');
+  assert.equal((await readState(g.directory)).tasks[taskKey(g.projectId, g.taskId)].packages.w1.agent, 'Claude Code');
 });
 test('新任务漏填 --route 经真实 PostToolUse 被拒；历史任务续接不填 route 仍可继续', async () => {
   const f = await fixture();
@@ -66,7 +163,7 @@ test('同 signalId 重试输出相同正文并命中回执；改正文返回 SIG
   const again = await accept(f, 'task-start', startArgs('s1'));
   assert.deepEqual(again.payload, first.payload);
   assert.equal(again.receipt.replayed, true);
-  const changed = await accept(f, 'task-start', startArgs('s1', ['--plans', 'docs/a.md']));
+  const changed = await accept(f, 'task-start', startArgs('s1', ['--plans', 'docs/plans/a.md']));
   assert.equal(changed.receipt.accepted, false);
   assert.equal(changed.receipt.reason, 'SIGNAL_ID');
 });
@@ -89,14 +186,14 @@ test('并发两个会话各自补齐自己的身份，互不串用', async () =>
   const other = { sessionId: 'session-2', turnId: 'turn-9' };
   await event({ ...f, ...other }, 'UserPromptSubmit');
   const a = await accept(f, 'task-start', startArgs('a1'));
-  const b = await accept(f, 'task-start', ['--id', 'b1', '--task', 'task-2', '--route', 'lead-direct', '--goal', '另一个', '--mode', 'read-only'], other);
+  const b = await accept(f, 'task-start', ['--id', 'b1', '--task', 'task-2', '--route', 'lead-direct', '--goal', '另一个', '--mode', 'read-only', '--size', 'simple', '--size-reason', '并发会话的显式简单声明'], other);
   assert.equal(a.receipt.accepted && b.receipt.accepted, true);
   assert.notEqual(a.payload.ticket, b.payload.ticket);
   assert.equal(b.payload.sessionId, 'session-2');
 });
 test('packages 便捷参数完成单包派发/消费/审查，经真实 PostToolUse 写入账本', async () => {
   const f = await fixture();
-  await start(f);
+  await legacyStart(f);
   const dispatched = await accept(f, 'packages', ['--id', 'p1', '--package', 'w1', '--role', 'worker', '--status', 'dispatched', '--channel', 'codeg:claude_code', '--handle', 'task-9', '--depends-on', 'w0', '--base-ref', 'abc123']);
   assert.equal(dispatched.receipt.accepted, true, JSON.stringify(dispatched));
   const task = async () => Object.values((await readState(f.directory)).tasks)[0];
@@ -203,7 +300,7 @@ test('task-start/phase/task-end 收到包字段也返回 INPUT，不再静默丢
 });
 test('中文、引号和旧接口命令文本经 PostToolUse 正常接受', async () => {
   const f = await fixture();
-  await start(f);
+  await legacyStart(f);
   // 双引号在单引号参数内是普通字符；全角标点不触发 shell 元字符拒绝。
   const note = '中文说明，"引号" 与逗号，不是组合命令';
   const sent = await acceptCommand(f, 'packages', ['--id', 'q1', '--package', 'wq', '--role', 'worker', '--status', 'dispatched', '--note', note], `--id q1 --package wq --role worker --status dispatched --note '${note}'`);
@@ -226,7 +323,7 @@ test('中文、引号和旧接口命令文本经 PostToolUse 正常接受', asyn
 });
 test('自由文本字面值经 CLI、单引号命令和 Hook 回执保持原样，JSON 与传输标记不被误解码', async () => {
   const f = await fixture();
-  await start(f);
+  await legacyStart(f);
   // 同时覆盖 $、ASCII 分号、反引号、子表达式文本、单引号、JSON 双引号和传输标记同名文本。
   const goal = '预算 $100; 反引号 ` 与 $(Write-Output canary) 及 \'单引号\' {"workflow_signal":true} workflow-arg64:YWJj';
   const run = build(f, 'task-update', ['--id', 'literal-1', '--goal', goal]);
@@ -265,7 +362,7 @@ test('便捷命令跨会话、组合命令和非本插件入口的伪造输出�
 });
 test('packages 用 --input 只放结构化字段；带身份字段或缺 packages 被拒；未知动作被拒', async () => {
   const f = await fixture();
-  await start(f);
+  await legacyStart(f);
   const { writeFile } = await import('node:fs/promises');
   const file = path.join(f.area, 'pkg.json');
   await writeFile(file, JSON.stringify({ packages: [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'h1' }] }));
@@ -280,7 +377,7 @@ test('packages 用 --input 只放结构化字段；带身份字段或缺 package
 });
 test('task-update 子命令只带显式字段，paths-mode 缺省 replace；接受后返回有效权限', async () => {
   const f = await fixture();
-  await start(f);
+  await legacyStart(f);
   const empty = build(f, 'task-update', ['--id', 'u0']);
   const payload = JSON.parse(empty.stdout).workflow_signal;
   assert.equal(payload.action, 'task-update');
@@ -323,7 +420,7 @@ test('task-update 当前动作不支持的便捷参数直接报错，不再静�
   const f = await fixture();
   await start(f);
   const before = JSON.stringify(await readState(f.directory));
-  for (const [key, value] of [['route', 'delegated'], ['channels', 'worker=lead'], ['plans', 'docs/a.md'], ['parent', 'task-0'], ['phase', 'executing'], ['delivery', 'd1'], ['role', 'worker'], ['package', 'w1'], ['final-ref', 'abc']]) {
+  for (const [key, value] of [['route', 'delegated'], ['channels', 'worker=lead'], ['plans', 'docs/plans/a.md'], ['parent', 'task-0'], ['phase', 'executing'], ['delivery', 'd1'], ['role', 'worker'], ['package', 'w1'], ['final-ref', 'abc']]) {
     const result = JSON.parse(build(f, 'task-update', ['--id', `bad-${key}`, '--goal', '新目标', `--${key}`, value]).stdout);
     assert.equal(result.error, 'UNSUPPORTED', `${key}: ${result.message}`);
     assert.match(result.message, new RegExp(`--${key}`));
@@ -349,7 +446,7 @@ test('task-update 拒绝全局解析器接受但本动作不用的参数，--pat
 });
 test('task-update 合法公共选项与业务选项的完整 CLI 调用仍被接受', async () => {
   const f = await fixture();
-  await start(f);
+  await legacyStart(f);
   const sent = await accept(f, 'task-update', ['--project', f.project, '--id', 'u-full', '--task', 'task-1', '--goal', '完整调用', '--mode', 'write', '--paths', 'README.md', '--paths-mode', 'append']);
   assert.equal(sent.receipt.accepted, true, JSON.stringify(sent));
   assert.equal(sent.receipt.goal, '完整调用');
@@ -365,12 +462,16 @@ test('task-update 合法公共选项与业务选项的完整 CLI 调用仍被接
   assert.equal(withBase64.error, undefined, JSON.stringify(withBase64));
   assert.equal(withBase64.workflow_signal.goal, '带 base64');
 });
-test('委派子会话不带 --task 也能 role-claim；声明后入口换成角色指引', async () => {
+test('role-claim 必须带 --task 绑定父任务；声明后入口换成角色指引', async () => {
   const f = await fixture();
   await start(f);
   const worker = { sessionId: 'worker-session', turnId: 'worker-turn' };
   await event({ ...f, ...worker }, 'UserPromptSubmit');
-  const claimed = await accept(f, 'role-claim', ['--id', 'c1', '--role', 'worker', '--package', 'w1'], worker);
+  // 不带 --task 的旧写法由 CLI 直接拒绝，不再生成 claim-* 未绑定声明。
+  const unbound = build(f, 'role-claim', ['--id', 'c0', '--role', 'worker', '--package', 'w1'], worker);
+  assert.notEqual(unbound.status, 0);
+  assert.match(unbound.stdout + unbound.stderr, /--task/);
+  const claimed = await accept(f, 'role-claim', ['--id', 'c1', '--role', 'worker', '--package', 'w1', '--task', f.taskId], worker);
   assert.equal(claimed.receipt.accepted, true, JSON.stringify(claimed));
   const entry = await event({ ...f, sessionId: worker.sessionId, turnId: 'worker-turn-2' }, 'UserPromptSubmit');
   assert.match(entry.hookSpecificOutput.additionalContext, /"role":"worker"/);
@@ -432,7 +533,7 @@ test('计划模式普通讨论不单独阻挡；本回合显式进入计划交�
   // 历史 plans 不跨回合推断本回合在交付计划：活动任务声明过 plans，下一回合 plan 模式普通追问仍放行。
   f.turnId = 'plan-3';
   await event(f, 'UserPromptSubmit', { permission_mode: 'plan' });
-  await emit(f, { action: 'task-start', goal: '按计划实施', route: 'lead-direct', plans: ['docs/plan.md'], permissions: { mode: 'plan', allowedPaths: [] } });
+  await emit(f, { action: 'task-start', goal: '按计划实施', route: 'lead-direct', plans: ['docs/plans/plan.md'], permissions: { mode: 'plan', allowedPaths: [] } });
   f.turnId = 'plan-4';
   await event(f, 'UserPromptSubmit', { permission_mode: 'plan' });
   assert.deepEqual(await event(f, 'Stop'), {});
@@ -446,7 +547,7 @@ test('计划模式普通讨论不单独阻挡；本回合显式进入计划交�
   // 计划模式普通讨论不落到通用门禁阻挡；有包在途时仍按在途阻挡。
   f.turnId = 'plan-5';
   await event(f, 'UserPromptSubmit', { permission_mode: 'plan' });
-  await emit(f, { action: 'packages', packages: [{ packageId: 'w1', role: 'worker', status: 'dispatched', channel: 'builtin:general-purpose' }] });
+  await emit(f, { action: 'packages', packages: [{ packageId: 'R1', role: 'reviewer', status: 'dispatched', channel: 'builtin:general-purpose' }] });
   const inflight = await event(f, 'Stop');
   assert.equal(inflight.decision, 'block');
   assert.match(inflight.reason, /仍有 1 个工作包在途/);
@@ -468,7 +569,7 @@ test('计划交付核对与在途包同时成立时合并为一次阻挡，在�
   const f = await fixture();
   f.turnId = 'plan-inflight';
   await event(f, 'UserPromptSubmit', { permission_mode: 'plan' });
-  const started = await emit(f, { action: 'task-start', goal: '交付计划', route: 'delegated', permissions: { mode: 'plan', allowedPaths: [] } });
+  const started = await legacyEmit(f, { action: 'task-start', goal: '交付计划', route: 'delegated', permissions: { mode: 'plan', allowedPaths: [] } });
   assert.equal(started.result.accepted, true, JSON.stringify(started.result));
   await emit(f, { action: 'phase', phase: 'executing' });
   await emit(f, { action: 'packages', packages: [{ packageId: 'w9', role: 'worker', status: 'dispatched', handle: 'task-9', channel: 'codeg:codex' }] });
@@ -483,7 +584,7 @@ test('计划交付核对先说明顺序并要求逐包选择，已有通道只�
   const f = await fixture();
   f.turnId = 'plan-channel';
   await event(f, 'UserPromptSubmit', { permission_mode: 'plan' });
-  await emit(f, {
+  await legacyEmit(f, {
     action: 'task-start', goal: '交付计划', route: 'delegated',
     permissions: { mode: 'plan', allowedPaths: [] },
     channels: { worker: 'codeg:claude_code', reviewer: 'codeg:codex' },
@@ -499,7 +600,7 @@ test('计划交付核对先说明顺序并要求逐包选择，已有通道只�
 
 test('F13 真实 PostToolUse 回执逐类定位拒绝内容，修正后接受；CLI 成功退出不等于 accepted', async () => {
   const f = await gitFixture(['m1']);
-  await emit(f, { action: 'task-start', goal: '回执反例', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
+  await legacyEmit(f, { action: 'task-start', goal: '回执反例', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
   await accept(f, 'packages', ['--id', 'w1', '--package', 'w1', '--role', 'worker', '--status', 'consumed', '--ref', 'v1']);
 
   // 缺少 PASS 审查的 reviewedRef：CLI 退出码为 0（accept 断言），但回执明确拒绝。
@@ -581,7 +682,11 @@ test('F13 真实 PostToolUse 回执逐类定位拒绝内容，修正后接受；
   await event({ ...f, ...worker }, 'UserPromptSubmit');
   const badRole = await accept(f, 'role-claim', ['--id', 'claim-bad', '--role', 'lead', '--package', 'w1', '--task', f.taskId], worker);
   assert.equal(badRole.receipt.reason, 'ROLE');
-  const claimed = await accept(f, 'role-claim', ['--id', 'claim-ok', '--role', 'worker', '--package', 'w1', '--task', f.taskId], worker);
+  // 已结束任务不能绑定角色；另开一个活动任务验证真实 CLI→Post 绑定。
+  const claimTask = 'task-claim';
+  await emit({ ...f, taskId: claimTask }, { action: 'task-start', goal: '角色声明', route: 'lead-direct', permissions: { mode: 'write', allowedPaths: [] } });
+  const claimed = await accept(f, 'role-claim', ['--id', 'claim-ok', '--role', 'worker', '--package', 'w1', '--task', claimTask], worker);
+  assert.equal((await readState(f.directory)).sessions[sessionKey(f.projectId, worker.sessionId)].roleTaskId, claimTask);
   assert.equal(claimed.receipt.accepted, true, JSON.stringify(claimed.receipt));
   const forbidden = await accept(f, 'packages', ['--id', 'worker-pkg', '--package', 'w1', '--status', 'dispatched', '--task', f.taskId], worker);
   assert.equal(forbidden.receipt.reason, 'ROLE');
@@ -589,7 +694,7 @@ test('F13 真实 PostToolUse 回执逐类定位拒绝内容，修正后接受；
 
 test('F12/F14 同一批重复 packageId 整批拒绝，diagnostic 不能借批内重写补挂', async () => {
   const f = await gitFixture(['m1']);
-  await emit(f, { action: 'task-start', goal: '重复包反例', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
+  await legacyEmit(f, { action: 'task-start', goal: '重复包反例', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
   const before = structuredClone(Object.values((await readState(f.directory)).tasks)[0].packages);
   // 同一批内新建 w1 并消费，再改 dispatched 补 diagnostic，再消费写结论：批前预校验看不到批内前项，必须整批拒绝。
   const file = path.join(f.area, 'duplicate.json');

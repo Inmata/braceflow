@@ -77,4 +77,4 @@ Lead 先读计划 Markdown，确认其中已有需求、方案、包 ID、依赖
 
 `pending` 表示还没确认的待决事项，按阻塞缺项处理：只要列表非空，回执和入口都显示具体缺项，不能宣称准备已齐；非阻塞说明放到 `solution.assumptions`。
 
-当前边界：`prepare` 保存准备记录和缺项；复杂任务开工前的准备绑定与工具执行前拦截属于后续实施。在那些检查落地前，Lead 仍须按准备流程自行判断，不能把“已保存草案”说成“已完成准备”。真实宿主对 `prepare` 的接受与恢复效果，以实际运行和定向测试为准，本示例不冒充宿主验收。
+当前边界：`prepare` 只保存准备记录和缺项，不创建任务；记录齐全后，delegated 任务用 `task-start --route delegated` 开工，并把 `size`、源计划摘要和逐包 `role`/`agent`/`channel`/`scope` 固定到任务。开工后的 `packages` 按包逐项核对，实际委派还要带 `workflow-package:<包ID>` 并核对宿主工具 schema；准备未齐、未声明简单或没有准备的新任务在协议层和 PreToolUse 都会被拒。`scope` 是负责范围声明，不是路径/语义沙箱。真实宿主对 `prepare`、`task-start` 和拦截效果的验证以实际运行与定向测试为准，本示例不冒充宿主验收。

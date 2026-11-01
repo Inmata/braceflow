@@ -16,11 +16,11 @@ export function signalUsage(cli = cliPath()) {
   return {
     command: `${head} <action> ${who} [字段参数]`,
     examples: [
-      `${head} task-start ${who} --task <taskId> --route lead-direct --goal "<一句话目标>" --mode write --paths <相对路径,逗号分隔>`,
+      `${head} task-start ${who} --task <taskId> --route lead-direct --goal "<一句话目标>" --mode write --paths <相对路径,逗号分隔>（复杂任务先 prepare 并把记录绑定到本次开工；简单任务加 --size simple --size-reason "<理由>"）`,
       `${head} task-update ${who} --task <taskId> [--goal "<新目标>"] [--mode write|read-only|plan] [--paths <相对路径,逗号分隔> --paths-mode replace|append]`,
       `${head} task-end ${who} [--final-ref <commit>] [--validation-ref <commit> --evidence "<证据>" --evidence "<证据>"]`,
       `${head} prepare ${who} --input <准备记录 JSON> [--plan <项目内计划路径>] [--sections <章节,逗号分隔>]`,
-      `${head} packages ${who} --package <packageId> --status <dispatched|delivered|consumed|canceled|failed|waived> [--role worker|reviewer] [--channel <通道>] [--handle <委派ID>] [--ref <交付/审查提交>] [--depends-on a,b] [--supersedes <旧包>] [--verdict PASS|FIX|BLOCKED --reviews <worker包>]`,
+      `${head} packages ${who} --package <packageId> --status <dispatched|delivered|consumed|canceled|failed|waived> [--role worker|reviewer] --package-agent <Agent> --scope <负责范围> --channel <通道> [--handle <委派ID>] [--ref <交付/审查提交>] [--depends-on a,b] [--supersedes <旧包>] [--verdict PASS|FIX|BLOCKED --reviews <worker包>]`,
     ],
     fallback: `${head} packages ${who} --input <同批多个包或 change 的 JSON 文件>（只放业务字段）；完整 payload 兼容 ${head} --input <完整 payload 的 UTF-8 JSON 文件>（或 ${head} --base64 <...>）`,
     rule: '单独直接调用：不加 cd、&&、;、管道、重定向或变量赋值（如 $wf=...）。便捷参数只表达单个工作包，同批多个包、change 与 waivers 继续用 --input；task-end 的 validation.ref 缺省取 --final-ref。prepare 的 preparation 对象只放业务字段，身份由本机状态补齐；同一 signalId 重试命令保持不变。',
@@ -112,7 +112,7 @@ export async function projectContext(state, resolved, role = 'lead', sessionId, 
   const pending = Object.values(state.pending).filter(p => p.projectId === project.projectId && p.kind === 'knowledge-pending' && p.status === 'open').slice(0, 1);
   const identity = session && !session.interrupted ? { schemaVersion: 1, projectId: project.projectId, sessionId, taskId: session.taskId, turnId: session.turnId, ticket: session.ticket, interruptEpoch: session.interruptEpoch, expectedRevision: session.revision } : null;
   const instructions = {
-    lead: '首次或范围变化时读公共方法和 Lead 指引。交付完整实施计划时一次给出建议分流、工作包划分（几包、每包范围与依赖）；先说明执行顺序、串并行关系和理由，再按提问路径请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，无 Worker 的任务不问 Worker。只交付纯技术方案时按用户给定范围停在方案，不套用分包和逐包选择。新业务用 signal task-start 声明 route（identity.taskId 为空时自拟 taskId，如 task-<简短英文>；续接沿用原 ID）；同一任务改目标或增/减权限范围用 signal task-update（仅该任务有效 Lead；只记录本机声明，宿主只读/计划权限仍优先），不必结束重开；简单任务 lead-direct 只需 task-start 和 task-end 两条信号。结构化提问工具会自动记 waiting-user，文本提问先发 phase waiting-user；派发/消费/审查结论用 packages 记录：单个包用 --package 加 --status、--ref 等便捷参数（reviewer 结果加 --verdict/--reviews），同批多个包或 change 用 --input（handle 填委派 ID，channel 填实际通道；task-start 的 channels 只能按角色各记一个，同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包 channel 和每次 packages 的实际 channel 为准；只有任务已声明该角色通道而本次包通道不同，或 delegated 任务 worker 包改由 Lead 实施时，当前协议才检出偏离并要求 change，逐包核对留 W2；换新 packageId 返修用 supersedes）。明确纠正、失败原因或已验证方法出现时按 learningGuide 用 knowledge capture 保存；任务开始或范围变化用 knowledge select 检索经验。当前用户要求优先于历史经验。受委派的工作包会话（给出 packageId 与 worker/reviewer 角色）不按 Lead 行事：先 signal role-claim --role <角色> --package <packageId>，再读对应角色指引。',
+    lead: '首次或范围变化时读公共方法和 Lead 指引。交付完整实施计划时一次给出建议分流、工作包划分（几包、每包范围与依赖）；先说明执行顺序、串并行关系和理由，再按提问路径请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，无 Worker 的任务不问 Worker。只交付纯技术方案时按用户给定范围停在方案，不套用分包和逐包选择。新业务用 signal task-start 声明 route（identity.taskId 为空时自拟 taskId，如 task-<简短英文>；续接沿用原 ID）；同一任务改目标或增/减权限范围用 signal task-update（仅该任务有效 Lead；只记录本机声明，宿主只读/计划权限仍优先），不必结束重开；简单任务 lead-direct 用 task-start --size simple --size-reason "<理由>" 开工、task-end 收尾；复杂任务先用 prepare 保存完整准备记录，准备不齐不能 task-start。结构化提问工具会自动记 waiting-user，文本提问先发 phase waiting-user；派发/消费/审查结论用 packages 记录：单个包用 --package 加 --status、--package-agent、--scope、--channel、--ref 等便捷参数（reviewer 结果加 --verdict/--reviews），同批多个包或 change 用 --input（handle 填委派 ID，channel 填实际通道；task-start 的 channels 只能按角色各记一个，同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包选择为准；开工时固定的准备记录会按包 ID 核对 role/agent/channel/scope，新增、拆分或重新分包需先请用户确认并更新 prepare；换新 packageId 返修用 supersedes）。明确纠正、失败原因或已验证方法出现时按 learningGuide 用 knowledge capture 保存；任务开始或范围变化用 knowledge select 检索经验。当前用户要求优先于历史经验。受委派的工作包会话（给出 packageId 与 worker/reviewer 角色）不按 Lead 行事：先 signal role-claim --role <角色> --package <packageId> --task <父活动任务ID>，再读对应角色指引；缺 --task 的声明会被拒绝，不能生成未绑定的伪成功。',
     worker: '先读公共方法和 Worker 指引。只读工作包直接资料，必要的直接依赖可读；按阶段或范围变化说明【目标】和最小读取范围。不加载 Lead 调度，不递归创建代理，不发 task-start/packages。协作需要 workflow 身份而当前没有时，停止寻找并报告 Lead。复用有效证据；包内已授权的补测直接做，范围外补测先说明缺口交 Lead。发现随正常交付回报。',
     reviewer: '先读公共方法、Reviewer 指引和工作包指定范围。只读审查，不改源码、测试或配置，不递归创建代理，不发 task-start/packages。没有 workflow 身份时，停止寻找并报告 Lead。复用与待审版本匹配的证据；包内已授权的定向检查直接做，范围外补测先说明缺口交 Lead。完成即交回。',
   };
@@ -128,9 +128,11 @@ export async function projectContext(state, resolved, role = 'lead', sessionId, 
   const note = alignmentNote(role, alignment, session, task);
   // 准备记录只带当前步骤、缺项和来源；完整需求、方案和分包正文留在项目计划 Markdown。
   const preparation = role === 'lead' && session?.preparation ? preparationSummary(session.preparation) : null;
-  const preparationHint = !preparation ? '' : preparation.ready
-    ? `准备记录已齐（来源 ${preparation.source?.path || '未绑定计划'}）：按已确认的分包、逐包 Agent 与实际调用通道推进；真正开工仍需用户授权，准备好的记录不等于已派工。`
-    : `准备记录：当前在${preparation.step === 'requirements' ? '需求澄清' : preparation.step === 'solution' ? '技术方案' : '实施安排'}步骤，缺项 ${preparation.messages.join('、')}；继续讨论、调研或写计划补齐，不要宣称已经可以开工。若当前只交付纯技术方案，按其范围结束即可；这些缺项只限制进入实施，不要求为凑齐分包继续追问。`;
+  const preparationHint = !preparation
+    ? (role === 'lead' && !task ? '尚无准备记录：准备阶段可以继续读代码、检索和写计划；准备完整后 task-start，简单任务用 --size simple --size-reason 明确声明。真实宿主会在工具执行前拦下未开工的业务写入和实施委派。' : '')
+    : preparation.ready
+      ? `准备记录已齐（来源 ${preparation.source?.path || '未绑定计划'}）：按已确认的分包、逐包 Agent 与实际调用通道推进；真正开工仍需用户授权，准备好的记录不等于已派工。开工时记录会固定到任务，packages 按包 ID 核对 role/agent/channel/scope。`
+      : `准备记录：当前在${preparation.step === 'requirements' ? '需求澄清' : preparation.step === 'solution' ? '技术方案' : '实施安排'}步骤，缺项 ${preparation.messages.join('、')}；继续讨论、调研或写计划补齐，不要宣称已经可以开工。若当前只交付纯技术方案，按其范围结束即可；这些缺项只限制进入实施，不要求为凑齐分包继续追问。`;
   // 接入不自动授权后台维护（会真实调用模型）；Lead 在接入阶段补问一次，避免漏做。
   const learning = role !== 'lead' ? '' : project.learning?.enabled ? learningState(project.learning, project.root, options.directory)
     : !project.learning?.changedAt ? learningNote(project.root, options.directory) : '';
@@ -168,7 +170,7 @@ export async function projectContext(state, resolved, role = 'lead', sessionId, 
   const correction = inflight.length ? `有 ${inflight.length} 个工作包在途（${inflight.join('、')}）：若本条用户消息改变需求或范围，按中途纠正流程先核对已有成果、取消并确认停止，再以新基准和用户原话重新派发。` : '';
   const planning = role === 'lead' && (session?.permissionMode === 'plan' || (task?.lifecycle === 'active' && task.permissions?.mode === 'plan'));
   const planHint = planning ? '当前为计划模式：交付完整实施计划时才须列出分几个工作包（每包范围与依赖）或说明免拆包理由，并先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。普通解释和讨论不触发这项核对。' : '';
-  const leadRepeat = role === 'lead' ? '交付完整实施计划时先说明执行顺序，再请用户逐包指定 Agent 与实际调用通道，同一套已确认分包沿用原选择；只交付纯技术方案时按用户范围停在方案；' : '';
+  const leadRepeat = role === 'lead' ? '交付完整实施计划时先说明执行顺序，再请用户逐包指定 Agent 与实际调用通道，同一套已确认分包沿用原选择；复杂任务先 prepare，简单任务用 --size simple --size-reason 声明；只交付纯技术方案时按用户范围停在方案；' : '';
   const base = repeat ? `入口与本会话上一回合相同（文档、信号用法不变）：${leadRepeat}信号用 identity 字段加 signal <action> 子命令；需要时重读 ${role === 'lead' ? 'Lead' : role === 'worker' ? 'Worker' : 'Reviewer'} 指引。` : instructions[role];
   const instruction = [base, preparationHint, planHint, note, learning, correction, degraded.join(' ')].filter(Boolean).join(' ');
   const signal = repeat ? { command: signalUsage().command } : signalUsage();

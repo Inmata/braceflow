@@ -2,6 +2,8 @@
 
 Codeg 是管理 Agent 的一种软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收都独立于 Codeg；不使用 Codeg 时按 [Codex 适配](codex.md) 或 [Claude Code 适配](claude.md)接入。本页只说明 Codeg 专有的委派、等待、提问识别、结果格式和会话接续。Codeg 内嵌的 Codex ACP 或 Claude ACP 版本可能与本机 CLI 不同，Codex CLI/JetBrains 的实测结果不能直接当成 ACP 已验证。
 
+工具名与结果解析集中在 `src/adapters/codeg.mjs`：提问工具、`get_delegation_status`、`{tasks:[{task_id,status}]}` 终态判断、`codeg:` 通道识别和阻塞等待参数。公共 hook 只消费这些适配结果，不把其他外部通道一律当作 Codeg。`delegate_to_agent` 与 `create_work_task` 作为实施委派工具名列入未开工检查；其余 Codeg MCP 工具不因名称前缀自动获得特殊处理。
+
 ## 接续
 
 角色分工遵循[公共方法](../workflow.md)，由当前用户已确认的安排、实际类型、入口和并发上限决定。Codex、Claude Code、OpenCode、Pi 的名称不构成固定角色映射；例如 Claude Code 可以作为 Lead，通过当前可用且已授权的委派通道分配 Worker 和 Reviewer。不以泛泛执行请求替代缺失的新增角色决定。角色入口失效时可准备自包含交接文本，只有真实返回 task_id/handle、状态和成果才称已启动/送达。Codeg 委派不自动建隔离 worktree，明确传工作目录，先约定接口和基准。
@@ -35,8 +37,8 @@ Codeg 不会在委派结束时唤醒父会话：Lead 回合一结束，子任务
 
 - 等待集合：一次调用批量传入所有在途 `task_id`，用 `wait_ms: 0` 阻塞等待（`get_delegation_status` 遇 `blocked_on` 会提前返回，不会卡死在子会话的用户审批上）；终态 ID 首次消费后移出集合，并在账本把该包记为 consumed。压缩后按 context `ledger` 判断哪些结果已消费，不重读。插件在 `get_delegation_status` 的 PostToolUse 里按 `handle` 比对账本：等待集合含已终态包时提示移出，委派已结束但包仍是 dispatched 时提示记账。只追加提示，不改宿主输出，也不写状态。
 - 中途纠正：能力表没有“运行中追加消息”时，先核对磁盘上已有成果，再取消该任务并确认已停止，然后以新基准、用户原话和已完成工作重新派发；同包返修沿用 packageId（交付或审查要求修订后插件自动 attempts+1，同一交付轮次只计一次；交付后启动失败记为 consumed 再重派不增加，从未产出的启动失败重派也不增加），范围变化用新 packageId；新 packageId 只是同一修复的下一轮时带 `supersedes` 接上旧包，轮次照样累计。delegated 任务有 dispatched 包时，新用户回合的入口指令会列出在途包并提示这一流程；是否需要纠正仍由 Lead 判断。
-- 通道沿用：用户为各包指定了 Codeg 智能体（如 worker 用 claude_code、reviewer 用 codex）时，task-start 可选带 `channels:{worker:"codeg:claude_code", reviewer:"codeg:codex"}`，每包 `channel` 填实际通道。`channels` 目前每角色只能声明一个通道；同一角色各包使用不同 Agent 时，省略该角色键（必要时整项不带），以准备记录的逐包 Agent／通道和 packages 的实际通道为准。同一套已确认分包沿用；新增、拆分、合并或更换包的范围时重新确认。委派被拒、额度用尽等需要改用宿主内置子代理或 Lead 自己实施时，先告诉用户，再在 packages 附 `change`；不静默换路。当前协议只在任务已声明该角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时以 `CHANNEL` 拒绝；未声明角色通道或同角色逐包不同时没有可比声明，仍须说明并记录，逐包核对留 W2。
-- 委派工作包写明 packageId，并要求子会话有 workflow 身份时先发 `role-claim`。未声明的子会话按 Lead 处理，拿到的是 Lead 指引。
+- 通道沿用：用户为各包指定了 Codeg 智能体（如 worker 用 claude_code、reviewer 用 codex）时，task-start 可选带 `channels:{worker:"codeg:claude_code", reviewer:"codeg:codex"}`，每包 `channel` 填实际通道。`channels` 目前每角色只能声明一个通道；同一角色各包使用不同 Agent 时，省略该角色键（必要时整项不带），以准备记录的逐包 Agent／通道和 packages 的实际通道为准。同一套已确认分包沿用；新增、拆分、合并或更换包的范围时重新确认。委派被拒、额度用尽等需要改用宿主内置子代理或 Lead 自己实施时，先告诉用户，再在 packages 附 `change`；不静默换路。当前协议只在任务已声明该角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时以 `CHANNEL` 拒绝；准备记录在 `task-start` 固定到任务后，`packages` 再按包 ID 核对 `role`/`agent`/`channel`/`scope`，未声明包或字段不一致返回 `PREPARATION`。`scope` 仍是可核对的声明文本，不是路径所有权沙箱。
+- 委派工作包写明 packageId，并要求子会话有 workflow 身份时先发 `role-claim --role <角色> --package <包ID> --task <父活动任务ID>`。`--task` 必填；缺省时 CLI 直接拒绝，不会生成未绑定声明。未声明的子会话按 Lead 处理，拿到的是 Lead 指引。`delegate_to_agent` 只要出现非空 `assistant_id` 就拒绝（包括同时给 `agent_type` 的双字段写法），因为 assistant 决定实际执行者而 workflow 没有可靠映射；`codeg:<agent_type>` 通道编码实际 Agent，委派 Agent 必须同时匹配准备记录 `agent` 与通道尾部。
 
 ## 宿主能力表
 
@@ -44,7 +46,7 @@ Codeg 不会在委派结束时唤醒父会话：Lead 回合一结束，子任务
 
 | 能力 | Codeg 委派 | 证据 |
 | --- | --- | --- |
-| 委派子会话 | 独立会话，触发入口事件并收到 Lead 上下文；事件与环境变量名都与 Lead 无区分；用 `role-claim`，接受后移出 Lead 列表、`role` 记为声明值 | Claude、Codex 子会话均实测 |
+| 委派子会话 | 独立会话，触发入口事件并收到 Lead 上下文；事件与环境变量名都与 Lead 无区分；用 `role-claim --task <父任务>`，接受后移出 Lead 列表、`role`/`roleTaskId` 记为声明值 | Claude、Codex 子会话均实测 |
 | MCP 提问工具名 | `ask_user_question`；Claude 经 Codeg ACP 的会话工具列表没有原生 `AskUserQuestion` | 实测 + 工具清单 |
 | 运行中追加消息 | 当前 Codeg 工具无追加消息入口，按“中途纠正”流程处理 | 工具清单 |
 | 暂停 | 无 | 工具清单 |

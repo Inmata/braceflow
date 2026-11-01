@@ -3,9 +3,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mutate, readState } from '../src/store.mjs';
 import { gateReport, taskKey } from '../src/protocol.mjs';
-import { emit, fixture, gitFixture } from './helpers.mjs';
+import { emit, fixture, gitFixture, legacyEmit } from './helpers.mjs';
 
-const delegated = (f, extra = {}) => emit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
+// 显式旧的账本夹具：这些用例只验证审查/返修机械行为，不验证准备强制。
+const legacyDelegated = (f, extra = {}) => legacyEmit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
 const packages = (f, items, extra = {}) => emit(f, { action: 'packages', packages: items, ...extra });
 const taskOf = async f => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
 const validation = { ref: 'm1', evidence: ['npm test 通过'] };
@@ -23,7 +24,7 @@ test('F11 route 只决定门禁：三种合法分流保持原契约，用户指�
 
   // delegated：通道偏离没有 change 时按 CHANNEL 拒绝，同一信号列出该包后接受；门禁不会因 change 消失。
   const g = await gitFixture(['m1']);
-  await delegated(g, { channels });
+  await legacyDelegated(g, { channels });
   assert.equal((await packages(g, [{ packageId: 'w1', role: 'worker', status: 'dispatched', channel: 'builtin:general-purpose' }])).result.reason, 'CHANNEL');
   const changed = await packages(g, [{ packageId: 'w1', role: 'worker', status: 'dispatched', channel: 'builtin:general-purpose' }], { change: { summary: '改用内置子代理', reason: '用户同意：Codeg 额度用尽', packages: ['w1'] } });
   assert.equal(changed.result.accepted, true, JSON.stringify(changed.result));
@@ -34,7 +35,7 @@ test('F11 route 只决定门禁：三种合法分流保持原契约，用户指�
 
 test('既有 package 不能改 role 退出审查门禁，整批变更与 PASS 历史均回滚', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'w2', role: 'worker', status: 'consumed', deliveredRef: 'v2' },
@@ -59,7 +60,7 @@ test('既有 package 不能改 role 退出审查门禁，整批变更与 PASS �
 
 test('F12 已有 PASS 审查的 worker 包不能改 canceled 退出门禁，原记录不变', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -77,7 +78,7 @@ test('F12 已有 PASS 审查的 worker 包不能改 canceled 退出门禁，原�
 
 test('F12 未审包仍可取消；最终 ref 仍含被取消改动时门禁只核对声明，不能识别代码级集成', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }]);
   assert.equal((await packages(f, [{ packageId: 'w1', status: 'canceled' }])).result.accepted, true);
   // 边界：门禁只确认该包没有未完成的声明，不证明 v1 的改动真的从最终 ref 消失。
@@ -88,7 +89,7 @@ test('F12 未审包仍可取消；最终 ref 仍含被取消改动时门禁只�
 
 test('F12 曾 PASS 是单调事实：同批改写审查或先改 FIX 再取消都不能退出门禁', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -130,7 +131,7 @@ test('F12 曾 PASS 是单调事实：同批改写审查或先改 FIX 再取消�
 
 test('F12 同包返修后旧 PASS 不再匹配，新 reviewedRef 对上最终交付才通过', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -145,7 +146,7 @@ test('F12 同包返修后旧 PASS 不再匹配，新 reviewedRef 对上最终交
 
 test('F12 verdict 改成 BLOCKED 仍保留曾 PASS，取消继续被拒', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -159,7 +160,7 @@ test('F12 verdict 改成 BLOCKED 仍保留曾 PASS，取消继续被拒', async 
 
 test('F12 审查对象改指后历史 PASS 仍阻止 waived；真正未审的 waived 保持合法', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -184,7 +185,7 @@ test('F12 审查对象改指后历史 PASS 仍阻止 waived；真正未审的 wa
 
   // 真正未审（审查取消而无结论）的 worker 仍可合法 waived。
   const g = await gitFixture(['m1']);
-  await delegated(g);
+  await legacyDelegated(g);
   await packages(g, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'canceled', reviews: 'w1' },
@@ -194,7 +195,7 @@ test('F12 审查对象改指后历史 PASS 仍阻止 waived；真正未审的 wa
 
 test('F12 历史 PASS 沿 supersedes 链阻止接替包取消/waived，但不放宽接替包自己的审查', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'w2', role: 'worker', status: 'consumed', deliveredRef: 'v2' },
@@ -218,7 +219,7 @@ test('F12 同批新建 worker 终止与指向它的 PASS 审查不能一起被�
   for (const status of ['canceled', 'waived']) {
     for (const reviewerFirst of [false, true]) {
       const f = await gitFixture(['m1']);
-      await delegated(f);
+      await legacyDelegated(f);
       const before = structuredClone(await taskOf(f));
       const items = [
         { packageId: 'w9', role: 'worker', status, ...(status === 'canceled' ? { deliveredRef: 'v9' } : {}) },
@@ -237,7 +238,7 @@ test('F12 同批新建 worker 终止与指向它的 PASS 审查不能一起被�
   // 同一批的 FIX 结论同样算已审：waived 与数组顺序无关。
   for (const reviewerFirst of [false, true]) {
     const f = await gitFixture(['m1']);
-    await delegated(f);
+    await legacyDelegated(f);
     const items = [
       { packageId: 'w9', role: 'worker', status: 'waived' },
       { packageId: 'r9', role: 'reviewer', status: 'consumed', reviews: 'w9', verdict: 'FIX' },
@@ -250,7 +251,7 @@ test('F12 同批新建 worker 终止与指向它的 PASS 审查不能一起被�
   }
   // 与取消而无结论的审查同批不构成“已审”，未审的新包仍可合法取消/waived。
   const g = await gitFixture(['m1']);
-  await delegated(g);
+  await legacyDelegated(g);
   assert.equal((await packages(g, [
     { packageId: 'w1', role: 'worker', status: 'canceled' },
     { packageId: 'r1', role: 'reviewer', status: 'canceled', reviews: 'w1' },
@@ -263,7 +264,7 @@ test('F12 同批新建 worker 终止与指向它的 PASS 审查不能一起被�
 
 test('F12 同批新建接替包 canceled 不能借 supersedes 链退出既有 PASS 审查', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -292,7 +293,7 @@ test('同批两级 supersedes 按合并图检查 waived/canceled，与排列和�
         if (sameBatchReview) seed.push(reviewer);
         for (const items of permutations(seed)) {
           const f = await fixture();
-          await delegated(f);
+          await legacyDelegated(f);
           assert.equal((await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }, ...(sameBatchReview ? [] : [reviewer])], { validation })).result.accepted, true);
           // 也覆盖只有单调历史、当前 reviewer 已改指的旧 PASS。
           if (verdict === 'PASS' && !sameBatchReview) {
@@ -311,7 +312,7 @@ test('同批两级 supersedes 按合并图检查 waived/canceled，与排列和�
   // 没有 PASS 的链仍可 canceled，没有审查结论的链仍可 waived。
   for (const [verdict, status] of [['FIX', 'canceled'], [null, 'waived']]) {
     const f = await fixture();
-    await delegated(f);
+    await legacyDelegated(f);
     await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }, ...(verdict ? [{ packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', verdict }] : [])]);
     assert.equal((await packages(f, [
       { packageId: 'w2', role: 'worker', status: 'consumed', deliveredRef: 'v2', supersedes: 'w1' },
@@ -322,7 +323,7 @@ test('同批两级 supersedes 按合并图检查 waived/canceled，与排列和�
 
 test('F12 新包 supersedes 只在创建时声明；新包需要自己的 PASS 审查', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [
     { packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' },
     { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' },
@@ -343,7 +344,7 @@ const diagnostic = (extra = {}) => ({ purpose: '核对 README 与发布说明是
 
 test('F14 首次建包声明只读诊断免审：进入 gateReport，交付有可定位结论即可通过', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   const declared = await packages(f, [{ packageId: 'd1', role: 'worker', status: 'dispatched', diagnostic: diagnostic() }]);
   assert.equal(declared.result.accepted, true, JSON.stringify(declared.result));
   const delivered = await packages(f, [{ packageId: 'd1', status: 'consumed', note: '结论：README 与发布说明一致；证据 README.md 第 1 行、docs/usage.md' }], { validation });
@@ -358,7 +359,7 @@ test('F14 首次建包声明只读诊断免审：进入 gateReport，交付有�
 
 test('F14 空理由、缺交付结论、实现包、事后补声明与接替已审包都被拒；历史未声明包仍需审查', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   for (const [item, pattern] of [
     [{ packageId: 'bad1', role: 'worker', status: 'dispatched', diagnostic: diagnostic({ reason: '  ' }) }, /reason/],
     [{ packageId: 'bad2', role: 'worker', status: 'dispatched', diagnostic: diagnostic({ scope: [] }) }, /scope/],
@@ -391,7 +392,7 @@ test('F14 空理由、缺交付结论、实现包、事后补声明与接替已�
 
   // 历史未声明诊断的包仍按原契约要求审查。
   const g = await gitFixture(['m1']);
-  await delegated(g);
+  await legacyDelegated(g);
   await packages(g, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1', note: '结论：已核对' }], { validation });
   const missing = await emit(g, { action: 'task-end', finalRef: 'm1', validation });
   assert.deepEqual(missing.result.missing, ['review:w1']);

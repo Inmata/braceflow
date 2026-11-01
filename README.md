@@ -294,7 +294,7 @@ npm run verify
 - 增量对齐：`apply`/`decide`/`suggest` 可带 `sources` 只确认本次重读的来源，按 `size`/`mtimeMs` 快照复核后只刷新这些来源的基线，增量确认从 2 条命令减为 1 条，不再重复提问。
 - spec 检查对象：显式非 HEAD 的 `--ref` 从该提交树读取 spec 与代码；门禁、`task show`、Stop 改用 hook 解析出的 worktree 根。代码改动不影响 spec 时推荐在内容提交上附 `Spec-OK`，空提交只用于追认既有历史。
 - 安装与接入：重复 `install` 会修复自有 `current` 入口的断链或错链（不重写宿主配置），用户自己的目录或另一宿主登记的有效快照保留并报告 `conflict`；`onboard` 把核心接入与后台复盘预检分开，未加 `--enable-learning` 时预检问题只提示，显式启用失败返回 `status: partial`、退出码 1。
-- 同任务改目标或权限：新增 `signal task-update`，绑定该任务的 Lead 可改 goal 与 `permissions.mode/allowedPaths`（`--paths-mode replace|append`），宿主处于只读或计划模式时只允许收窄。
+- 同任务改目标或权限：`signal task-update` 允许绑定该任务的 Lead 改 goal 与 `permissions.mode/allowedPaths`（`--paths-mode replace|append`），宿主处于只读或计划模式时只允许收窄。目标变化或写权限扩张时，同一信号须用 `--input` 给出完整 `preparation`、非空 `preparationReason` 和与更新后结果一致的 `preparationTarget`，且准备记录要有实际变化；原样重放旧记录会被拒。未列出的旧包保留，`preparationRemove` 可显式移除未派发/已终态包，dispatched 包不能移除或改写。
 - 返修计数：一轮返修对应一个交付轮次，`supersedes` 链继承计数；从未产出的启动失败重派不再虚增返修。
 - 结构化提问与计划交付：宿主原生与 Codeg 的结构化提问工具自动记 waiting-user，文本提问仍需先声明。Lead 交付计划时一次列明工作包划分，先说明执行顺序、串并行关系和理由，再请你为每个包指定 Agent 与通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker。仅本回合显式进入计划交付阶段才核对，计划模式下的普通讨论不再单独被挡；计划交付与在途包同时成立时合并为一次提醒。
 - 高频载荷一次调用：`signal packages` 可用 `--package`、`--status`、`--role`、`--channel`、`--handle`、`--ref`、`--depends-on`、`--supersedes`、`--verdict`、`--reviews` 等便捷参数记录单个工作包的派发、消费与审查结论；`task-end` 用 `--validation-ref` 和可重复的 `--evidence` 提交验证；`knowledge capture` 可用少量字段保存短材料（`--incident` 必填）。同批多个包、`change`、`waivers` 等继续用 `--input` 附业务 JSON，旧语义不变。单 Worker + 单 Reviewer 无返修流程的总工具调用从 9 次降到 6 次。
@@ -349,6 +349,6 @@ npm run verify
 
 Claude Code 侧的字段差异（`prompt_id` 回合、`StopFailure` 中断、stdout 回执）见 [Claude Code 适配](docs/adapters/claude.md)。
 
-任务可声明分流（`operation-only` / `lead-direct` / `delegated`）。分工任务用批量 `packages` 信号记录工作包账本，`task-end` 时核对必要包终态、审查版本与交付版本一致、验证绑定最终版本；缺项可显式豁免。门禁只核对 Lead 声明记录的一致性，不证明审查或测试真实发生。委派子会话用 `role-claim` 声明角色，避免被计为第二个 Lead。宿主能力（子会话区分、各模式提问工具）记录在适配文档的能力表中，未实测的格子标 unknown。
+任务可声明分流（`operation-only` / `lead-direct` / `delegated`）。分工任务用批量 `packages` 信号记录工作包账本，`task-end` 时核对必要包终态、审查版本与交付版本一致、验证绑定最终版本；缺项可显式豁免。门禁只核对 Lead 声明记录的一致性，不证明审查或测试真实发生。委派子会话用 `role-claim --task <父活动任务ID>` 声明角色并绑定父任务，避免被计为第二个 Lead；缺 `--task` 的旧写法直接拒绝，未绑定的旧声明可读但不能写。宿主能力（子会话区分、各模式提问工具）记录在适配文档的能力表中，未实测的格子标 unknown。
 
 workflow 管项目开发知识；[document-learning](https://github.com/Inmata/document-learning) 独立管理个人文档经验。两者不共享库或信号。跨会话持久保存限同一电脑；项目配置与正式知识可随 Git 走，本机材料不自动跨电脑同步。

@@ -5,9 +5,10 @@ import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { readState } from '../src/store.mjs';
 import { taskKey } from '../src/protocol.mjs';
-import { cli, emit, entry, event, fixture, gitFixture } from './helpers.mjs';
+import { cli, emit, entry, event, fixture, gitFixture, identity, legacyEmit } from './helpers.mjs';
 
-const delegated = (f, extra = {}) => emit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
+// 显式旧的账本夹具：这些用例只验证通道/返修规则，不验证准备强制。
+const legacyDelegated = (f, extra = {}) => legacyEmit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
 const packages = (f, items, extra = {}) => emit(f, { action: 'packages', packages: items, ...extra });
 const taskOf = async f => (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
 const validation = { ref: 'm1', evidence: ['npm test'] };
@@ -15,7 +16,7 @@ const validation = { ref: 'm1', evidence: ['npm test'] };
 test('channels：与声明不一致的包未附 change 时拒绝，附 change 后接受，已记过的偏离不再重复要求', async () => {
   const f = await fixture();
   const channels = { worker: 'codeg:claude_code', reviewer: 'codeg:codex' };
-  await delegated(f, { channels });
+  await legacyDelegated(f, { channels });
   assert.equal((await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'task-1', channel: 'codeg:claude_code' }])).result.accepted, true);
   const silent = await packages(f, [{ packageId: 'w2', role: 'worker', status: 'dispatched', channel: 'builtin:general-purpose' }]);
   assert.equal(silent.result.reason, 'CHANNEL');
@@ -43,7 +44,7 @@ test('channels：与声明不一致的包未附 change 时拒绝，附 change �
 
 test('channels：分工任务的 worker 包由 Lead 实施须附 change；未声明通道或 lead-direct 任务行为不变；输入校验', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   assert.equal((await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'lead-direct' }])).result.reason, 'CHANNEL');
   assert.equal((await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', channel: 'lead' }])).result.reason, 'CHANNEL');
   assert.equal((await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', channel: 'lead' }], { change: { summary: 'Lead 实施 w1', reason: '单行修复，用户同意', packages: ['w1'] } })).result.accepted, true);
@@ -53,19 +54,25 @@ test('channels：分工任务的 worker 包由 Lead 实施须附 change；未声
 
   const g = await fixture();
   await emit(g, { action: 'task-start', goal: 'x', route: 'lead-direct', permissions: { mode: 'write', allowedPaths: [] } });
-  assert.equal((await packages(g, [{ packageId: 'w1', role: 'worker', status: 'dispatched', channel: 'lead' }])).result.accepted, true);
+  // 简单任务的空包快照只允许审查包或只读诊断包；lead-direct 不产生通道偏离。
+  assert.equal((await packages(g, [{ packageId: 'r1', role: 'reviewer', status: 'dispatched', channel: 'lead' }])).result.accepted, true);
 
   for (const channels of [{}, { lead: 'x' }, ['codeg:codex'], { worker: '' }, { worker: 'a b' }]) {
     const k = await fixture();
-    const started = await emit(k, { action: 'task-start', goal: 'x', route: 'delegated', channels, permissions: { mode: 'write', allowedPaths: [] } });
-    assert.equal(started.result.accepted, false, JSON.stringify(channels));
+    // 直接投递真实 Post 载荷，避免合成夹具的旧任务续接掩盖 channels 校验失败。
+    const payload = { ...await identity(k), taskId: k.taskId, signalId: `bad-channels-${Math.random()}`, action: 'task-start', goal: 'x', route: 'delegated', channels, permissions: { mode: 'write', allowedPaths: [] } };
+    const output = await event(k, 'PostToolUse', {
+      tool_name: 'Bash', tool_input: { command: `node "${entry}" signal --base64 e30=` }, tool_response: { output: JSON.stringify({ workflow_signal: payload }) },
+    });
+    const started = JSON.parse(output.hookSpecificOutput.additionalContext.slice('workflow 回执：'.length));
+    assert.equal(started.accepted, false, JSON.stringify(channels));
     assert.equal((await readState(k.directory)).tasks[taskKey(k.projectId, k.taskId)], undefined);
   }
 });
 
 test('supersedes：换新 packageId 返修继承轮次、旧包收尾，被接替的包不再要求审查', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }, { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'FIX' }]);
   let result;
   for (const [index, id] of ['fix1', 'fix2', 'fix3'].entries()) {
@@ -86,7 +93,7 @@ test('supersedes：换新 packageId 返修继承轮次、旧包收尾，被接�
 
 test('supersedes 的返修计数同样以交付事实为准：启动失败不增加，交付或 FIX 后累计', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   // 未产出的启动失败重派：换新 packageId 接替也不增加返修。
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'failed' }]);
   await packages(f, [{ packageId: 'w2', role: 'worker', status: 'dispatched', supersedes: 'w1' }]);
@@ -106,7 +113,7 @@ test('supersedes 的返修计数同样以交付事实为准：启动失败不增
 
 test('supersedes：在途旧包记为 canceled；目标不存在、异角色、已被接替或给已有包补声明都拒绝', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched' }, { packageId: 'r1', role: 'reviewer', status: 'dispatched' }]);
   await packages(f, [{ packageId: 'w2', role: 'worker', status: 'dispatched', supersedes: 'w1' }]);
   assert.equal((await taskOf(f)).packages.w1.status, 'canceled');
@@ -120,7 +127,7 @@ test('supersedes：在途旧包记为 canceled；目标不存在、异角色、�
 
 test('已安排审查的 worker 包：审查缺项不能豁免、不能改标 waived；PASS 后不能取消；从未审查的包照常豁免', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v2' }, { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'PASS' }], { validation });
   for (const step of ['review', 'review:w1']) {
     const ended = await emit(f, { action: 'task-end', finalRef: 'm1', waivers: [{ step, reason: '审查后只改了注释' }] });
@@ -135,18 +142,18 @@ test('已安排审查的 worker 包：审查缺项不能豁免、不能改标 wa
   assert.equal((await emit(f, { action: 'task-end', finalRef: 'm1' })).result.accepted, true);
 
   const g = await gitFixture(['m1']);
-  await delegated(g);
+  await legacyDelegated(g);
   await packages(g, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }], { validation });
   assert.equal((await emit(g, { action: 'task-end', finalRef: 'm1', waivers: [{ step: 'review:w1', reason: '只改文档，用户同意免审' }] })).result.accepted, true);
   const h = await gitFixture(['m1']);
-  await delegated(h);
+  await legacyDelegated(h);
   await packages(h, [{ packageId: 'w1', role: 'worker', status: 'waived' }], { validation });
   assert.equal((await emit(h, { action: 'task-end', finalRef: 'm1' })).result.accepted, true);
 });
 
 test('已审结论沿 supersedes 继承：接替包不能借新包号豁免；取消而无结论的审查不算已审；被接替的包不能再改状态', async () => {
   const f = await gitFixture(['m1']);
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }, { packageId: 'r1', role: 'reviewer', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'FIX' }]);
   await packages(f, [{ packageId: 'w2', role: 'worker', status: 'consumed', deliveredRef: 'v2', supersedes: 'w1' }], { validation });
   const ended = await emit(f, { action: 'task-end', finalRef: 'm1', waivers: [{ step: 'review:w2', reason: '小改动' }] });
@@ -155,7 +162,7 @@ test('已审结论沿 supersedes 继承：接替包不能借新包号豁免；�
   assert.equal((await packages(f, [{ packageId: 'w1', status: 'dispatched' }])).result.reason, 'PACKAGE');
 
   const g = await gitFixture(['m1']);
-  await delegated(g);
+  await legacyDelegated(g);
   await packages(g, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'v1' }, { packageId: 'r1', role: 'reviewer', status: 'canceled', reviews: 'w1' }], { validation });
   const waived = await emit(g, { action: 'task-end', finalRef: 'm1', waivers: [{ step: 'review:w1', reason: '审查人中途取消，用户同意免审' }] });
   assert.equal(waived.result.accepted, true, JSON.stringify(waived.result));
@@ -163,7 +170,7 @@ test('已审结论沿 supersedes 继承：接替包不能借新包号豁免；�
 
 test('Stop 在途提示按通道区分：全为内置子代理时说明宿主会通知，含 Codeg 包时要求阻塞等待', async () => {
   const f = await fixture();
-  await delegated(f);
+  await legacyDelegated(f);
   await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'agent-x', channel: 'builtin:general-purpose' }]);
   const builtin = await event(f, 'Stop');
   assert.match(builtin.reason, /内置子代理执行，结束时宿主会通知本会话/);

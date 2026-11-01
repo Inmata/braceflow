@@ -393,6 +393,7 @@ test('V14 Claude 安装写入 settings.json 的 hooks 段，保留其他插件�
   assert.ok(own.args[0].endsWith('bin/workflow.mjs'));
   assert.deepEqual(own.args.slice(1, 5), ['hook', '--agent', 'claude', '--state-dir']);
   assert.equal(config.hooks.SessionStart[0].hooks[0].command, 'D:/other/hook.exe');
+  assert.deepEqual(config.hooks.PreToolUse[0].hooks[0].args.slice(1, 3), ['hook', '--agent']);
   assert.deepEqual(config.hooks.Stop.map(group => group.hooks[0].command), ['other-stop-hook', own.command]);
   const info = await doctor(directory, undefined, { agent: 'claude' });
   assert.equal(info.agent, 'claude');
@@ -404,6 +405,7 @@ test('V14 Claude 安装写入 settings.json 的 hooks 段，保留其他插件�
   assert.equal(restored.hooks.SessionStart[0].hooks[0].command, 'D:/other/hook.exe');
   assert.equal(restored.hooks.Stop.length, 1);
   assert.equal(restored.hooks.PostToolUse, undefined);
+  assert.equal(restored.hooks.PreToolUse, undefined);
   assert.deepEqual(restored.env, existing.env);
 });
 

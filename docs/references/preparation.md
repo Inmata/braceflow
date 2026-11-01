@@ -116,4 +116,4 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 - 新入口需要填写不同的 Agent 或通道时，先说明差异和影响，再由用户决定。
 - 原计划只写了 Agent、没有写通道时，Lead 按新入口实际可用的工具填写 `channel`，不要求用户重新选择；只有 Agent 本身或实际入口发生变化时才补问。
 
-当前实现边界：`prepare` 负责保存准备记录、来源摘要和缺项；复杂任务开工前绑定完整准备记录、工具执行前拦截和宿主 hooks 属于后续实施。在那些检查落地前，未准备齐不会被 `task-start` 自动拒绝，Lead 仍须按本页自行判断，不能把“已保存草案”说成“准备完成”或“已获授权实施”。
+当前实现边界：`prepare` 负责保存准备记录、来源摘要和缺项，不创建任务。记录齐全后，delegated 任务用 `task-start` 开工并把 `size`、源计划摘要和逐包 `role`/`agent`/`channel`/`scope` 固定到任务；准备未齐、未声明简单或没有准备的新任务会在协议层和宿主 `PreToolUse` 被拒。源计划与关联计划都只接受 `docs/plans/` 下的 Markdown；路径链上的 symlink/junction 一律拒绝，解析后的真实路径也必须仍在真实 `docs/plans/` 内，业务文件不能借链接别名成为计划。`scope` 是负责范围声明，不是路径或语义沙箱；程序不解析 prompt 正文，也不证明用户授权真实存在。不能把“已保存草案”说成“准备完成”或“已获授权实施”。

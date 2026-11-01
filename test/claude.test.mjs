@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 import { handleHook } from '../src/hooks.mjs';
 import { mutate, readState } from '../src/store.mjs';
 import { doctor } from '../src/install.mjs';
@@ -70,7 +71,7 @@ test('Claude StopFailure 挂起任务，新回合显式恢复后可结束', asyn
 test('PowerShell 直接调用可识别；stderr、普通输出和组合命令不误识别', async () => {
   const f = await fixture({ claude: true });
   const node = process.execPath.replaceAll('\\', '/');
-  const payload = { ...await identity(f), taskId: f.taskId, signalId: 'powershell-start', action: 'task-start', goal: 'PowerShell 链路', route: 'lead-direct', permissions: { mode: 'write', allowedPaths: ['README.md'] } };
+  const payload = { ...await identity(f), taskId: f.taskId, signalId: 'powershell-start', action: 'task-start', goal: 'PowerShell 链路', route: 'lead-direct', size: 'simple', sizeReason: '入口传输测试', permissions: { mode: 'write', allowedPaths: ['README.md'] } };
   const encoded = Buffer.from(JSON.stringify(payload)).toString('base64');
   const accepted = await claudeEvent(f, 'PostToolUse', {
     tool_name: 'PowerShell', tool_input: { command: `& "${node}" "${entry}" signal --base64 ${encoded}` },
@@ -87,6 +88,15 @@ test('PowerShell 直接调用可识别；stderr、普通输出和组合命令不
   assert.deepEqual(Object.values(state.tasks).map(task => task.goal), ['PowerShell 链路']);
 });
 
+test('Claude PreToolUse 按 prompt_id 关联会话：未开工业务编辑被拒，读取与计划写入放行', async () => {
+  const f = await fixture({ claude: true });
+  assert.deepEqual(await claudeEvent(f, 'PreToolUse', { tool_name: 'Read', tool_input: { file_path: path.join(f.project, 'README.md') } }), {});
+  assert.deepEqual(await claudeEvent(f, 'PreToolUse', { tool_name: 'Write', tool_input: { file_path: path.join(f.project, 'docs', 'plans', 'plan.md'), content: 'x' } }), {});
+  const denied = await claudeEvent(f, 'PreToolUse', { tool_name: 'Edit', tool_input: { file_path: path.join(f.project, 'src', 'a.mjs'), old_string: 'a', new_string: 'b' } });
+  assert.equal(denied.hookSpecificOutput?.hookEventName, 'PreToolUse');
+  assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /准备阶段|尚未保存准备记录/);
+});
 test('回调观测按宿主分层，旧扁平记录只算 Codex 证据', async () => {
   const f = await fixture();
   await handleHook(f.directory, { hook_event_name: 'UserPromptSubmit', cwd: f.project, session_id: f.sessionId, turn_id: 'turn-callback' });

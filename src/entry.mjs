@@ -24,6 +24,14 @@ const shQuote = value => `'${value.replaceAll("'", `'"'"'`)}'`;
 const shellQuote = process.platform === 'win32' ? psQuote : shQuote;
 // 只按目标 shell 的字面量规则引用一个值，不做 5.1 传输编码；用于必须保持原位的入口路径。
 export const shellValue = value => PLAIN.test(slash(value)) ? slash(value) : shellQuote(slash(value));
+// 宿主事件的最小规范化：不同宿主的工具名与参数容器不同，但 hook 只需要名字和对象参数。
+// 这里只做形状归一，不把某个宿主的专有工具语义带进公共流程。
+export function hostTool(event) {
+  const name = typeof event?.tool_name === 'string' ? event.tool_name : '';
+  const input = event?.tool_input && typeof event.tool_input === 'object' && !Array.isArray(event.tool_input) ? event.tool_input : {};
+  return { name, input };
+}
+
 // Windows PowerShell 5.1 调用原生程序时不会转义参数里的双引号，也会丢弃空参数；只靠引号无法表达。
 // 这类值编码成只含安全字符的标记，由 command() 同时追加传输开关，CLI 启动时才还原。
 // 直接调用时用户手写的同名文本没有开关，保持原样，不因长得像标记就被改写。
