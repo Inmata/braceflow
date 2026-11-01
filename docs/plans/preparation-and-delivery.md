@@ -1,6 +1,6 @@
 # workflow 通用定位、开工前流程与交付闭环改造计划
 
-状态：W3 已实施；R3 首审五项 NEEDS_FIX 已全部定向修复，后续两处文档修订已闭合，最终独立复审 PASS（Codex child279，任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`）。**当前基线：W1 已提交 `c49ed52` 且 R1 最终复审 PASS；W2 已提交 `1c48799` 且 R2 最终独立复核 PASS（Codex child273，任务 `d9b690e9-2447-4c24-8615-8575fb20c634`）。** W3 已完成需求验收矩阵、覆盖缺项、阶段交付状态、Reviewer 双结论和接续文档；定向测试已跑通，未提交、未推送、未运行最终 `npm run verify`。用户已明确以 Claude Code 为主要强制准备入口；Codex 继续独立 Reviewer，Codex 原生 Windows 隔离失败不再阻塞 Claude 路径。以下各轮 R2 首审/复审历史段保留为历史证据，当前状态以本段和 W3 进度为准。Claude Code 2.1.316 的收紧配置在所列工具/入口取得实际拒绝事件；真实 MCP、NotebookEdit、Windows 文件符号链接及 Codex/Codeg ACP 仍未验，不能写成 OS 隔离或全入口覆盖。此前“仅制定计划、尚未授权实施”是 2026-11-01 用户授权前的历史状态，现已失效。
+状态：W1–W3 实施、独立审查及 Lead 必要集成验证已完成；提交与远端同步状态以本分支 Git 历史为准；详细结果见 `docs/acceptance.md` 第 12 节。W3 已提交 `855901f`，提交后 spec 检查无漂移；完整 verify 的 check/test 通过，demo 旧声明已定向修复并经独立复核及 check/demo 复验通过。以下历史进度以本段和第 12 节集成记录为准。W3 已实施；R3 首审五项 NEEDS_FIX 已全部定向修复，后续两处文档修订已闭合，最终独立复审 PASS（Codex child279，任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`）。**当前基线：W1 已提交 `c49ed52` 且 R1 最终复审 PASS；W2 已提交 `1c48799` 且 R2 最终独立复核 PASS（Codex child273，任务 `d9b690e9-2447-4c24-8615-8575fb20c634`）。** W3 已完成需求验收矩阵、覆盖缺项、阶段交付状态、Reviewer 双结论和接续文档；W3 已提交 `855901f`，定向测试、提交后 spec 检查、全量测试及必要集成复验通过；远端同步以 Git 状态为准，完整结果见验收第 12 节。用户已明确以 Claude Code 为主要强制准备入口；Codex 继续独立 Reviewer，Codex 原生 Windows 隔离失败不再阻塞 Claude 路径。以下各轮 R2 首审/复审历史段保留为历史证据，当前状态以本段和 W3 进度为准。Claude Code 2.1.316 的收紧配置在所列工具/入口取得实际拒绝事件；真实 MCP、NotebookEdit、Windows 文件符号链接及 Codex/Codeg ACP 仍未验，不能写成 OS 隔离或全入口覆盖。此前“仅制定计划、尚未授权实施”是 2026-11-01 用户授权前的历史状态，现已失效。
 
 日期：2026-11-01。实施前基线：0.8.1。前序核对确认实施前 HEAD 与 `v0.8.1` 标签文件内容相同；当前已包含 W1 提交 `c49ed52` 和 W2 提交 `1c48799`。本文件记录本轮讨论形成的需求、建议方案和实施安排；W1 覆盖准备资料的保存与恢复且 R1 最终复审 PASS；W2 覆盖准备绑定、逐包核对和两宿主真实 `PreToolUse` 拒绝且 R2 child273 PASS；W3 已实现需求验收矩阵、覆盖缺项、阶段交付状态和接续文档；R3 首审五项 NEEDS_FIX 和两处文档问题均已修复，最终独立复审 child279 PASS。此状态不表示整项改造完成或所有入口已覆盖；A01–A21 的最终证据与未验边界见 `docs/acceptance.md` 第 11 节，首轮/第二轮 R2 记录是历史证据。
 
@@ -11,7 +11,7 @@
 | 在哪里实施？ | 在 `D:/git-repo/workflow` 仓库中实施，可继续使用现有的 Agent 运行环境。无需专门切换到 Herdr、在 Herdr 里开 Agent 才能实施本计划 |
 | 做完得到什么？ | 补齐开工前流程、执行前检查和交付闭环；公共规则及计划资料独立于 Codeg；保留并验证现有 Codeg 接入能力 |
 | Herdr 做到哪一步？ | 说明未来怎样接入，分清共用规则与软件专用处理。本轮 W1–W3 不包含 Herdr 的安装、配置、专用接入开发或真实使用验收；完成本计划不等于已支持 Herdr |
-| 当前做到哪里？ | W1 已提交 `c49ed52` 且 R1 PASS；W2 已提交 `1c48799` 且 R2 PASS（child273）。W3 已实现：准备记录和任务快照保存需求 ID/负责包/检查入口，`task-end` 的 `validation.acceptance` 按需求核对最终证据和 `verified`/`manual-pending`/`blocked`/`deferred` 状态；所有包 PASS 但漏需求会列 `acceptance:<id>`；人工待验给负责人/步骤，延期要用户同意依据；版本变化旧证据不沿用；进度更新按 ID 合并保留需求和 Agent。Reviewer/validation/reports/delegation/preparation 文档和 A01–A21 分类已同步。W3 的 R3 五项首审问题及两处文档问题已修，最终独立复审 child279 PASS；待 Lead 提交、spec 历史检查、最终 verify 与推送；真实 MCP、NotebookEdit、文件符号链接、Codex/Codeg ACP 仍未验 |
+| 当前做到哪里？ | W1 已提交 `c49ed52` 且 R1 PASS；W2 已提交 `1c48799` 且 R2 PASS（child273）。W3 已实现：准备记录和任务快照保存需求 ID/负责包/检查入口，`task-end` 的 `validation.acceptance` 按需求核对最终证据和 `verified`/`manual-pending`/`blocked`/`deferred` 状态；所有包 PASS 但漏需求会列 `acceptance:<id>`；人工待验给负责人/步骤，延期要用户同意依据；版本变化旧证据不沿用；进度更新按 ID 合并保留需求和 Agent。Reviewer/validation/reports/delegation/preparation 文档和 A01–A21 分类已同步。W3 的 R3 五项首审问题及两处文档问题已修，最终独立复审 child279 PASS；W3 已提交 `855901f`，spec 检查与必要集成验证已完成，远端同步以 Git 状态为准；真实 MCP、NotebookEdit、文件符号链接、Codex/Codeg ACP 仍未验 |
 
 以后真正要使用 Herdr 时，另列一次接入任务：优先验证原有 Agent 配置能否直接复用，确有缺口再补 workflow 侧的适配及必要本机配置。那时才需要在 Herdr 的实际环境中验证结果，不要求先去 Herdr 实施本计划。
 
@@ -463,7 +463,7 @@ Agent：Claude Code。独立审查：R1，Agent：Codex。
 | 6 中 | `preparationPackageGaps` 简单任务只读/审查例外 | reviewer 与 diagnostic worker 放行；实施 worker 拒绝；显式升级复杂后放行 |
 | 7 中 | `isPreparationTarget`/`realPathForCheck`；只读委派例外 | 仅 `docs/plans/plan.md`、源计划、关联计划可写；`.local`、任意后缀、项目外、junction 逃逸拒绝；read-only 任务 Explore 放行 |
 
-定向复跑：`node --test test/adapters.test.mjs test/claude.test.mjs test/gate.test.mjs test/hooks.test.mjs test/install.test.mjs test/preparation.test.mjs test/protocol.test.mjs test/signal.test.mjs test/task-update.test.mjs test/context.test.mjs test/entry.test.mjs` 214 项通过、1 项跳过、0 失败；`npm run check` 通过（55 个语法文件、33 份文档、53 个发布文件、226 个本地链接）。最终 `npm run verify` 仍留 Lead 集成一次。
+定向复跑：`node --test test/adapters.test.mjs test/claude.test.mjs test/gate.test.mjs test/hooks.test.mjs test/install.test.mjs test/preparation.test.mjs test/protocol.test.mjs test/signal.test.mjs test/task-update.test.mjs test/context.test.mjs test/entry.test.mjs` 214 项通过、1 项跳过、0 失败；`npm run check` 通过（55 个语法文件、33 份文档、53 个发布文件、226 个本地链接）。Lead 已执行完整 `npm run verify` 及失败项定向复验，结果见验收第 12 节。
 
 **联合验证（真实 hook + Claude v2，2026-11-01）：** 隔离项目/状态/`CLAUDE_CONFIG_DIR`，`project onboard --skip-learning` 后 `install --agent claude`，settings 合并 v2 权限；`claude -p --permission-mode dontAsk` 单会话实际调用。业务 `Write`/`Edit` 由 `PreToolUse:Write/Edit hook error` 拒绝，Agent 由 `PreToolUse:Agent hook error` 拒绝；Bash `cat` 与 Skill 由宿主 `dontAsk` 拒绝；Read、指定 `docs/plans/plan.md` 的 Write/Edit 成功，最终 plan 为 `PLAN3`、business 为 `ORIGINAL`。真实 MCP 尝试两次（`--mcp-config` 与项目 `.mcp.json`）：一次 `CONNECTION_CLOSED`，一次会话未提供 `mcp__probe__delegate_to_agent`，均未发生工具调用；没有取得“MCP 调用被拒”的证据，不能写成已覆盖。文件符号链接、NotebookEdit 实际调用、Codex/Codeg ACP 实机仍未测。
 
@@ -537,9 +537,9 @@ Agent：Claude Code。独立审查：R1，Agent：Codex。
 - 阶段交付：门禁通过但未全部 `verified` 时回执带 `acceptance` 汇总（总数、各状态数量、剩余项、`allVerified:false` 和说明）；`manual-pending` 的 owner/next 随剩余项返回；`task show` 和 Lead 账本附验收汇总。
 - 合并与版本：`task-update` 按包 ID 和需求 ID 合并，未列出的旧需求/旧包保留；包、依赖、需求、验收句子和负责包的顺序不构成实际变化；目标变化时倒序重放仍返回 `PREPARATION`。`finalRef` 改变后旧 `validation` 不匹配，需按新版本重报；审查版本仍按 `deliveredRef`/`reviewedRef` 核对。
 - 文档：新增 `.spec/preparation/spec.md`，同步 `.spec/task-protocol/spec.md`；更新 `docs/roles/reviewer.md`（需求验收与工程规范分开，默认一个独立 Reviewer）、`validation.md`、`reports.md`、`delegation.md`、`spec-plan.md`、`preparation.md`、`usage.md`、`design/protocol.md`、`examples/preparation-and-resume/README.md`、中英文 README；`docs/acceptance.md` 新增第 11 节，按 A01–A21 记录已验证/人工待验/受阻/经用户同意后延的实际证据与下一步。`install-onboard` 无实际注册变化；因 `entry.hostTool` 新增宿主事件形状归一，补一条目标说明。学习规则未改，仅补 `PreToolUse` 门禁不影响学习行为的边界，避免 spec 漂移门禁把 W2 的 `hooks.mjs`/CLI 改动误报为未同步。
-- 定向验证：`node --test test/preparation.test.mjs test/gate.test.mjs test/r2-regressions.test.mjs` 73 项通过；随后定向复跑 preparation/protocol/signal/context/task-update/hooks/adapters/claude/gate/install/entry 等受影响测试并保留完整输出。最终 `npm run verify` 仍留 Lead 集成一次。
+- 定向验证：`node --test test/preparation.test.mjs test/gate.test.mjs test/r2-regressions.test.mjs` 73 项通过；随后定向复跑 preparation/protocol/signal/context/task-update/hooks/adapters/claude/gate/install/entry 等受影响测试并保留完整输出。Lead 已执行完整 `npm run verify` 及失败项定向复验，结果见验收第 12 节。
 - 未验边界：真实 MCP、NotebookEdit、Windows 文件符号链接、Codex/Codeg ACP 仍未测；A01、A02、A04、A05、A08、A09、A14、A15、A17、A19、A21 等协作体验为人工待验；A19 的原生入口与独立状态资料复用已按 10.7/10.8 和准备/接续测试记录部分证据，真实换用另一套管理软件后的项目复用仍待验，只有 Herdr 本体安装、配置、专用接入和实测单列范围外，不把整项 A19 延期；A20 真实 Codeg 回归受阻。不能用程序测试或“记录齐全”写成全部验收通过。
-- R3 历史：首审五项 NEEDS_FIX 已全部定向修复；child277 复审确认代码部分通过，提出 A09 证据分类及 README 豁免口径两项文档问题。修订后 child279 最终独立复审 PASS（任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`）；复用已有测试与 child277 代码核验，未复测宿主。当前待 Lead 提交、spec 历史检查、最终 `npm run verify` 与推送。
+- R3 历史：首审五项 NEEDS_FIX 已全部定向修复；child277 复审确认代码部分通过，提出 A09 证据分类及 README 豁免口径两项文档问题。修订后 child279 最终独立复审 PASS（任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`）；复用已有测试与 child277 代码核验，未复测宿主。W3 已提交 `855901f`；spec 检查无漂移；完整 verify 的 check/test 通过（430 项、427 通过、3 跳过），demo 首次失败后以简单声明修正，child281 复核 PASS、check/demo 定向复验通过，远端同步以 Git 状态为准。详细失败与复验保留于验收第 12 节。
 
 **R3 重点：** 是否重复已有 spec 审查；是否把记录齐全当真实性证明；是否新增无必要的全测和角色；未完成事项是否只留在聊天或另一台机器的临时路径里。
 
@@ -623,4 +623,4 @@ Lead 负责当前计划确认、用户选择传递、所有权交接、集成和
 - 统一版本和接入方式的建议已写入第 5.7、5.8 节。Herdr 实际安装、配置、专用接入和真实验收不包含在本轮实施包中；后续需要使用时另列接入任务。本计划完成不等于 Herdr 已接入。
 - 实施时按 W2 的前置验证确定本机真实可覆盖的工具入口；不把官方支持直接记为本机已通过。
 
-当前完成 W1 的准备资料保存、缺项提示和恢复能力（R1 PASS，提交 `c49ed52`），W2 的准备绑定、逐包核对、简单/只读/计划路径、两宿主真实 `PreToolUse` 拒绝和 Codeg 适配提取（R2 PASS，提交 `1c48799`），以及 W3 的需求验收矩阵、覆盖缺项、阶段交付状态和接续文档。Claude 严格权限 v2 与真实 hook 的联合最小验证通过（`docs/acceptance.md` 10.7），但真实 MCP 未取得调用证据，文件符号链接、NotebookEdit、其他需审批工具、安装信任和 Codex/Codeg ACP 实机仍未测；A01–A21 中仍有 A01/A02/A04/A05/A08/A09/A14/A15/A17/A19/A21 人工待验、A20 受阻；A19 的原生入口与独立资料复用已有部分证据，真实换软件复用仍待验，Herdr 本体单列范围外而非整项延期。R3 最终独立复审 child279 已 PASS；待 Lead 完成提交、spec 历史检查、最终 `npm run verify` 与推送。所有入口的真实宿主覆盖与 Herdr 接入不在本次已验证成果内。
+当前完成 W1 的准备资料保存、缺项提示和恢复能力（R1 PASS，提交 `c49ed52`），W2 的准备绑定、逐包核对、简单/只读/计划路径、两宿主真实 `PreToolUse` 拒绝和 Codeg 适配提取（R2 PASS，提交 `1c48799`），以及 W3 的需求验收矩阵、覆盖缺项、阶段交付状态和接续文档。Claude 严格权限 v2 与真实 hook 的联合最小验证通过（`docs/acceptance.md` 10.7），但真实 MCP 未取得调用证据，文件符号链接、NotebookEdit、其他需审批工具、安装信任和 Codex/Codeg ACP 实机仍未测；A01–A21 中仍有 A01/A02/A04/A05/A08/A09/A14/A15/A17/A19/A21 人工待验、A20 受阻；A19 的原生入口与独立资料复用已有部分证据，真实换软件复用仍待验，Herdr 本体单列范围外而非整项延期。R3 最终独立复审 child279 已 PASS，W3 已提交 `855901f`，提交后 spec 检查无漂移；完整 verify 的 check/test 通过，demo 的旧声明经修复及 child281 复核 PASS，check/demo 定向复验通过，远端同步以 Git 状态为准（验收第 12 节）。所有入口的真实宿主覆盖与 Herdr 接入不在本次已验证成果内。

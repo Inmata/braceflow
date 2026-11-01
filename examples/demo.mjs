@@ -37,7 +37,7 @@ const signal = extra => {
   assert.equal(receipt.accepted, true, JSON.stringify(receipt));
   return receipt;
 };
-signal({ action: 'task-start', route: 'lead-direct', goal: '隔离样例补齐有证据项目经验', permissions: { mode: 'write', allowedPaths: ['LESSONS.md'] } });
+signal({ action: 'task-start', route: 'lead-direct', goal: '隔离样例补齐有证据项目经验', size: 'simple', sizeReason: '仅改动隔离样例项目 LESSONS.md 一条合成经验并验证知识事务，单文件、无实施代码改动', permissions: { mode: 'write', allowedPaths: ['LESSONS.md'] } });
 const baseline = invoke(['knowledge', 'inspect', '--project', project, '--path', 'LESSONS.md']);
 const candidate = { id: 'demo-finding', taskId: 'demo-task', workPackage: 'demo', conditions: '当前合成样例', finding: '演示条目需明确条件', recommendation: '资料写明条件与证据', evidence: ['synthetic:demo-input'] };
 const transaction = invoke(['knowledge', 'apply'], { ...context().identity, candidates: [candidate], changes: [{ path: 'LESSONS.md', baseline: baseline.fingerprint, content: '# 样例经验\n仅用于当前合成场景；参考 synthetic:demo-input。\n', responsibility: '样例经验', reason: '验证完整知识事务', evidence: candidate.evidence, candidateIds: [candidate.id] }] });
