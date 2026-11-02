@@ -1,6 +1,6 @@
 # Herdr 适配（可选）
 
-Herdr 是运行 Agent 的一种终端/桌面软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收独立于 Herdr；不使用 Herdr 时按 [Codex 适配](codex.md)、[Claude Code 适配](CLAUDE.md)或 [Codeg 适配](codeg.md)接入。
+Herdr 是运行 Agent 的一种终端/桌面软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收独立于 Herdr；不使用 Herdr 时按 [Codex 适配](codex.md)、[Claude Code 适配](claude.md)或 [Codeg 适配](codeg.md)接入。
 
 Herdr 有两种互不兼容的形态，委派命令、通道和等待方式都不同：
 
@@ -13,7 +13,7 @@ Herdr 有两种互不兼容的形态，委派命令、通道和等待方式都�
 
 ## hooks
 
-Herdr TUI 中的 Claude Code/Codex 继续读取用户级 hooks：`herdr integration install` 只额外登记它自己的 SessionStart 回报，与 workflow 的 hook 并列。Herdr GUI 以本机真实 CLI 启动 Agent，用户级 hooks 应同样触发（推断，需真实会话验收；见[计划](../plans/2026-11-02-01-herdr-cindy-adapters.md) 3.5 的 A2）。
+Herdr TUI 中的 Claude Code/Codex 继续读取用户级 hooks：`herdr integration install` 只额外登记它自己的 SessionStart 回报，与 workflow 的 hook 并列。Herdr GUI 以本机真实 CLI 启动 Agent，用户级 hooks 应同样触发（推断，需真实会话验收；见本仓未发布的计划 `docs/plans/2026-11-02-01-herdr-cindy-adapters.md` 3.5 的 A2）。
 
 workflow 的 PreToolUse 在命令执行前核对委派：
 

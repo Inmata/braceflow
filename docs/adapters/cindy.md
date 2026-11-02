@@ -1,6 +1,6 @@
 # Cindy 适配（可选）
 
-Cindy 是运行 Agent 的一种桌面软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收独立于 Cindy；不使用 Cindy 时按 [Codex 适配](codex.md)、[Claude Code 适配](CLAUDE.md)、[Codeg 适配](codeg.md)或 [Herdr 适配](herdr.md)接入。
+Cindy 是运行 Agent 的一种桌面软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收独立于 Cindy；不使用 Cindy 时按 [Codex 适配](codex.md)、[Claude Code 适配](claude.md)、[Codeg 适配](codeg.md)或 [Herdr 适配](herdr.md)接入。
 
 Cindy 同时可以托管 Claude 与 Codex 两种宿主，委派入口、通道写法和等待方式相同；差异只在宿主自己的 hook 注册位置。识别代码集中在 `src/adapters/cindy.mjs`，公共 hook 只消费适配结果。
 

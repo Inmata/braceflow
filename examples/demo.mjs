@@ -49,7 +49,7 @@ assert.match(blocked.reason, /任务 demo-task 门禁已无缺项但仍为 activ
 signal({ action: 'task-end' });
 assert.deepEqual(hook('Stop'), {});
 assert.equal(invoke(['project', 'disable', '--root', project]).status, 'disabled');
-assert.equal(invoke(['uninstall', '--agent', 'codex']).status, 'uninstalled');
+assert.equal(invoke(['uninstall', '--agent', 'codex', '--user-dir', userDir]).status, 'uninstalled');
 const result = { status: 'passed', mode: 'synthetic-isolated-cli', area, projectId: binding.projectId, transactionId: transaction.transactionId, installedRelease: installation.releaseRoot, stages: ['临时发布安装', '显式绑定', '入口注入', '真实CLI信号及回执', '知识快照与事务', '交付首次Stop拦截', '任务结束', '结束后Stop放行', '停用与撤销'], realACP: 'not-tested', realUserConfigChanged: false };
 await writeFile(path.join(area, 'result.json'), JSON.stringify(result, null, 2) + '\n');
 process.stdout.write(JSON.stringify(result) + '\n');
