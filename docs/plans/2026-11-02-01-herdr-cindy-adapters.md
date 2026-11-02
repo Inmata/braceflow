@@ -146,7 +146,9 @@ Claude Code 原生 `<task-notification>` 不在本轮改动范围（已有内置
 | W3b | R3 后返修（替代 W3） | Claude Code | `group/worker` | high | `herdr:claude` |
 | R3b | W3b 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
 | W4 | R1/R2/R3b 均 PASS 后 | Claude Code | `group/worker[1m]` | high | `herdr:claude` |
+| R4 | W4 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
 | W5 | W4 verify 失败后返修 | Claude Code | `group/worker[1m]` | high | `herdr:claude` |
+| R5 | W5 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
 
 W3b 范围同 W3：默认位置按规范化后的默认 `~/.codex` 配置路径识别，不再“第一个安装的位置即权威”；补“先装附加目录、后装默认目录”的测试；同步 `docs/usage.md`、`.spec/install-onboard/spec.md` 的权威记录描述。W3b 首轮交付后范围补入 `src/onboard.mjs`、`test/onboard.test.mjs`：onboard 安装检查须同时认默认记录与附加位置，只有附加位置时不得报“没有任何宿主安装”。
 
@@ -206,4 +208,4 @@ Herdr 子 Agent 结束不会唤醒主会话，主会话必须**阻塞等待**，
 - 2026-11-02（实施中）：R3（`group/reviewer`）判 W3 PASS；Lead 核对 `src/install.mjs:240` 确认空状态下首个安装位置被登记为权威（旧 R3 第 1 条），R3 漏判。用户选择开返修包 W3b（替代 W3）与复审 R3b，Agent/model 同原角色。
 - 2026-11-02（实施中）：R1（`group/reviewer`）判 W1 PASS。W2 的 `[1m]` 准备更新此前因引用尚未登记的 W3b/R3b 被拒，改为先只更新 W2，W3b/R3b 待 W3b 终态后补登；W2 随后登记派发。W3b 首轮交付 install 26/26 通过，但 Lead 复跑 `test/onboard.test.mjs` 9 条失败：onboard 只读默认记录，测试与只有附加位置的用户都会被误报未安装。W3b 范围补入 onboard，由同一 Worker 续作。
 - 2026-11-02：补充公开 GitHub 对照并收紧早期推断：Cindy 账号目录注册未知、Session task 不保证与 Lead 同 Agent、Cindy Codex code mode 的嵌套 MCP hook 可观测性仍待验证。实现须保守处理无法核实身份的入口。
-- 2026-11-02（集成完成）：W3b 补入 onboard 后交付 `640b155`，R3b 判 PASS（install 26/26、onboard 20/20、adapters+hooks 64/64）；W2 交付 `fc044cb`，R2 判 PASS；W4 同步 spec、验收文档与计划索引并提交 `5642aa6`；W5 修复发布文档链接、`examples/demo.mjs` 卸载 `--user-dir` 与 `.spec/learning-knowledge/spec.md` 边界说明并提交 `736c311`，全量 `npm run verify` 通过（tests 453 / pass 450 / fail 0 / skipped 3），`spec check` 0 finding。真实软件实测项 M1–M4 交用户人工待验。
+- 2026-11-02（集成完成）：W3b 补入 onboard 后交付 `640b155`，R3b 判 PASS（install 26/26、onboard 20/20、adapters+hooks 64/64）；W2 交付 `fc044cb`，R2 判 PASS；W4 同步 spec、验收文档与计划索引并提交 `5642aa6`，R4 判 PASS @ `5642aa6`；W5 修复发布文档链接、`examples/demo.mjs` 卸载 `--user-dir` 与 `.spec/learning-knowledge/spec.md` 边界说明并提交 `736c311`，R5 判 PASS @ `736c311`，全量 `npm run verify` 通过（tests 453 / pass 450 / fail 0 / skipped 3），`spec check` 0 finding。真实软件实测项 M1–M4 交用户人工待验。
