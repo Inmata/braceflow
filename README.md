@@ -64,7 +64,7 @@ node bin/workflow.mjs doctor --agent codex
 
 **已有安装如何升级：** 先结束活动任务，再在源码仓库执行 `git pull --ff-only`，随后对每个已安装的宿主重新运行上面的 `install` 和 `doctor`。两宿主共用 `current`，同时使用时要一起升级，避免入口已切到新版而另一个宿主仍登记旧版。项目绑定保留，无需重新执行 `project onboard`。当前会话会提示指引版本变化，升级后应打开新会话读取新版入口。
 
-GitHub 最新正式发布为 [v0.8.1](https://github.com/Inmata/workflow/releases/tag/v0.8.1)。`install` 复制的是当前工作树，main 可能包含该标签之后的改动；比较实际安装时，除版本号还要核对发布摘要。
+GitHub 最新正式发布为 [v0.8.1](https://github.com/Inmata/workflow/releases/tag/v0.8.1)。当前源码 main 是 **0.9.0-dev.0 预发行**：Herdr/Cindy 真机验收 M1–M4 尚未完成，不要把它当作稳定版。`install` 复制的是当前工作树，main 可能包含该标签之后的改动；比较实际安装时，除版本号还要核对发布摘要。
 
 ### 第 2 步：让项目接入
 
@@ -269,7 +269,13 @@ npm run verify
 
 ## 当前状态与限制
 
-当前版本 0.8.1，包含协作规则、CLI、两种宿主的 hooks 适配、持久材料、分级知识、配置与可选后台复盘，以及分流、工作包账本、完成门禁、角色声明和 spec 漂移检查；真实宿主验收记录见 [0.3.0 验收](docs/acceptance.md#6-030-真实宿主验收)。安装器用内容摘要区分副本。仓库源码另提供 `npm run verify` 组合验证入口，`scripts/` 不随安装副本发布。
+当前源码版本 0.9.0-dev.0（预发行）。这是开发批次，**不是稳定版**：Herdr/Cindy 的真机验收 M1–M4 仍未完成，安装前请按 [验收说明第 13.3 节](docs/acceptance.md#133-人工验收待用户执行)核对。稳定版仍为 v0.8.1。功能包含协作规则、CLI、两种宿主的 hooks 适配、持久材料、分级知识、配置与可选后台复盘，以及分流、工作包账本、完成门禁、角色声明和 spec 漂移检查；真实宿主验收记录见 [0.3.0 验收](docs/acceptance.md#6-030-真实宿主验收)。安装器用内容摘要区分副本。仓库源码另提供 `npm run verify` 组合验证入口，`scripts/` 不随安装副本发布。
+
+0.9.0-dev.0 的变化：
+
+- Herdr TUI/GUI 与 Cindy 适配：委派命令按工作包核对，`hc` 子会话汇报不被当作用户回合，Cindy Orca 派工受控、Session task 受控派工被拒；安装器支持 Codex 附加配置目录。真机验收 M1–M4 待完成。
+- 计划阶段与审查防呆：未开工和 `plan` 模式放行合规 `docs/plans/*.md` 与系统临时目录；`task-update` 支持计划路径免重审、增量准备合并与同基础 Agent 调参；复杂 `delegated` 任务禁止临时豁免独立审查，只认准备阶段预声明的 `reviewWaiver`。
+- 文档与压缩恢复：补齐 Reviewer 四条审查准则和 Herdr 实操防呆，压缩后重新注入 Lead 核心纪律。
 
 0.8.1 的变化：
 

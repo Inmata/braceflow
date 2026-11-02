@@ -267,7 +267,13 @@ npm run verify
 
 ## Current status and limits
 
-Current version 0.8.1. It includes the collaboration rules, CLI, hook adapters for two hosts, persistent notes, graded knowledge, configuration and optional background review, as well as routing, the work package ledger, completion gates, role claims and spec drift checks. Real-host acceptance records are in [0.3.0 acceptance](docs/acceptance.md#6-030-真实宿主验收). The installer tells copies apart by content digest. The source repository also provides an `npm run verify` combined check entry; `scripts/` is not shipped in installed release copies.
+Current source version is 0.9.0-dev.0 (pre-release). This is a development build, **not a stable release**: real-host acceptance M1–M4 for Herdr/Cindy is still pending (see [acceptance section 13.3](docs/acceptance.md#133-人工验收待用户执行)). The latest stable release remains v0.8.1. It includes the collaboration rules, CLI, hook adapters for two hosts, persistent notes, graded knowledge, configuration and optional background review, as well as routing, the work package ledger, completion gates, role claims and spec drift checks. Real-host acceptance records are in [0.3.0 acceptance](docs/acceptance.md#6-030-真实宿主验收). The installer tells copies apart by content digest. The source repository also provides an `npm run verify` combined check entry; `scripts/` is not shipped in installed release copies.
+
+Changes in 0.9.0-dev.0:
+
+- Herdr TUI/GUI and Cindy adapters: delegation commands are checked against the work package, `hc` child-session replies are not treated as user turns, Cindy Orca dispatches are checked while controlled Session task dispatches are rejected, and the installer supports additional Codex config directories. Real-host acceptance M1–M4 is still pending.
+- Planning and review guardrails: compliant `docs/plans/*.md` and system temp targets are allowed before work starts and in `plan` mode; `task-update` accepts plan-only path changes, incremental preparation merges and same-base-agent model/effort adjustments; complex `delegated` tasks cannot waive independent review at `task-end` and only honour a `reviewWaiver` declared during preparation.
+- Docs and compact recovery: the four Reviewer criteria and Herdr operational safeguards are complete, and the core Lead disciplines are re-injected after compaction.
 
 Changes in 0.8.1:
 
