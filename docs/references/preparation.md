@@ -43,6 +43,7 @@
 - 完成后的可验证行为，不只写改了哪些文件；
 - 依赖的包，以及可以并行和必须串行的关系；
 - 用户选定的 Agent 和实际调用通道 `channel`；
+- 实施包可选的 `reviewWaiver: { reason, consent }`：只在准备阶段经用户同意时声明，仅限 `worker` 包，两字段都须为非空字符串；同一包不得同时声明 `diagnostic`，也不能已有审查历史。复杂 `delegated` 任务收尾只认这份预声明，收尾临时 waiver 和未预声明包的 `waived` 都不生效；
 - 指定验证入口（可写在包上，也可放在统一的 `verification` 列表）；无法自动验证的人工步骤单独列出。
 
 每条需求还要有稳定 `id`、负责实施包 `packages[]` 和检查入口 `verification`。负责包只能引用已登记且角色为 `worker` 的包；审查包不交付需求。需求没有负责包或检查入口时，准备回执按需求 ID 返回 `requirement:<id>:packages`、`requirement:<id>:verification`，不能借“所有包都 PASS”代替整项需求已覆盖。收集最终证据属于收尾的交付声明，不在准备阶段伪造。
@@ -93,6 +94,8 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 
 `channel` 填实际调用通道，格式沿用现有协议：`builtin:<宿主内置类型>`（如 `builtin:agent`）、`codeg:<agent_type>`（如 `codeg:claude_code`）或 `lead`（Lead 自己实施）。示例中的值只表示本次工具选择，不是固定默认；不使用 Codeg 时按当前入口填写，不要求安装 Codeg。用户只指定 Agent 而工具通道唯一时由 Lead 按可用工具填写。
 
+需要免列独立审查的实施包，可在准备阶段经用户同意后补 `reviewWaiver`，例如 `"reviewWaiver": { "reason": "只改文档链接，已有逐链接核对", "consent": "用户 2026-11-02 明确同意免独立审查" }`。审查包不能携带，同一包也不能同时声明 `diagnostic` 或已有审查历史。
+
 回执会保存规范化的准备记录，并返回：
 
 - `ready`：当前结构是否齐全；
@@ -106,6 +109,15 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 准备不齐时仍可保存，也仍可继续讨论、调研和写计划；回执里的缺项不是“已经可以开工”。准备记录不等于用户批准，也不等于已经派工：`prepare` 不创建业务任务、工作包或执行账本。
 
 简单任务只需声明 `size: "simple"` 和 `sizeReason`，不要求需求、调研、分包和确认范围；但 `pending` 非空时仍按阻塞缺项处理，不能一边声明任务简单、一边保留未确认的关键问题。`prepare` 不是复杂任务的必经仪式；只有需要讨论、调研或独立审查的任务才保存完整准备。
+
+## 增量更新与调参
+
+`task-update` 可以在同一任务内改目标或权限，不必结束重开；对已保存的准备记录还有以下增量规则：
+
+- 新增或变更 `docs/plans/*.md` 下的合规计划路径不计入业务范围扩张，不强制重传准备记录；只有新增业务路径或把模式升为 `write` 才按扩张处理。
+- 仅由 `plan -> write` 触发、目标未变且没有新增业务路径时，可沿用 `plan` 阶段已绑定的同一份完整准备快照，不因“没有实际变化”被拒。
+- `preparation` 支持基于 `task.preparation` 或 `session.preparation` 的增量合并：入参未提供的顶层字段、同 `packageId` 或同需求 `id` 未重传的子字段先按旧记录补齐，再核对缺项与一致性；接受后同步刷新 `session.preparation`，未出现的旧包/旧需求仍按 `preserved` 保留。
+- 已 `dispatched` 且尚未产生交付（无 `deliveredRef`、`deliverySeq` 不大于 0）的包，只有除 `agent` 外 `role`、`channel`、`scope`、`delivers`、`dependsOn`、`reviewWaiver` 全部未变，且 `sameBaseAgent(prev.agent, next.agent)` 为真时，才允许只改模型/effort 说明并刷新 `task.packages[packageId].agent`；换基础 Agent、换通道或范围、已经产生交付仍须重新确认准备。`sameBaseAgent` 剥离 `(...)`/`（...）` 说明与 `--model`/`-m`/`--effort` 备注后按词比较，`codeg:`、`builtin:` 和命令型委派共用同一核对。
 
 ## 整项需求验收与阶段交付
 
@@ -131,6 +143,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 - 人工待验、受阻和经用户同意延期可以如实阶段结束；回执返回各状态数量和剩余项，`allVerified` 为 `false`，不能宣称全部验收通过。适用矩阵时 `validation` 与 `acceptance*` 缺项不能用 waiver 抵扣。
 - 验收证据绑定 `validation.ref`，该值必须等于最终交付版本。最终版本改变后旧证据不沿用，要重新提交 `validation`；需求内容或负责包变化时，对应 ID 的旧验收声明失效，未变化条目和原顺序保留；审查版本仍按现有 `deliveredRef`/`reviewedRef` 门禁核对。
 - 准备更新按需求 ID 合并后，仍按最终快照核对负责 worker 包与包依赖；保留需求指向已移除包时拒绝并点名，同批迁到现存包才接受。
+- 复杂 `delegated`（`task.preparation.size === 'complex'`）的 `review` / `review:<id>` 不能用 `task-end` 临时 `waivers` 抵扣；未在准备快照预声明 `reviewWaiver` 的实施包标 `waived` 返回 `PACKAGE`。只有准备阶段经用户同意、两字段非空、未与 `diagnostic` 同包且未被送审推翻的预声明才免列对应 `review:<id>`，结果在 `gateReport.reviewWaived` 和 `task show` 单独列出；无 `preparation` 的历史任务保持原兼容。
 - 回执和 `task show` 只汇总声明记录；`verified` 的证据内容、用户实际操作和延期同意仍由 Lead 与 Reviewer 核对。简单任务、`operation-only`、`read-only` 和没有 route 的历史任务不要求这套矩阵。
 
 ## 按已有计划接续
@@ -144,5 +157,6 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 - 只对确实缺失、冲突或已经变化的决定补问；原计划没写过的选择不能猜。
 - 新入口需要填写不同的 Agent 或通道时，先说明差异和影响，再由用户决定。
 - 原计划只写了 Agent、没有写通道时，Lead 按新入口实际可用的工具填写 `channel`，不要求用户重新选择；只有 Agent 本身或实际入口发生变化时才补问。
+- 压缩恢复（`SessionStart(source=compact)`）保留既有任务、预算和准备记录，并重新注入 Lead 核心纪律；恢复后按原记录继续，不重建需求、方案或逐包选择。
 
 当前实现边界：`prepare` 负责保存准备记录、来源摘要和缺项，不创建任务。记录齐全后，delegated 任务用 `task-start` 开工并把 `size`、源计划摘要、需求/负责包/检查入口和逐包 `role`/`agent`/`channel`/`scope` 固定到任务；准备未齐、未声明简单或没有准备的新任务会在协议层和宿主 `PreToolUse` 被拒。源计划与关联计划都只接受 `docs/plans/` 下的 Markdown；路径链上的 symlink/junction 一律拒绝，解析后的真实路径也必须仍在真实 `docs/plans/` 内，业务文件不能借链接别名成为计划。`scope` 是负责范围声明，不是路径或语义沙箱；程序不解析 prompt 正文，也不证明用户授权真实存在。不能把“已保存草案”说成“准备完成”或“已获授权实施”。

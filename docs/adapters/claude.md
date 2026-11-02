@@ -19,9 +19,9 @@ Claude Code 事件没有 `turn_id`，用宿主 `prompt_id` 关联一次用户输
 
 | 事件 | 本插件行为 |
 | --- | --- |
-| SessionStart | 注入 Lead 入口上下文；`source=compact` 时保留既有任务与预算 |
+| SessionStart | 注入 Lead 入口上下文；`source=compact` 时保留既有任务与预算，并重新注入“先确认再开工、不替跑已过单测、不擅自豁免独立审查”三条核心纪律 |
 | UserPromptSubmit | 开新回合（新票据），注入 Lead 入口上下文 |
-| PreToolUse | 读取父会话的准备/任务状态：未开工时拦业务写入、实施委派和本插件 `task-start`/`packages` 命令；只读、指定准备计划、`prepare` 放行；活动任务按声明的 read-only/plan 权限再核对；worker 实施与 reviewer 审查委派都须带 `workflow-package:<包ID>` 关联到 dispatched 包，并按 Agent/Task schema 核对 `subagent_type`、通道、任务和可解析角色；仅不带包标记的 `Explore`/`Plan` 免包关联，带标记时也必须按包核对，diagnostic 包也只能派给它们；角色会话按 `roleTaskId`+`packageId` 核对 |
+| PreToolUse | 读取父会话的准备/任务状态：未开工时拦业务写入、实施委派和本插件 `task-start`/`packages` 命令；只读、`docs/plans/` 下全部合规 Markdown、系统临时目录内无链接逃逸的路径、`prepare` 放行；活动任务按声明的 read-only/plan 权限再核对；worker 实施与 reviewer 审查委派都须带 `workflow-package:<包ID>` 关联到 dispatched 包，并按 Agent/Task schema 核对 `subagent_type`、通道、任务和可解析角色；仅不带包标记的 `Explore`/`Plan` 免包关联，带标记时也必须按包核对，diagnostic 包也只能派给它们；角色会话按 `roleTaskId`+`packageId` 核对 |
 | PostToolUse | 只在命令是直接调用本插件 `signal` 时读取 stdout 中的信号并返回回执 |
 | Stop | 回合结束核对：有在途包时挡一次要求继续等待或说明暂停；无在途包而任务未 task-end 时挡一次列出缺项；不要求经验处置或追加复盘轮次 |
 | StopFailure | 按中断保存：撤销票据、保留任务待办，不自动续跑 |
@@ -80,7 +80,7 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 | 实施委派 | `Agent(general-purpose)` 被拒绝，原文前缀为 `PreToolUse:Agent hook error: 实施委派被拦下…`；未启动子代理 |
 | 只读子代理 | `Agent(Explore)` 放行并实际执行 `Grep` |
 
-本节是旧宽配置下的原始记录，不是当前候选：当时准备资料可写整个 `docs/plans/`，当前代码与后续验证只放行 `docs/plans/plan.md`、已绑定源计划和已登记关联计划；命令入口的兜底也由下节的宿主权限配置承担。
+本节是旧宽配置下的原始记录，不是当前候选：当时准备资料可写整个 `docs/plans/`，当前候选放行 `docs/plans/` 下全部合规 Markdown、已绑定源计划和已登记关联计划；命令入口的兜底也由下节的宿主权限配置承担。
 
 未覆盖：`Bash`/PowerShell 里任意写文件不做命令解析，只拦本插件直接 `signal`；宿主自己的权限/审批仍是这类命令的写入边界。子代理 PreToolUse 按父会话任务/准备状态检查，不单独证明其工作包范围所有权。`--permission-mode plan` 下宿主会在 hook 前阻止写入，没有单独的 hook 事件可作证据。
 
@@ -95,13 +95,13 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 ```json
 {
   "permissions": {
-    "allow": ["Edit(docs/plans/plan.md)"],
+    "allow": ["Edit(docs/plans/*.md)"],
     "ask": ["Bash", "PowerShell", "Monitor", "Agent", "Task", "SendMessage", "Workflow", "NotebookEdit", "Skill", "mcp__*"]
   }
 }
 ```
 
-启动：`claude -p --permission-mode dontAsk ...`。`allow` 只保留一个精确计划文件；`dontAsk` 会自动放行工作目录内的 `Read`/`Glob`/`Grep`，所以不整类放行读取。`ask` 在 `dontAsk` 下立即拒绝，但保留工具在上下文中，便于验证“实际调用被拒”而不是工具被移除。
+启动：`claude -p --permission-mode dontAsk ...`。`allow` 放行 `docs/plans/` 下全部合规 Markdown；`dontAsk` 会自动放行工作目录内的 `Read`/`Glob`/`Grep`，所以不整类放行读取。`ask` 在 `dontAsk` 下立即拒绝，但保留工具在上下文中，便于验证“实际调用被拒”而不是工具被移除。
 
 实测结果（全部为实际工具调用，被拒后继续下一项）：
 
@@ -114,7 +114,7 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 | `Bash: cat src/business.txt` | 拒绝，工具名 `Bash`；只读命令也未被自动放行 |
 | 独立 `PowerShell` 写业务 | 拒绝，工具名 `PowerShell` |
 | `Monitor` 启动 Node 写业务 | 拒绝，工具名 `Monitor` |
-| `Write docs/plans/other.md` | 拒绝；文件不存在 |
+| `Write docs/plans/other.md` | 旧单文件规则下拒绝；当前候选 `Edit(docs/plans/*.md)` 应放行，本轮未重测 |
 | `Agent(general-purpose)` / `Agent(Explore)` | 均拒绝，工具名 `Agent`；未启动子代理 |
 | `SendMessage` / `Workflow` | 均拒绝，工具名分别为 `SendMessage`、`Workflow` |
 | `Skill(workflow-authoring)` | 未列 `Skill` 时放行；加入 `ask` 后实际调用被拒 |
@@ -125,7 +125,8 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 注意事项与限制：
 
 - **`dontAsk` 不是“不在 allow 就全拒”**：工作目录内读取和内置只读 Bash 会自动放行；必须显式 `ask`/`deny` 才能拒绝整个命令类。
-- 官方权限文档明确 `Write(path)`、`NotebookEdit(path)`、`Glob(path)` 路径规则从不匹配；文件权限只按 `Edit(path)`/`Read(path)` 检查，`Edit(path)` 同时覆盖 Write 和 NotebookEdit。10.5 中的 `Write(...)` 路径规则是无效规则，本节已改用 `Edit(docs/plans/plan.md)`。
+- 未开工与 `plan` 模式下，hook 还放行当前 worktree 与 stateDir 之外、真实位于 `os.tmpdir()` 且路径链无 symlink/junction 逃逸的写入；只针对 `Write`/`Edit`/`MultiEdit`/`NotebookEdit` 的路径参数，不解析 shell 重定向。这是 hook 的写入边界；宿主 `dontAsk` 的 `allow` 仍需按启动方配置单独放行对应路径，两者分别生效。
+- 官方权限文档明确 `Write(path)`、`NotebookEdit(path)`、`Glob(path)` 路径规则从不匹配；文件权限只按 `Edit(path)`/`Read(path)` 检查，`Edit(path)` 同时覆盖 Write 和 NotebookEdit。10.5 中的 `Write(...)` 路径规则是无效规则，本节已改用 `Edit(path)` 规则，当前候选为 `Edit(docs/plans/*.md)`。
 - 独立 `PowerShell`、`Monitor`、`SendMessage`、`Workflow`、`Skill` 是实际工具入口，旧的单点 `Agent(general-purpose)`/`Task(general-purpose)` 覆盖不了；本节按整类 `ask` 处理并取得实际拒绝事件。
 - 未测：文件符号链接的真实目标解析、真实 MCP 工具与 Codeg MCP 委派（隔离会话未加载 MCP server）、`NotebookEdit` 实际调用、未显式 ask 的其他需审批工具、无审批的状态/调度工具。`ToolSearch` 可放行并加载被 ask 的工具，但加载后调用仍被拒绝。
 - 不是 OS 沙箱：Claude 原生 OS 沙箱不支持 Windows（官方仅 macOS/Linux/WSL2）；本保证只覆盖所列 Claude Code 权限规则和工具入口，不是任意代码或已启动进程的隔离。
