@@ -8,7 +8,7 @@
 
 | 用户关心的问题 | 本计划的明确范围 |
 | --- | --- |
-| 在哪里实施？ | 在 `D:/git-repo/workflow` 仓库中实施，可继续使用现有的 Agent 运行环境。无需专门切换到 Herdr、在 Herdr 里开 Agent 才能实施本计划 |
+| 在哪里实施？ | 在 `<repoRoot>` 仓库中实施，可继续使用现有的 Agent 运行环境。无需专门切换到 Herdr、在 Herdr 里开 Agent 才能实施本计划 |
 | 做完得到什么？ | 补齐开工前流程、执行前检查和交付闭环；公共规则及计划资料独立于 Codeg；保留并验证现有 Codeg 接入能力 |
 | Herdr 做到哪一步？ | 说明未来怎样接入，分清共用规则与软件专用处理。本轮 W1–W3 不包含 Herdr 的安装、配置、专用接入开发或真实使用验收；完成本计划不等于已支持 Herdr |
 | 当前做到哪里？ | W1 已提交 `c49ed52` 且 R1 PASS；W2 已提交 `1c48799` 且 R2 PASS（child273）。W3 已实现：准备记录和任务快照保存需求 ID/负责包/检查入口，`task-end` 的 `validation.acceptance` 按需求核对最终证据和 `verified`/`manual-pending`/`blocked`/`deferred` 状态；所有包 PASS 但漏需求会列 `acceptance:<id>`；人工待验给负责人/步骤，延期要用户同意依据；版本变化旧证据不沿用；进度更新按 ID 合并保留需求和 Agent。Reviewer/validation/reports/delegation/preparation 文档和 A01–A21 分类已同步。W3 的 R3 五项首审问题及两处文档问题已修，最终独立复审 child279 PASS；W3 已提交 `855901f`，spec 检查与必要集成验证已完成，远端同步以 Git 状态为准；真实 MCP、NotebookEdit、文件符号链接、Codex/Codeg ACP 仍未验 |

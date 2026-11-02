@@ -538,7 +538,7 @@ Worker 与 Reviewer（drift-sim）：Codex Worker 包 w-mul 增加 `mul` 和测�
 
 **状态核对：** 会话结束后（`SessionEnd` 把任务标为 suspended）状态中只有 `task-1`，`route:"delegated"`、`goal:"隔离实施"`、`preparation.size:"complex"`、`preparation.source.path:"docs/plans/plan.md"`、源摘要 `2581f669…4614a23`，权限为 `write`/`["README.md"]`。未准备步骤没有建立任务，证明拒绝发生在协议之前。
 
-**首轮偏差（如实保留）：** 第一次尝试让模型调用插件仓库的 `D:/git-repo/workflow/bin/workflow.mjs`，而非入口注册的 `state/current/bin/workflow.mjs`；PreToolUse 未把它识别为本插件直接 signal，PostToolUse 回执为“signal 须单独直接调用…不是本插件入口”，状态没有任何写入。改用入口注册的安装副本后，上述四步全部取得预期结果。该偏差说明入口路径必须与当前 hook 注册副本一致，不能把源码路径当作发布入口。
+**首轮偏差（如实保留）：** 第一次尝试让模型调用插件仓库的 `<repoRoot>/bin/workflow.mjs`，而非入口注册的 `state/current/bin/workflow.mjs`；PreToolUse 未把它识别为本插件直接 signal，PostToolUse 回执为“signal 须单独直接调用…不是本插件入口”，状态没有任何写入。改用入口注册的安装副本后，上述四步全部取得预期结果。该偏差说明入口路径必须与当前 hook 注册副本一致，不能把源码路径当作发布入口。
 
 **未测与边界：** 未调用真实 MCP 工具或 Codeg ACP；未实际调用 `NotebookEdit`；文件符号链接仍因 Windows 权限无法创建；未验证 OS 绝对隔离、长会话或任意已启动进程。Bash 的只读内置命令仍会由 `dontAsk` 自动放行，普通非 signal Bash 的审批拒绝没有在本次会话中逐项重放。以上均不能写成已通过。
 
@@ -576,7 +576,7 @@ Worker 与 Reviewer（drift-sim）：Codex Worker 包 w-mul 增加 `mul` 和测�
 
 ## 12. Lead 最终集成记录（2026-11-01）
 
-W1/R1、W2/R2、W3/R3 均完成独立审查并 PASS；W3 提交为 `855901f`。R3 最终结论来自 Codex child279，任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`。提交后 `node bin/workflow.mjs spec check --project D:/git-repo/workflow` 返回 `{"ok":true,"ref":"HEAD","findings":[]}`，确认本次源码与对应 spec 同提交后历史漂移清除。
+W1/R1、W2/R2、W3/R3 均完成独立审查并 PASS；W3 提交为 `855901f`。R3 最终结论来自 Codex child279，任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`。提交后 `node bin/workflow.mjs spec check --project <repoRoot>` 返回 `{"ok":true,"ref":"HEAD","findings":[]}`，确认本次源码与对应 spec 同提交后历史漂移清除。
 
 首次完整 `npm run verify` 的对象为 `855901f`：
 
