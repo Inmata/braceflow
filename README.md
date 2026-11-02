@@ -49,7 +49,7 @@ node bin/workflow.mjs doctor --agent codex
 
 只用 Claude Code 时，只需安装 Claude 适配。使用 Codeg 时仍按实际被管理的 Agent 安装对应宿主；Codeg 本身不替代宿主 hooks。Claude Code 在 Codeg 中以 auto 模式担任 Lead 时，分类器可能拦截委派，需要用户放行相关工具或改用逐次确认模式，见 [Codeg 接续](docs/adapters/codeg.md#接续)。
 
-`install` 会做四件事：把当前源码复制成一份带摘要的发布副本（`releases/<version>-<digest>`）、把固定入口 `current` 指向它、在宿主配置里注册本插件的事件（Codex 写 `hooks.json`，Claude 写 `settings.json`）、记录安装事务。hook 命令只包含 `current` 路径，所以升级后路径不变，宿主信任只需做一次；旧副本保留作回滚。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指链接，不重写配置、不新建副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场并报告 `conflict` 与路径。两个宿主共用一个 `current`，重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级两个宿主。它**不会**写宿主信任、不会改项目、不会提交 Git。
+`install` 会做四件事：把当前源码复制成一份带摘要的发布副本（`releases/<version>-<digest>`）、把固定入口 `current` 指向它、在宿主配置里注册本插件的事件（Codex 写 `hooks.json`，Claude 写 `settings.json`）、记录安装事务。hook 命令只包含 `current` 路径，单纯切换发布副本通常不需要重新信任；新增事件、定义或分组变化时仍需按宿主提示重新审核。旧副本保留作回滚。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指链接，不重写配置、不新建副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场并报告 `conflict` 与路径。两个宿主共用一个 `current`，重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级两个宿主。它**不会**写宿主信任、不会改项目、不会提交 Git。
 
 `doctor` 看的是四项不同的事，不要混为一谈：
 
@@ -61,6 +61,10 @@ node bin/workflow.mjs doctor --agent codex
 | `integrity` | 发布副本是否与安装记录逐文件一致 |
 
 安装或升级后，在所用宿主的 `/hooks` 中核对 workflow 条目。Codex / Codeg 若显示 `modified`，按宿主提示重新确认信任；Claude Code 核对已加载的 hooks，并处理宿主实际出现的确认提示。然后打开新会话观察回调。插件不替你写信任记录。
+
+**已有安装如何升级：** 先结束活动任务，再在源码仓库执行 `git pull --ff-only`，随后对每个已安装的宿主重新运行上面的 `install` 和 `doctor`。两宿主共用 `current`，同时使用时要一起升级，避免入口已切到新版而另一个宿主仍登记旧版。项目绑定保留，无需重新执行 `project onboard`。当前会话会提示指引版本变化，升级后应打开新会话读取新版入口。
+
+GitHub 最新正式发布为 [v0.8.1](https://github.com/Inmata/workflow/releases/tag/v0.8.1)。`install` 复制的是当前工作树，main 可能包含该标签之后的改动；比较实际安装时，除版本号还要核对发布摘要。
 
 ### 第 2 步：让项目接入
 
