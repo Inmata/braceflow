@@ -549,3 +549,103 @@ test('V14 双宿主跨版本重复安装不改指另一个宿主的有效入口'
   assert.equal((await fs.stat(claudeConfig)).mtimeMs, mtime);
   assert.equal((await readState(directory)).installs.claude.status, 'installed');
 });
+test('V14 Codex 附加配置目录分别安装、逐位置 doctor、撤销只撤自身条目', async () => {
+  const area = await temporary('install-extra-');
+  const directory = path.join(area, 'state');
+  const primaryDir = path.join(area, '.codex');
+  const extraDir = path.join(area, 'Cindy', 'codex-home');
+  const primaryFile = path.join(primaryDir, 'hooks.json');
+  const extraFile = path.join(extraDir, 'hooks.json');
+  await mkdir(extraDir, { recursive: true });
+  const other = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'cindy-other-plugin' }] }] }, userAdded: { keep: true } };
+  await writeFile(extraFile, JSON.stringify(other));
+
+  assert.equal((await install(directory, { userDir: primaryDir })).status, 'installed');
+  const primaryText = await readFile(primaryFile, 'utf8');
+  assert.equal((await install(directory, { userDir: extraDir })).status, 'installed');
+
+  // 两条记录同时存在：旧单条记录仍是权威记录，附加位置不能覆盖它。
+  const state = await readState(directory);
+  assert.equal(state.install.configFile, primaryFile);
+  assert.equal(state.installs.codex.configFile, primaryFile);
+  assert.equal(state.installs.codex.status, 'installed');
+  const extraKeys = Object.keys(state.installs.codex.extra || {});
+  assert.equal(extraKeys.length, 1);
+  assert.equal(state.installs.codex.extra[extraKeys[0]].configFile, extraFile);
+  assert.equal(state.installs.codex.extra[extraKeys[0]].status, 'installed');
+  assert.equal(await readFile(primaryFile, 'utf8'), primaryText);
+  assert.deepEqual(JSON.parse(await readFile(extraFile, 'utf8')).userAdded, other.userAdded);
+
+  // 指定附加目录时只报告该位置。
+  const extraDoctor = await doctor(directory, undefined, { userDir: extraDir });
+  assert.equal(extraDoctor.location, 'extra');
+  assert.equal(extraDoctor.configFile, extraFile);
+  assert.equal(extraDoctor.registration, 'registered');
+  assert.equal(extraDoctor.integrity, 'verified');
+  assert.equal(extraDoctor.locations, undefined);
+
+  // 无参数 doctor 顶层报告默认位置，并列出所有已登记位置。
+  const all = await doctor(directory);
+  assert.equal(all.configFile, undefined);
+  assert.equal(all.registration, 'registered');
+  assert.equal(all.locations.length, 2);
+  const byLocation = Object.fromEntries(all.locations.map(item => [item.location, item]));
+  assert.equal(byLocation.primary.configFile, primaryFile);
+  assert.equal(byLocation.primary.registration, 'registered');
+  assert.equal(byLocation.extra.configFile, extraFile);
+  assert.equal(byLocation.extra.registration, 'registered');
+  assert.equal(byLocation.extra.integrity, 'verified');
+
+  // 撤销附加位置只移除该位置的 workflow 条目，保留其他插件、用户配置和默认位置。
+  assert.equal((await uninstall(directory, { userDir: extraDir })).status, 'uninstalled');
+  const restored = JSON.parse(await readFile(extraFile, 'utf8'));
+  assert.deepEqual(restored.hooks.Stop.map(group => group.hooks[0].command), ['cindy-other-plugin']);
+  assert.deepEqual(restored.userAdded, other.userAdded);
+  assert.equal(await readFile(primaryFile, 'utf8'), primaryText);
+  assert.equal((await doctor(directory)).registration, 'registered');
+  assert.equal((await doctor(directory, undefined, { userDir: extraDir })).registration, 'not-installed');
+  const after = await readState(directory);
+  assert.equal(after.install.configFile, primaryFile);
+  assert.equal(after.installs.codex.extra[extraKeys[0]].status, 'uninstalled');
+  // 附加位置可以重新安装。
+  assert.equal((await install(directory, { userDir: extraDir })).status, 'installed');
+  assert.equal((await doctor(directory, undefined, { userDir: extraDir })).registration, 'registered');
+});
+test('V14 只有旧单条安装记录的状态文件照常 doctor/uninstall', async () => {
+  const area = await temporary('install-legacy-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.codex');
+  const configFile = path.join(userDir, 'hooks.json');
+  assert.equal((await install(directory, { userDir })).status, 'installed');
+  await mutate(directory, async state => { delete state.installs; });
+  assert.equal((await readState(directory)).installs, undefined);
+  const info = await doctor(directory);
+  assert.equal(info.registration, 'registered');
+  assert.equal(info.integrity, 'verified');
+  assert.equal(info.locations.length, 1);
+  assert.equal(info.locations[0].location, 'primary');
+  assert.equal(info.locations[0].configFile, configFile);
+  assert.equal((await uninstall(directory)).status, 'uninstalled');
+  assert.equal((await doctor(directory)).registration, 'not-installed');
+  assert.equal((await uninstall(directory)).status, 'not-installed');
+});
+test('V14 同一 Codex 配置目录不同分隔符或大小写不产生两条记录', async () => {
+  const area = await temporary('install-normalize-');
+  const directory = path.join(area, 'state');
+  const primaryDir = path.join(area, '.codex');
+  const extraDir = path.join(area, 'Cindy', 'codex-home');
+  await install(directory, { userDir: primaryDir });
+  await install(directory, { userDir: extraDir });
+  const slash = extraDir.replaceAll('\\', '/');
+  assert.equal((await install(directory, { userDir: slash })).status, 'already-installed');
+  if (process.platform === 'win32') {
+    assert.equal((await install(directory, { userDir: extraDir.toUpperCase() })).status, 'already-installed');
+  }
+  const state = await readState(directory);
+  assert.equal(Object.keys(state.installs.codex.extra).length, 1);
+  assert.equal((await uninstall(directory, { userDir: slash })).status, 'uninstalled');
+  const after = await readState(directory);
+  assert.equal(Object.keys(after.installs.codex.extra).length, 1);
+  assert.equal(after.installs.codex.extra[Object.keys(after.installs.codex.extra)[0]].status, 'uninstalled');
+  assert.equal(after.install.status, 'installed');
+});

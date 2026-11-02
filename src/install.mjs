@@ -120,14 +120,14 @@ export const HOSTS = {
   },
 };
 export const AGENTS = HOST_NAMES;
-// 两个宿主共用同一个 current。重复安装只允许修复自己的入口：若 current 指向另一个已安装宿主
-// 登记且完整的发布快照，改指会让那个宿主的完整性检查失败，必须由用户先统一升级。
-async function otherHostSnapshot(directory, state, agent, target) {
+// 两个宿主和同一宿主的多个配置目录共用同一个 current。重复安装只允许修复自己的入口：
+// 若 current 指向另一个已登记且完整的发布快照，改指会让对方的完整性检查失败，必须由用户先统一升级。
+async function otherHostSnapshot(directory, state, agent, target, exclude = null) {
   for (const name of AGENTS) {
-    if (name === agent) continue;
-    const record = installRecord(state, name);
-    if (record?.status !== 'installed' || !record.releaseRoot || !samePath(record.releaseRoot, target)) continue;
-    if (await releaseIntegrity(directory, record) === 'verified') return { agent: name, version: record.version, releaseRoot: record.releaseRoot };
+    for (const { record } of installLocations(state, name)) {
+      if (record === exclude || record?.status !== 'installed' || !record.releaseRoot || !samePath(record.releaseRoot, target)) continue;
+      if (await releaseIntegrity(directory, record) === 'verified') return { agent: name, version: record.version, releaseRoot: record.releaseRoot, configFile: record.configFile };
+    }
   }
   return null;
 }
@@ -137,11 +137,53 @@ const hostFor = agent => {
   return host;
 };
 // codex 保留 state.install 作为旧版兼容权威记录，installs.codex 只是同步镜像；claude 只写 installs.claude。
+// JSON 读回后两者是不同对象，这里先指回同一记录，附加位置挂在权威记录上才不会写丢。
 export function installRecord(state, agent) {
   state.installs ||= {};
-  if (state.install && !state.installs.codex) state.installs.codex = state.install;
-  return agent === 'codex' ? state.install || state.installs.codex || null : state.installs[agent] || null;
+  if (agent !== 'codex') return state.installs[agent] || null;
+  const record = state.install || state.installs.codex || null;
+  if (record) {
+    state.install = record;
+    state.installs.codex = record;
+  }
+  return record;
 }
+// 第一个位置是权威记录（兼容旧版单条 install/state.install）；附加位置按规范化配置文件路径登记在
+// primary.extra 下。Windows 的大小写和分隔符差异不能让同一目录变成两条记录。
+function locationKey(file) {
+  const resolved = path.resolve(file);
+  return (process.platform === 'win32' ? resolved.toLowerCase() : resolved).replaceAll(path.sep, '/');
+}
+const sameLocation = (left, right) => Boolean(left?.configFile && right?.configFile && locationKey(left.configFile) === locationKey(right.configFile));
+function extraRecords(state, agent, create = false) {
+  const primary = installRecord(state, agent);
+  if (!primary) return {};
+  if (primary.extra && typeof primary.extra === 'object' && !Array.isArray(primary.extra)) return primary.extra;
+  if (!create) return {};
+  primary.extra = {};
+  return primary.extra;
+}
+// 只读遍历：primary 在前，附加位置按登记顺序；手工状态里与 primary 指向同一文件的重复项跳过。
+function installLocations(state, agent) {
+  const primary = installRecord(state, agent);
+  const list = primary ? [{ record: primary, location: 'primary' }] : [];
+  for (const record of Object.values(extraRecords(state, agent))) {
+    if (!record || record === primary || sameLocation(record, primary)) continue;
+    list.push({ record, location: 'extra' });
+  }
+  return list;
+}
+function locateInstall(state, agent, configFile) {
+  const key = locationKey(configFile);
+  for (const item of installLocations(state, agent)) {
+    if (item.record.configFile && locationKey(item.record.configFile) === key) return { ...item, key };
+  }
+  return { record: null, location: null, key };
+}
+const samePrimary = (state, agent, record) => {
+  const primary = installRecord(state, agent);
+  return !primary || primary === record || sameLocation(primary, record);
+};
 async function readConfig(file) {
   const text = await readText(file);
   if (text === null) return { text, config: {} };
@@ -194,8 +236,15 @@ function addHandlers(config, handlers, slots = {}) {
 }
 const textHash = text => text === null ? null : digest(text);
 function registerInstall(state, agent, record) {
-  state.installs[agent] = record;
-  if (agent === 'codex') state.install = record;
+  const primary = installRecord(state, agent);
+  if (!primary || primary === record || sameLocation(primary, record)) {
+    // 替换权威记录对象时保留已登记的附加位置，避免升级后丢失其他目录。
+    if (primary && primary !== record && primary.extra && record.extra === undefined) record.extra = primary.extra;
+    state.installs[agent] = record;
+    if (agent === 'codex') state.install = record;
+    return;
+  }
+  extraRecords(state, agent, true)[locationKey(record.configFile)] = record;
 }
 // prepared 只保存自有定义和前后指纹，不保存含其他插件/凭据的整份用户配置。
 // 重试按原意图续做：配置必须仍为 before/after，current 必须仍为原目标/新目标。
@@ -238,15 +287,19 @@ async function finishPrepared(directory, state, save, record, agent) {
 export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, agent = 'codex' } = {}) {
   const host = hostFor(agent);
   userDir = path.resolve(userDir || host.defaultUserDir());
+  const configFile = path.join(userDir, host.configName);
   return mutate(directory, async (state, save) => {
-    const previous = installRecord(state, agent);
-    const configFile = path.join(userDir, host.configName);
-    if (previous?.status === 'prepared') {
-      if (previous.configFile !== configFile) fail('CONFIG', '已有另一用户目录的安装事务，先在原用户目录重试');
-      return finishPrepared(directory, state, save, previous, agent);
+    const located = locateInstall(state, agent, configFile);
+    const previous = located.record;
+    // 同一宿主任一位置有未完成事务时，只能在原位置重试；不能借另一个目录的事务覆盖它。
+    const pending = installLocations(state, agent).filter(item => item.record.status === 'prepared');
+    if (pending.length) {
+      const same = pending.find(item => sameLocation(item.record, { configFile }));
+      if (!same) fail('CONFIG', '已有另一用户目录的安装事务，先在原用户目录重试');
+      return finishPrepared(directory, state, save, same.record, agent);
     }
     if (previous && !['installed', 'uninstalled'].includes(previous.status)) fail('RECOVERY', '安装事务尚未确认，先核对注册差异；不覆盖追溯记录');
-    const pendingHosts = AGENTS.filter(name => name !== agent && installRecord(state, name)?.status === 'prepared');
+    const pendingHosts = AGENTS.filter(name => name !== agent && installLocations(state, name).some(item => item.record.status === 'prepared'));
     if (pendingHosts.length) fail('RECOVERY', `其他宿主安装事务尚未完成（${pendingHosts.join(',')}）；先重试该宿主安装，保留共享 current`);
     const current = await readConfig(configFile);
     const files = await inventory(sourceRoot);
@@ -254,7 +307,6 @@ export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, a
     const releaseHash = digest(JSON.stringify(files));
     const active = previous?.status === 'installed' ? previous : null;
     if (active && !await verifyRelease(active)) fail('INTEGRITY', '已安装副本被修改，先核对差异；不覆盖');
-    if (active && active.configFile !== configFile) fail('CONFIG', '已有另一用户目录安装，先明确撤销旧注册');
     const stripped = removeOwned(current.config, active);
     if (stripped.conflicts.length) fail('CONFLICT', `自有 hook 被手改/移除，保留配置：${stripped.conflicts.join(',')}`);
     // 提前返回前核对 current 的实际目标：登记快照完好但入口被删除、断链或错链时只做最小修复，不重写配置。
@@ -262,14 +314,14 @@ export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, a
     const entry = await inspectCurrent(directory, active);
     if (entry.state === 'conflict') return currentConflict(entry);
     if (sameSnapshot) {
-      if (entry.state === 'verified') return { status: 'already-installed', agent, version: active.version, releaseRoot: active.releaseRoot, currentRoot: active.currentRoot, requiresTrust: 'unknown' };
+      if (entry.state === 'verified') return { status: 'already-installed', agent, version: active.version, releaseRoot: active.releaseRoot, currentRoot: active.currentRoot, configFile, requiresTrust: 'unknown' };
       if (entry.state === 'own-other') {
-        // 入口仍属于本状态根，但指向另一个宿主登记的有效快照：不改指，避免破坏对方已通过校验的安装。
-        const owner = await otherHostSnapshot(directory, state, agent, entry.target);
+        // 入口仍属于本状态根，但指向另一个已登记的有效快照（可能是另一个 Codex 配置目录或宿主）：不改指。
+        const owner = await otherHostSnapshot(directory, state, agent, entry.target, active);
         if (owner) return {
           status: 'conflict', agent, version: active.version, path: entry.link, kind: 'link', target: entry.target, registeredBy: owner,
-          conflict: `current 已指向 ${owner.agent} 登记的 ${owner.version} 发布快照；两个宿主共用入口，本次 ${active.version} 安装不改指。先统一升级两个宿主后再重试`,
-          reason: '另一个已安装宿主正在使用 current；保留现场待统一升级',
+          conflict: `current 已指向 ${owner.agent} 登记的 ${owner.version} 发布快照；多个宿主/配置目录共用入口，本次 ${active.version} 安装不改指。先统一升级后再重试`,
+          reason: '另一个已安装宿主或 Codex 配置目录正在使用 current；保留现场待统一升级',
         };
       }
       await pointCurrent(directory, active.releaseRoot);
@@ -309,10 +361,11 @@ export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, a
     return finishPrepared(directory, state, save, record, agent);
   });
 }
-export async function uninstall(directory, { agent = 'codex' } = {}) {
+export async function uninstall(directory, { agent = 'codex', userDir } = {}) {
   const host = hostFor(agent);
+  const configFile = userDir ? path.join(path.resolve(userDir), host.configName) : null;
   return mutate(directory, async (state, save) => {
-    const record = installRecord(state, agent);
+    const record = configFile ? locateInstall(state, agent, configFile).record : installRecord(state, agent);
     if (!record || record.status === 'uninstalled') return { status: 'not-installed' };
     if (record.status === 'prepared') await finishPrepared(directory, state, save, record, agent);
     if (record.status !== 'installed') fail('RECOVERY', '安装事务尚未确认，需要先核对注册差异');
@@ -320,7 +373,11 @@ export async function uninstall(directory, { agent = 'codex' } = {}) {
       record.status = 'uninstalled';
       record.uninstalledAt = new Date().toISOString();
       delete record.uninstallIntent;
-      if (agent === 'codex') state.install = record;
+      // 只同步权威记录；附加位置留在 extra 中供 doctor 追溯，不能覆盖默认目录记录。
+      if (samePrimary(state, agent, record)) {
+        state.installs[agent] = record;
+        if (agent === 'codex') state.install = record;
+      }
       return { status: 'uninstalled', releaseRetained: record.releaseRoot, reason: '发布副本和追溯记录保留，可通过系统回收站清理' };
     };
     // 撤销意图先落盘：配置移除成功后若最终状态保存失败，重试可按前后指纹识别已完成并收敛。
@@ -372,23 +429,40 @@ export async function registrationStatus(record, agent = 'codex') {
     return registered ? 'registered' : 'missing-or-modified';
   } catch { return 'unreadable-or-unknown'; }
 }
+async function locationReport(directory, agent, item) {
+  const record = item?.record || null;
+  return {
+    location: item?.location || null,
+    configFile: record?.configFile || null,
+    status: record?.status || 'not-installed',
+    registration: await registrationStatus(record, agent),
+    integrity: record ? await releaseIntegrity(directory, record) : 'not-installed',
+    version: record?.version || null,
+  };
+}
 export async function doctor(directory, root, { agent = 'codex', userDir } = {}) {
   hostFor(agent);
   const state = await readState(directory);
-  const record = installRecord(state, agent);
+  const registered = installLocations(state, agent);
+  const configFile = userDir ? path.join(path.resolve(userDir), HOSTS[agent].configName) : null;
+  const selected = configFile ? locateInstall(state, agent, configFile) : registered.find(item => item.location === 'primary') || { record: null, location: null };
+  const record = selected.record;
   const configuration = await registrationStatus(record, agent);
-  const registered = configuration === 'registered';
+  const registeredNow = configuration === 'registered';
   const actual = Object.entries(hostObservations(state, agent)).filter(([, observation]) => observation.source === 'callback').map(([event, observation]) => ({ event, at: observation.at }));
   const project = root ? await (await import('./projects.mjs')).resolveProject(state, root) : null;
   return {
     schemaVersion: 1, agent, registration: configuration, discovery: 'unknown', trust: 'unknown',
+    // 指定 --user-dir 时只报告该位置；不带参数时顶层是默认（权威）位置，并列出所有已登记位置。
+    ...(configFile ? { location: selected.location, configFile: record?.configFile || configFile } : {}),
     execution: actual.length ? { status: 'callback-observed-host-unverified', events: actual } : 'unknown',
     integrity: record ? await releaseIntegrity(directory, record) : 'not-installed',
     version: record?.version || null,
     ...(agent === 'codex' ? { questionInDefaultMode: await codexQuestionFeature(userDir || (record?.configFile ? path.dirname(record.configFile) : undefined)) } : {}),
+    ...(configFile ? {} : { locations: await Promise.all(registered.map(item => locationReport(directory, agent, item))) }),
     activeTasks: Object.values(state.tasks).filter(task => task.lifecycle === 'active').map(task => task.taskId),
     project: project ? { projectId: project.project.projectId, enabled: true, coexistenceMode: project.project.coexistenceMode } : null,
     pending: Object.values(state.pending).filter(item => item.status === 'open' && (!root || (project && item.projectId === project.project.projectId))).map(item => ({ pendingId: item.pendingId, kind: item.kind, reason: item.reason })),
-    next: registered ? '使用当前 ACP 宿主核对 hooks/list 与 /hooks 信任，在新会话观察本插件回调；不要用全局 CLI 版本代替 ACP 版本' : '先核对安装/注册差异；测试始终使用临时 user-dir/state-dir',
+    next: registeredNow ? '使用当前 ACP 宿主核对 hooks/list 与 /hooks 信任，在新会话观察本插件回调；不要用全局 CLI 版本代替 ACP 版本' : '先核对安装/注册差异；测试始终使用临时 user-dir/state-dir',
   };
 }

@@ -35,7 +35,7 @@ async function inputJSON(options) {
 const help = {
   usage: 'node bin/workflow.mjs <命令> [--state-dir <本机状态目录>]',
   commands: [
-    'install --agent codex|claude [--user-dir <宿主配置目录>]', 'uninstall --agent codex|claude', 'doctor [--agent codex|claude] [--project <目录>]',
+    'install --agent codex|claude [--user-dir <宿主配置目录>]（Codex 可用 --user-dir 登记默认目录之外的配置位置，如 Cindy 的 CODEX_HOME；须显式传入）', 'uninstall --agent codex|claude [--user-dir <宿主配置目录>]（只撤销该位置；不带 --user-dir 撤默认位置）', 'doctor [--agent codex|claude] [--user-dir <宿主配置目录>] [--project <目录>]（指定 --user-dir 只报告该位置；不带时报告默认位置并列出所有已登记位置）',
     'project onboard --root <目录> [--enable-learning|--skip-learning]（推荐：核心预检通过才接入并扫描；--enable-learning 同时启用后台复盘并注册计划任务，会真实调用模型，需用户同意；显式请求未完整生效时返回 status:partial 且退出码 1）',
     'project remove --root <目录>（清除本机绑定、计划任务、管理区和本机数据；项目内资料只列出不删）',
     'project enable --root <目录> [--coexistence-mode bounded|pending-only]',
@@ -135,7 +135,7 @@ async function main() {
     catch { return { systemMessage: 'workflow 事件输入无效，已保守放行。' }; }
   }
   if (command === 'install') return (await import('../src/install.mjs')).install(directory, { userDir: options['user-dir'], agent });
-  if (command === 'uninstall') return (await import('../src/install.mjs')).uninstall(directory, { agent });
+  if (command === 'uninstall') return (await import('../src/install.mjs')).uninstall(directory, { agent, userDir: options['user-dir'] });
   if (command === 'doctor') return (await import('../src/install.mjs')).doctor(directory, options.project, { agent, userDir: options['user-dir'] });
   if (command === 'context') return getContext(directory, root, options.role || 'lead', options.session);
   if (command === 'task' && action === 'show') {

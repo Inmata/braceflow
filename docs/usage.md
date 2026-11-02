@@ -22,6 +22,18 @@ node bin/workflow.mjs doctor --agent codex
 
 只用一个宿主时，只执行对应两条命令。Claude Code 写入 `~/.claude/settings.json`，Codex 写入 `~/.codex/hooks.json`；两个宿主分别安装、升级和 `uninstall`，可共用发布副本和状态目录。使用 Codeg 时仍按被管理的 Codex/Claude 安装对应宿主，Codeg 不替代 hooks；Codeg 专有操作见[可选适配](adapters/codeg.md)。
 
+Codex 运行在独立的配置目录时（例如 Cindy 使用 `%APPDATA%\Cindy\codex-home`），由用户显式把该目录作为附加位置传入：`install --user-dir "$env:APPDATA\Cindy\codex-home"`。安装器不会自动扫描 `Roaming\Cindy`，也不修改 Cindy 的 `config.toml`。
+
+```powershell
+# 默认目录与附加 Codex 目录分别安装、检查、撤销
+node bin/workflow.mjs install --agent codex
+node bin/workflow.mjs install --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
+node bin/workflow.mjs doctor --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
+node bin/workflow.mjs uninstall --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
+```
+
+第一次安装的位置是权威记录（通常为 `~/.codex`），附加位置按规范化后的配置文件路径单独登记，第二条不会覆盖第一条；各位置的 `hooks.json` 分别维护。`doctor --user-dir` 只报告该位置；不带 `--user-dir` 时顶层报告默认位置，并在 `locations` 中列出所有已登记位置及各自的 status/registration/integrity/version。`uninstall --user-dir` 只撤销该位置自己登记的 handlers，其他位置、其他插件和用户新增配置保持不变。同一目录的不同大小写或分隔符写法视为同一位置，不会重复登记。Cindy 升级或切换账号可能重建 `codex-home`，重建后 hooks 可能丢失：需对当前目录重新执行 `doctor`，按结果重新 `install`。多个 Codex 配置位置共用同一个 `current`，升级时建议对每个已登记位置都重新安装，避免某个位置仍登记旧快照而在 doctor 中显示 `integrity: unavailable`。
+
 然后接入项目，并在该目录用所选宿主打开新主会话，当前主会话承担 Lead：
 
 ```powershell
@@ -34,7 +46,7 @@ node bin/workflow.mjs project onboard --root "D:/某个已明确允许接入的�
 
 同一本机目录的绑定由两种宿主共用，切换已安装适配的宿主不必重新接入。同一项目可以同时开多个 Lead 会话，都能写共享资料；并发改同一文件时，后写的一方收到 `CONFLICT`，重读后再写。
 
-`install` 修改所选宿主的实际用户 hooks 注册，只在已决定安装时执行。安装生成带摘要的发布副本，并用固定入口 `current` 指向它；hook 命令只含 `current` 路径，升级时路径不变，宿主信任只需做一次。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指该链接，不重写宿主配置、不新建发布副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场，返回 `conflict` 与路径，不自动删除或接管。两个宿主共用一个 `current`，重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级两个宿主。没有需要用户配置的运行时依赖。状态默认 `%LOCALAPPDATA%/workflow`；隔离试用为每条命令指定相同 `--state-dir`，安装另指定临时 `--user-dir`（直接指向宿主配置目录，如 `.codex` 或 `.claude`，不是用户根）。发布副本与公共资料固定同一版本，活动任务/prepared 事务导致升级延期，完成或明确结束后再安装。安装副本被用户改写时停止覆盖并报告差异。
+`install` 修改所选宿主的实际用户 hooks 注册，只在已决定安装时执行。安装生成带摘要的发布副本，并用固定入口 `current` 指向它；hook 命令只含 `current` 路径，升级时路径不变，宿主信任只需做一次。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指该链接，不重写宿主配置、不新建发布副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场，返回 `conflict` 与路径，不自动删除或接管。两个宿主及同一宿主的多个 Codex 配置目录共用一个 `current`，重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主或配置位置登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级。没有需要用户配置的运行时依赖。状态默认 `%LOCALAPPDATA%/workflow`；隔离试用为每条命令指定相同 `--state-dir`，安装另指定临时 `--user-dir`（直接指向宿主配置目录，如 `.codex` 或 `.claude`，不是用户根）。发布副本与公共资料固定同一版本，活动任务/prepared 事务导致升级延期，完成或明确结束后再安装。安装副本被用户改写时停止覆盖并报告差异。
 
 新副本先在状态根 `release-staging/` 中复制并核对完整性，完成后才切换到正式发布目录。复制失败或中断不改用户配置；残留暂存目录保留供核查，可直接重试安装，清理时使用系统回收站。
 
@@ -247,9 +259,10 @@ apply 输入身份与 `changes`，每项有 path、baseline、content、responsi
 node bin/workflow.mjs project disable --root "<试点项目>"
 node bin/workflow.mjs uninstall --agent codex
 node bin/workflow.mjs uninstall --agent claude
+node bin/workflow.mjs uninstall --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
 ```
 
-disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手改则保留并报告。uninstall 仅撤销未被修改的自有 handlers，保留其他插件/新增配置，保留发布副本、项目资料、LESSONS 和追溯记录。用户改动冲突不整文件覆盖。
+disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手改则保留并报告。uninstall 仅撤销未被修改的自有 handlers，保留其他插件/新增配置，保留发布副本、项目资料、LESSONS 和追溯记录。用户改动冲突不整文件覆盖。Codex 附加配置位置用 `--user-dir` 单独撤销，只移除该位置的 handlers；不带 `--user-dir` 时处理默认位置，其他已登记位置保持不变。
 
 多个插件共存时状态、信号、个人库独立；workflow 不重跑另一插件学习，旧 `coexistence-mode` 参数保留兼容。停止后台学习使用 `learning disable`，撤销系统任务使用 `learning schedule remove`；撤销宿主安装前先执行这两步。不要把关闭另一插件作为排错的默认步骤。
 
