@@ -21,6 +21,17 @@ import {
   packageMarkersFromText,
   recognizeHostMessage,
 } from '../src/adapters/herdr.mjs';
+import {
+  CINDY_HELPER_CALL_TOOL,
+  CINDY_HOST_MESSAGE_PREFIXES,
+  CINDY_ORCA_DELEGATION_TOOLS,
+  CINDY_QUESTION_TOOLS,
+  cindyOrcaDelegation,
+  cindySessionTaskDelegation,
+  cindyToolDelegation,
+  cindyWaitInstruction,
+  isCindyChannel,
+} from '../src/adapters/cindy.mjs';
 
 test('Codeg 适配保留提问/状态工具名、结果解析和终态集合', () => {
   assert.deepEqual(CODEG_QUESTION_TOOLS, ['mcp__codeg-mcp__ask_user_question', 'mcp__codeg_mcp__ask_user_question']);
@@ -129,4 +140,98 @@ test('复合命令识别只看是否出现委派子命令；通道判断与等�
   assert.match(herdrWaitInstruction(), /不盲目重发/);
   assert.match(hcWaitInstruction(), /hc wait --children any/);
   assert.match(hcWaitInstruction(), /<hc from=/);
+});
+
+test('Cindy Orca 适配：create_worker 取 agent/initial_task，create_workers 逐项解析，send_to_worker 无 Agent 来源', () => {
+  assert.equal(CINDY_HELPER_CALL_TOOL, 'mcp__cindy_helper__call_tool');
+  assert.deepEqual(CINDY_ORCA_DELEGATION_TOOLS, [
+    'mcp__cindy_orca__create_worker', 'mcp__cindy-orca__create_worker',
+    'mcp__cindy_orca__create_workers', 'mcp__cindy-orca__create_workers',
+    'mcp__cindy_orca__send_to_worker', 'mcp__cindy-orca__send_to_worker',
+  ]);
+
+  const created = cindyOrcaDelegation('mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: 'workflow-package:W2 实现' });
+  assert.equal(created.kind, 'orca');
+  const [single] = created.items;
+  assert.equal(single.entry, 'cindy-orca-create_worker');
+  assert.equal(single.channelPrefix, 'cindy:orca:');
+  assert.equal(single.agent, 'claude-code');
+  // 准备记录常带模型/effort 说明，声明比对用词级别名；通道仍按原值比较。
+  assert.equal(single.declaredAgent, 'claude');
+  assert.deepEqual(single.packageMarkers, ['W2']);
+  assert.equal(single.text, 'workflow-package:W2 实现');
+  // 没有 initial_task 也解析，但没有包标记，由 hook 按未关联工作包拒绝。
+  assert.deepEqual(cindyOrcaDelegation('mcp__cindy-orca__create_worker', { agent: 'codex' }).items[0].packageMarkers, []);
+  assert.equal(cindyOrcaDelegation('mcp__cindy-orca__create_worker', { agent: 'pi', initial_task: 'x' }).items[0].declaredAgent, 'pi');
+
+  const batch = cindyOrcaDelegation('mcp__cindy_orca__create_workers', {
+    workers: [
+      { label: 'w2', agent: 'claude-code', initial_task: 'workflow-package:W2 实现' },
+      { label: 'r2', agent: 'codex', initial_task: 'workflow-package:R2 审查', model: 'gpt-6.1-terra' },
+    ],
+  });
+  assert.equal(batch.items.length, 2);
+  assert.deepEqual(batch.items.map(item => item.index), [0, 1]);
+  assert.deepEqual(batch.items[1].packageMarkers, ['R2']);
+  assert.equal(batch.items[1].declaredAgent, 'codex');
+  assert.equal(batch.items[1].label, 'r2');
+  // model 只随描述保留，不参与核对。
+  assert.equal(batch.items[1].model, 'gpt-6.1-terra');
+  const malformed = cindyOrcaDelegation('mcp__cindy_orca__create_workers', { workers: [null] });
+  assert.match(malformed.items[0].invalid, /不是对象/);
+  assert.match(cindyOrcaDelegation('mcp__cindy_orca__create_workers', {}).error, /workers/);
+
+  const sent = cindyOrcaDelegation('mcp__cindy_orca__send_to_worker', { target_session_id: 'cuid-1', message: 'workflow-package:W2 继续' });
+  assert.equal(sent.items[0].agent, null);
+  assert.equal(sent.items[0].targetSessionId, 'cuid-1');
+  assert.deepEqual(sent.items[0].packageMarkers, ['W2']);
+  assert.match(cindyOrcaDelegation('mcp__cindy_orca__send_to_worker', { target_session_id: 'x' }).error, /message/);
+
+  // 团队管理动作不是任务派发。
+  assert.equal(cindyOrcaDelegation('mcp__cindy_orca__start_team', { goal: 'x' }), null);
+  assert.equal(cindyOrcaDelegation('mcp__cindy_orca__interrupt_worker', { target_session_id: 'x' }), null);
+});
+
+test('Cindy Session task 适配：start/message 解析 instruction/message，check/stop 不识别', () => {
+  const start = cindySessionTaskDelegation(CINDY_HELPER_CALL_TOOL, {
+    name: 'start_session_task',
+    args: { instruction: 'workflow-package:W2 实现', title: '实现' },
+  });
+  assert.equal(start.entry, 'cindy-session-start_session_task');
+  assert.equal(start.sessionTask, true);
+  assert.equal(start.text, 'workflow-package:W2 实现');
+  assert.deepEqual(start.packageMarkers, ['W2']);
+
+  // args 是 JSON 字符串时同样解析；标题里的显式标记也算关联。
+  const viaString = cindySessionTaskDelegation(CINDY_HELPER_CALL_TOOL, { name: 'start_session_task', args: JSON.stringify({ instruction: '普通任务' }) });
+  assert.deepEqual(viaString.packageMarkers, []);
+  const titled = cindySessionTaskDelegation(CINDY_HELPER_CALL_TOOL, { name: 'start_session_task', args: { instruction: '实施', title: 'workflow-package:R2' } });
+  assert.deepEqual(titled.packageMarkers, ['R2']);
+
+  const message = cindySessionTaskDelegation(CINDY_HELPER_CALL_TOOL, { name: 'message_session_task', args: { message: 'workflow-package:R2 追问' } });
+  assert.equal(message.entry, 'cindy-session-message_session_task');
+  assert.deepEqual(message.packageMarkers, ['R2']);
+
+  for (const name of ['check_session_task', 'stop_session_task', 'other_tool']) {
+    assert.equal(cindySessionTaskDelegation(CINDY_HELPER_CALL_TOOL, { name, args: {} }), null, name);
+    assert.equal(cindyToolDelegation(CINDY_HELPER_CALL_TOOL, { name, args: {} }), null, name);
+  }
+  assert.equal(cindyToolDelegation('mcp__cindy_orca__create_worker', { agent: 'codex', initial_task: 'workflow-package:W3 x' }).kind, 'orca');
+});
+
+test('Cindy 提问工具、宿主消息前缀与等待说明由适配器提供', () => {
+  assert.deepEqual(CINDY_QUESTION_TOOLS, ['mcp__cindy_helper__ask_user_question_async']);
+  assert.deepEqual(CINDY_HOST_MESSAGE_PREFIXES.map(item => item.prefix), ['[Task delivery] Host bookkeeping']);
+  const recognized = recognizeHostMessage(' \n[Task delivery] Host bookkeeping, not a user message: …', CINDY_HOST_MESSAGE_PREFIXES);
+  assert.equal(recognized.software, 'Cindy');
+  assert.match(recognized.note, /不是用户指令/);
+  assert.match(recognized.note, /consumed/);
+  assert.equal(recognizeHostMessage('用户说 [Task delivery] Host bookkeeping', CINDY_HOST_MESSAGE_PREFIXES), null);
+
+  assert.equal(isCindyChannel('cindy:orca:claude-code'), true);
+  assert.equal(isCindyChannel('cindy:session'), true);
+  assert.equal(isCindyChannel('herdr:claude'), false);
+  assert.equal(isCindyChannel(undefined), false);
+  assert.match(cindyWaitInstruction(), /check_session_task/);
+  assert.match(cindyWaitInstruction(), /不要轮询/);
 });

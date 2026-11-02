@@ -5,6 +5,7 @@ import { checkSpecs, describeFindings, verifySpecBinding } from './spec.mjs';
 import { mergePreparationSnapshot, normalizePreparation, preparationConsistencyGaps, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath } from './preparation.mjs';
 import { isCodegChannel, codegWaitInstruction } from './adapters/codeg.mjs';
 import { isHcChannel, isHerdrChannel, hcWaitInstruction, herdrWaitInstruction } from './adapters/herdr.mjs';
+import { cindyWaitInstruction, isCindyChannel } from './adapters/cindy.mjs';
 
 export const PHASES = ['unknown', 'operation-only', 'executing', 'waiting-user', 'delivering'];
 export const ROUTES = ['operation-only', 'lead-direct', 'delegated'];
@@ -1183,12 +1184,8 @@ function planDeliveryReason(task) {
   const channelNote = 'task-start 的 channels 只能按角色各记一个；同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包 channel 和 packages 的实际 channel 为准。开工时会固定准备记录，packages 按包 ID 核对 role、agent、channel、scope；新增、拆分或重新分包需先请用户确认并更新 prepare 记录。已声明角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时，仍按原规则要求 change。';
   return `workflow 计划交付核对：本回合已进入计划交付但尚未向用户提问确认。若本回合在交付完整实施计划，请列出建议分流与工作包划分（分几个包、每包范围与依赖，或说明免拆包理由），并说明执行顺序与串并行关系。只交付纯技术方案时，按用户给定范围停在方案，不要求分包或逐包选择。${existing}${ask}${channelNote}并在计划末尾写明 spec 影响（无影响写“无”）；结构化提问工具会自动记 waiting-user，文本提问先发 signal phase --phase waiting-user。若本回合只是回答讨论而非交付计划，直接回复即可（本回合不再重复阻挡）。`;
 }
-// W2 接入 Cindy 后按实际通道行为完善；当前先占位：结果自动送回，不轮询。
-function cindyWaitInstruction() {
-  return 'Cindy 子代理结果会自动送回本会话：不需要轮询，结束回合等结果即可；结果回来后按交付核对。';
-}
 // 按在途包的通道给出等待方式；混合通道逐一说明，内置子代理单独补一句“宿主会通知”。
-// 不能把“非 builtin”一概当成 Codeg：Herdr TUI 不会唤醒父会话，hc 会唤醒，两者等待方式相反。
+// 不能把“非 builtin”一概当成 Codeg：Herdr TUI 不会唤醒父会话，hc 会唤醒，Cindy 则自动回送结果。
 function inflightWaitInstruction(inflight) {
   const channels = inflight.map(([, item]) => item.channel);
   const hasBuiltin = channels.some(channel => channel?.startsWith('builtin:'));
@@ -1196,7 +1193,7 @@ function inflightWaitInstruction(inflight) {
   if (channels.some(channel => isCodegChannel(channel))) groups.push(['Codeg', codegWaitInstruction()]);
   if (channels.some(channel => isHerdrChannel(channel))) groups.push(['Herdr TUI', herdrWaitInstruction()]);
   if (channels.some(channel => isHcChannel(channel))) groups.push(['Herdr GUI（hc）', hcWaitInstruction()]);
-  if (channels.some(channel => channel?.startsWith('cindy:'))) groups.push(['Cindy', cindyWaitInstruction()]);
+  if (channels.some(channel => isCindyChannel(channel))) groups.push(['Cindy', cindyWaitInstruction()]);
   const builtinNote = '内置子代理包结束时宿主会通知本会话。';
   if (!groups.length) {
     return hasBuiltin

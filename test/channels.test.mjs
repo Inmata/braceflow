@@ -225,3 +225,16 @@ test('Stop 在途提示按通道区分：herdr 要求同回合阻塞等待，hc 
   assert.match(mixedStop.reason, /herdr agent wait/);
   assert.match(mixedStop.reason, /hc wait --children any/);
 });
+
+// W2：Cindy 通道结果自动送回，不轮询；用户问进度或疑似丢失时才查一次。
+test('Stop 在途提示：cindy 通道说明结果自动送回，只在需要时查一次 check_session_task', async () => {
+  const f = await fixture();
+  await legacyDelegated(f);
+  await packages(f, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 't1', channel: 'cindy:orca:claude-code' }]);
+  const stop = await event(f, 'Stop');
+  assert.match(stop.reason, /check_session_task/);
+  assert.match(stop.reason, /不要轮询/);
+  assert.doesNotMatch(stop.reason, /herdr agent wait/);
+  assert.doesNotMatch(stop.reason, /hc wait/);
+  assert.doesNotMatch(stop.reason, /get_delegation_status/);
+});

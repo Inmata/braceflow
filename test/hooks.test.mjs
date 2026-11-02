@@ -1204,6 +1204,127 @@ test('W1 UserPromptSubmit：<hc from=…> 仍开新票据，但保留 waiting-us
   }
 });
 
+// W2：Cindy 的 Orca 是唯一受控派工入口；Session task 只用于未开工拦截和拒绝提示。
+const cindyPackages = [
+  { packageId: 'C1', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'cindy:orca:claude-code', scope: 'src/hooks.mjs', delivers: 'Orca 核对', dependsOn: [] },
+  { packageId: 'C2', role: 'reviewer', agent: 'Codex (group/reviewer, high)', channel: 'cindy:orca:codex', scope: '审查 W2', delivers: '审查结论', dependsOn: [] },
+  { packageId: 'C3', role: 'worker', agent: 'Claude Code', channel: 'cindy:orca:codex', scope: 'test/hooks.test.mjs', delivers: '通道 Agent 不符', dependsOn: [] },
+  { packageId: 'C4', role: 'worker', agent: 'Codex (group/reviewer, high)', channel: 'cindy:orca:claude-code', scope: 'src/adapters/cindy.mjs', delivers: '委派 Agent 不符', dependsOn: [] },
+  { packageId: 'C5', role: 'worker', agent: 'Claude Code', channel: 'cindy:orca:claude-code', scope: 'docs/adapters/cindy.md', delivers: '已交付', dependsOn: [] },
+  { packageId: 'C6', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'cindy:orca:claude-code', scope: 'test/adapters.test.mjs', delivers: '依赖未终态', dependsOn: ['C1'] },
+  { packageId: 'C7', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'codeg:claude_code', scope: 'src/protocol.mjs', delivers: '通道前缀不符', dependsOn: [] },
+];
+const cindyRegistered = cindyPackages.map(item => ({ ...item, status: 'dispatched' }));
+async function cindyTask() {
+  const f = await fixture();
+  await w2Prepare(f, {
+    packages: cindyPackages,
+    requirements: [{ id: 'C1', summary: 'Cindy Orca 与 Session task 委派核对', acceptance: ['Orca 按包放行，Session task 带标记被拒'], packages: ['C1'], verification: 'node --test test/hooks.test.mjs' }],
+  });
+  const started = await emit(f, { action: 'task-start', goal: 'Cindy 委派核对', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/hooks.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const registered = await emit(f, { action: 'packages', packages: cindyRegistered });
+  assert.equal(registered.result.accepted, true, JSON.stringify(registered.result));
+  const delivered = await emit(f, { action: 'packages', packages: [{ packageId: 'C5', status: 'delivered', deliveredRef: 'v1' }] });
+  assert.equal(delivered.result.accepted, true, JSON.stringify(delivered.result));
+  return f;
+}
+const phaseOf = async f => (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)].phase;
+
+test('W2 PreToolUse：未开工的 Cindy Orca/Session task 实施委派被拒，只读查询与团队管理放行', async () => {
+  const f = await fixture();
+  for (const [tool, toolInput] of [
+    ['mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: '实现' }],
+    ['mcp__cindy_orca__create_workers', { workers: [{ agent: 'claude-code', initial_task: '实现' }] }],
+    ['mcp__cindy_orca__send_to_worker', { target_session_id: 'x', message: '普通消息' }],
+    ['mcp__cindy_helper__call_tool', { name: 'start_session_task', args: { instruction: '实现' } }],
+    ['mcp__cindy_helper__call_tool', { name: 'message_session_task', args: { message: '继续' } }],
+  ]) {
+    const denied = await pre(f, tool, toolInput);
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `${tool}: ${JSON.stringify(denied)}`);
+    assert.match(deniedReason(denied), /实施委派被拦下/);
+  }
+  for (const [tool, toolInput] of [
+    ['mcp__cindy_helper__call_tool', { name: 'check_session_task', args: { task_id: 'x' } }],
+    ['mcp__cindy_helper__call_tool', { name: 'stop_session_task', args: { task_id: 'x' } }],
+    ['mcp__cindy_orca__start_team', { goal: 'x' }],
+    ['mcp__cindy_orca__interrupt_worker', { target_session_id: 'x' }],
+    ['mcp__cindy_helper__ask_user_question_async', { questions: [] }],
+  ]) {
+    assert.deepEqual(await pre(f, tool, toolInput), {}, tool);
+  }
+});
+
+test('W2 PreToolUse：开工后 Orca create_worker/create_workers/send_to_worker 按包核对', async () => {
+  const f = await cindyTask();
+  // 缺包标记。
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: '实现' })), /workflow-package/);
+  // 正确：准备记录带模型/effort，声明按词级别名匹配；通道尾部 claude-code 与原值一致。
+  assert.deepEqual(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: 'workflow-package:C1 实现' }), {});
+  assert.deepEqual(await pre(f, 'mcp__cindy-orca__create_worker', { agent: 'codex', initial_task: 'workflow-package:C2 审查' }), {});
+  // 通道前缀、通道 Agent、准备 Agent 不符。
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: 'workflow-package:C7 实现' })), /cindy:orca:\*/);
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'codex', initial_task: 'workflow-package:C1 实现' })), /Agent 与本次委派不一致/);
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'codex', initial_task: 'workflow-package:C4 实现' })), /Agent 与本次委派不一致/);
+  // 未 dispatched、依赖未终态、无法核对 Agent。
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: 'workflow-package:C5 实现' })), /不是 dispatched/);
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { agent: 'claude-code', initial_task: 'workflow-package:C6 实现' })), /依赖 C1 尚未终态/);
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_worker', { initial_task: 'workflow-package:C1 实现' })), /未给出可解析的 agent/);
+  // create_workers 逐项核对：第二项通道 Agent 不符，整体拒绝并指出 workers[1]。
+  const batch = await pre(f, 'mcp__cindy_orca__create_workers', { workers: [
+    { label: 'ok', agent: 'claude-code', initial_task: 'workflow-package:C1 实现' },
+    { label: 'bad', agent: 'codex', initial_task: 'workflow-package:C1 继续' },
+  ] });
+  assert.equal(batch.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(deniedReason(batch), /workers\[1\]（bad）/);
+  assert.match(deniedReason(batch), /Agent 与本次委派不一致/);
+  assert.deepEqual(await pre(f, 'mcp__cindy_orca__create_workers', { workers: [
+    { label: 'c1', agent: 'claude-code', initial_task: 'workflow-package:C1 实现' },
+    { label: 'c2', agent: 'codex', initial_task: 'workflow-package:C2 审查' },
+  ] }), {});
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_workers', {})), /workers 数组/);
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__create_workers', { workers: [null] })), /workers\[0\].*不是对象/);
+  // send_to_worker 无 Agent 字段，只按通道尾部核对；C3 声明的 Agent 与通道尾部不符。
+  assert.deepEqual(await pre(f, 'mcp__cindy_orca__send_to_worker', { target_session_id: 'cuid', message: 'workflow-package:C1 继续' }), {});
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__send_to_worker', { target_session_id: 'cuid', message: 'workflow-package:C3 继续' })), /通道尾部核对/);
+  assert.match(deniedReason(await pre(f, 'mcp__cindy_orca__send_to_worker', { target_session_id: 'cuid', message: '继续' })), /workflow-package/);
+});
+
+test('W2 PreToolUse/PostToolUse：Session task 带包标记被拒并提示改用 Orca，提问工具记 waiting-user', async () => {
+  const f = await cindyTask();
+  const withMark = await pre(f, 'mcp__cindy_helper__call_tool', { name: 'start_session_task', args: { instruction: 'workflow-package:C1 实现' } });
+  assert.equal(withMark.hookSpecificOutput?.permissionDecision, 'deny');
+  assert.match(deniedReason(withMark), /Session task 没有可靠的 Agent 映射/);
+  assert.match(deniedReason(withMark), /Orca create_worker/);
+  const withoutMark = await pre(f, 'mcp__cindy_helper__call_tool', { name: 'message_session_task', args: { message: '继续' } });
+  assert.match(deniedReason(withoutMark), /workflow-package/);
+  assert.match(deniedReason(withoutMark), /Orca create_worker/);
+  for (const name of ['check_session_task', 'stop_session_task']) {
+    assert.deepEqual(await pre(f, 'mcp__cindy_helper__call_tool', { name, args: {} }), {}, name);
+  }
+  await event(f, 'PostToolUse', { tool_name: 'mcp__cindy_helper__ask_user_question_async', tool_input: { questions: [] }, tool_response: {} });
+  assert.equal(await phaseOf(f), 'waiting-user');
+});
+
+test('W2 UserPromptSubmit：[Task delivery] 宿主消息仍开新票据，但保留 waiting-user；普通输入不识别', async () => {
+  const f = await cindyTask();
+  await emit(f, { action: 'phase', phase: 'waiting-user' });
+  const before = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
+  f.turnId = 'turn-cindy-host';
+  const output = await event(f, 'UserPromptSubmit', { prompt: '  \n[Task delivery] Host bookkeeping, not a user message: 任务完成' });
+  assert.match(output.hookSpecificOutput.additionalContext, /Cindy 宿主消息/);
+  assert.match(output.hookSpecificOutput.additionalContext, /不是用户指令/);
+  const after = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
+  assert.equal(after.phase, 'waiting-user');
+  assert.equal(after.turnId, 'turn-cindy-host');
+  assert.notEqual(after.ticket, before.ticket);
+  // 普通输入不识别为宿主消息。
+  f.turnId = 'turn-cindy-plain';
+  const plain = await event(f, 'UserPromptSubmit', { prompt: '继续实施' });
+  assert.doesNotMatch(JSON.stringify(plain), /不是用户指令/);
+  assert.equal(await phaseOf(f), 'unknown');
+});
+
 // R2 中 7：准备资料只限真实项目内的指定计划和 docs/plans Markdown；链接不能逃逸，失败不放行。
 test('R2 准备资料路径按 realpath 限制，.local/任意后缀/项目外/junction 逃逸都拒绝', async () => {
   const f = await fixture();

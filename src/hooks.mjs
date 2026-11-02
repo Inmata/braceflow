@@ -11,6 +11,7 @@ import { findExtraction, markExtractionStart, registerExtraction } from './captu
 import { PLAN_DIRECTORY, preparationMissing, resolvePlanPath } from './preparation.mjs';
 import { CODEG_DELEGATION_STATUS_TOOLS, CODEG_DELEGATION_TERMINAL, CODEG_DELEGATION_TOOLS, CODEG_QUESTION_TOOLS, delegationTasks } from './adapters/codeg.mjs';
 import { HOST_MESSAGE_PREFIXES, commandDelegation as resolveCommandDelegation, mentionsHerdrDelegation, recognizeHostMessage } from './adapters/herdr.mjs';
+import { CINDY_HOST_MESSAGE_PREFIXES, CINDY_ORCA_DELEGATION_TOOLS, CINDY_QUESTION_TOOLS, cindyToolDelegation } from './adapters/cindy.mjs';
 
 export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd', 'PreCompact', 'PostCompact'];
 // Claude Code 没有 Interrupt 事件；StopFailure 承担中断保存语义，其余同名事件语义与 Codex 对齐。
@@ -21,9 +22,11 @@ export const HOSTS = ['codex', 'claude'];
 // Codex 原生名来自本机 rollout，hook 中 MCP 名按源码为原始服务器名，下划线形式是模型可见名，保留兼容。
 // Codeg 专有名称来自适配模块，公共流程只关心“这是否是当前宿主的提问工具”。
 export const QUESTION_TOOLS = {
-  codex: ['request_user_input', 'request_user_input_async', ...CODEG_QUESTION_TOOLS],
-  claude: ['AskUserQuestion', ...CODEG_QUESTION_TOOLS],
+  codex: ['request_user_input', 'request_user_input_async', ...CODEG_QUESTION_TOOLS, ...CINDY_QUESTION_TOOLS],
+  claude: ['AskUserQuestion', ...CODEG_QUESTION_TOOLS, ...CINDY_QUESTION_TOOLS],
 };
+// 各适配器导出自己的宿主消息固定开头，这里合并成一张表统一识别；不按自然语言猜来源。
+const HOST_MESSAGE_TABLE = [...HOST_MESSAGE_PREFIXES, ...CINDY_HOST_MESSAGE_PREFIXES];
 // 宿主内置子代理（Claude Agent 工具、Codex spawn_agent）的事件带 agent_id 并共享父 session_id；
 // 这些事件不属于 Lead 回合，直接放行。`--agent` 启动的主会话只有 agent_type，不在此列。
 export const isSubagentEvent = event => typeof event.agent_id === 'string' && event.agent_id.length > 0;
@@ -166,7 +169,7 @@ function isComposedSignal(event) {
 // PreToolUse 的类型集合只描述“能否在动作发生前判断”，不依赖某个产品的自然语言。
 // 写入工具按宿主实测名称收列；命令工具只有确认是本插件直接 signal 时才读取状态。
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch', 'write_file', 'delete_file']);
-const DELEGATION_TOOLS = new Set(['Agent', 'Task', 'collaborationspawn_agent', 'spawn_agent', ...CODEG_DELEGATION_TOOLS]);
+const DELEGATION_TOOLS = new Set(['Agent', 'Task', 'collaborationspawn_agent', 'spawn_agent', ...CODEG_DELEGATION_TOOLS, ...CINDY_ORCA_DELEGATION_TOOLS]);
 const COMMAND_TOOLS = new Set(['Bash', 'exec_command', 'PowerShell', 'powershell', 'pwsh']);
 const READ_ONLY_SUBAGENTS = new Set(['Explore', 'Plan']);
 function preToolUseDeny(message) {
@@ -252,9 +255,13 @@ const normalizeAgent = value => typeof value === 'string' ? value.toLowerCase().
 // 而通道尾部只能给出软件名（herdr:claude）。命令委派按词匹配：通道/程序名必须作为
 // 声明文本里的一个独立词出现，既不放宽 Codeg 的精确归一化比较，也不把任意子串当匹配。
 function agentMatchesDeclared(declared, expected) {
-  const wanted = normalizeAgent(expected);
-  if (!wanted) return false;
-  return String(declared || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).some(token => normalizeAgent(token) === wanted);
+  // expected 可能带连字符（Orca 的 claude-code）或模型/effort 说明；按词比较，
+  // 要求 expected 的每个词都作为独立词出现在准备声明里，避免整串“Claude Code (…, high)”无法匹配。
+  const words = value => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map(normalizeAgent).filter(Boolean);
+  const wanted = words(expected);
+  const tokens = words(declared);
+  if (!wanted.length) return false;
+  return wanted.every(token => tokens.includes(token));
 }
 // 每个委派工具按当前适配/宿主 schema 核对必需字段与 Agent 来源；没有可解析 Agent 的入口不能静默跳过比较。
 const DELEGATION_ENTRIES = new Map([
@@ -360,9 +367,9 @@ function delegationDenial(task, pkg, name, input) {
   }
   return null;
 }
-// 命令型委派（Herdr TUI / hc）与工具型委派共享同一套包规则，但 Agent 来源不同：
-// herdr prompt 与 hc send 没有 Agent 字段，只能核对通道尾部；hc 模板没有 Agent，只能精确核对通道。
-// 适配器按 { entry, channelPrefix, agent, text, packageMarkers, exactChannel, pureStart } 提供描述，
+// 命令型与工具型外部委派（Herdr TUI / hc / Cindy Orca）共享同一套包规则，但 Agent 来源不同：
+// herdr prompt、hc send 与 Orca send_to_worker 没有 Agent 字段，只能核对通道尾部；hc 模板没有 Agent，只能精确核对通道。
+// 适配器按 { entry, channelPrefix, agent, declaredAgent, text, packageMarkers, exactChannel } 提供描述，
 // 后续软件适配可直接复用，不在这里按软件名分支。
 const COMMAND_COMPOSITION_DENIAL = 'workflow 未核对：命令里出现 herdr/hc 委派子命令，但不是单条直接调用（含 &&、;、管道、变量赋值或子 shell）。请改为单独直接调用一条委派命令；workflow 不解析复合 shell。';
 function commandDelegationDenial(task, pkg, descriptor) {
@@ -382,17 +389,20 @@ function commandDelegationDenial(task, pkg, descriptor) {
   if (!pkg.channel.startsWith(descriptor.channelPrefix)) {
     return `工作包 ${pkg.packageId} 的通道是 ${pkg.channel}，与委派入口 ${descriptor.entry} 要求的 ${descriptor.channelPrefix}* 不一致；先用该通道的委派方式，或更新准备绑定`;
   }
-  const channelAgent = normalizeAgent(String(pkg.channel).split(':').slice(1).join(':'));
+  const channelTail = String(pkg.channel).slice(descriptor.channelPrefix.length);
+  const channelAgent = normalizeAgent(channelTail);
   if (descriptor.agent) {
     const requested = normalizeAgent(descriptor.agent);
-    if (!requested || !agentMatchesDeclared(pkg.agent, descriptor.agent) || requested !== channelAgent) {
+    // declaredAgent 是同一 Agent 的声明级别名（如 Orca 的 claude-code → claude），只用于和准备记录比对。
+    const declaredAgent = descriptor.declaredAgent ?? descriptor.agent;
+    if (!requested || !agentMatchesDeclared(pkg.agent, declaredAgent) || requested !== channelAgent) {
       return `工作包 ${pkg.packageId} 的 Agent 与本次委派不一致（准备记录：${pkg.agent}；通道：${pkg.channel}；委派：${descriptor.agent}）；命令委派必须同时匹配准备 Agent 与通道中的 Agent`;
     }
     return null;
   }
-  // 没有 Agent 来源的入口（herdr prompt、hc send）：只按通道尾部核对准备记录，不宣称已验证目标 Agent。
-  if (!channelAgent) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；Herdr 委派需要 ${descriptor.channelPrefix}<agent> 形式的实际通道，先更新准备记录`;
-  if (!agentMatchesDeclared(pkg.agent, channelAgent)) {
+  // 没有 Agent 来源的入口（herdr prompt、hc send、Orca send_to_worker）：只按通道尾部核对准备记录，不宣称已验证目标 Agent。
+  if (!channelAgent) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；该委派入口需要 ${descriptor.channelPrefix}<agent> 形式的实际通道，先更新准备记录`;
+  if (!agentMatchesDeclared(pkg.agent, channelTail)) {
     return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 与准备记录 Agent ${pkg.agent} 不一致；该入口不带 Agent 字段，只能按通道尾部核对，先修正准备绑定`;
   }
   return null;
@@ -436,11 +446,11 @@ function preparationGapText(gaps) {
 }
 // 任务声明的只读/计划权限是实际写入的上限；宿主模式仍是更高优先级的约束，这里只补任务声明这一层。
 // 计划模式只继续允许准备资料维护，不把计划任务变成业务写入授权。
-function taskModeDenial(task, name, event, resolved, preparation, commandDelegate = false) {
+function taskModeDenial(task, name, event, resolved, preparation, externalDelegate = false) {
   const mode = task?.permissions?.mode;
   if (mode !== 'read-only' && mode !== 'plan') return null;
-  if (commandDelegate) {
-    return `任务权限为 ${mode}：不能通过 herdr/hc 命令派实施包或启动实施子代理；先由 Lead 用 task-update 取得用户授权并改为可写。`;
+  if (externalDelegate) {
+    return `任务权限为 ${mode}：不能通过 herdr/hc 命令或 Cindy 委派入口派实施包或启动实施子代理；先由 Lead 用 task-update 取得用户授权并改为可写。`;
   }
   if (DELEGATION_TOOLS.has(name)) {
     // 只读委派按宿主声明的子代理类型判断；不是按名字猜诊断身份。Codex/Codeg 没有可信只读类型时仍拒绝。
@@ -459,11 +469,15 @@ function taskModeDenial(task, name, event, resolved, preparation, commandDelegat
 // 读、检索、写计划、prepare 以及普通 shell 命令不读取状态直接放行；普通 shell 里的任意文件写入无法可靠区分。
 async function preToolUse(directory, event, options, agent) {
   const { name, input } = hostTool(event);
-  const relevant = WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || COMMAND_TOOLS.has(name);
+  // Cindy 的两条入口都藏在 MCP 工具里：Orca 按工具名，Session task 按 call_tool 的 name 字段。
+  // 非派工动作（start_team、check_session_task 等）解析为 null，下面按普通工具放行。
+  const cindyCall = cindyToolDelegation(name, input);
+  const cindyDelegate = cindyCall !== null;
+  const relevant = WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || COMMAND_TOOLS.has(name) || cindyDelegate;
   if (!relevant) return {};
   // 宿主明确标记为 Explore/Plan 的只读子代理共享父会话身份，也不能写文件或继续委派；
   // 其他子代理的实际包所有权由发起时的 workflow-package 关联核对，这里不按 agent_id 猜包。
-  if (isSubagentEvent(event) && READ_ONLY_SUBAGENTS.has(event.agent_type) && (WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name))) {
+  if (isSubagentEvent(event) && READ_ONLY_SUBAGENTS.has(event.agent_type) && (WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || cindyDelegate)) {
     return preToolUseDeny(`只读子代理 ${event.agent_type} 不能修改文件或继续委派；只做读取、检索和结论交付。`);
   }
   // 命令工具先用命令文本筛掉明显不是本插件入口或 Herdr/hc 委派的调用，再确认确实是直接 signal。
@@ -494,7 +508,7 @@ async function preToolUse(directory, event, options, agent) {
   if (commandComposed) return preToolUseDeny(COMMAND_COMPOSITION_DENIAL);
   // 子代理的 PreToolUse 已在上层按 agent_id 放行；委派子会话若声明了角色，按包所有权核对。
   if (session.role) {
-    if (!WRITE_TOOLS.has(name) && !DELEGATION_TOOLS.has(name) && !commandDelegate) return {};
+    if (!WRITE_TOOLS.has(name) && !DELEGATION_TOOLS.has(name) && !commandDelegate && !cindyDelegate) return {};
     if (session.role === 'reviewer') return preToolUseDeny('Reviewer 只读审查：不能修改源码、测试或配置；把审查结论交回 Lead。');
     const owned = packageForSession(state, projectId, session);
     const hints = {
@@ -510,9 +524,9 @@ async function preToolUse(directory, event, options, agent) {
     // 只读诊断包即使以 worker 角色声明也只读：不能借免审声明写业务，也不再向下委派。
     if (owned.pkg.diagnostic) {
       if (WRITE_TOOLS.has(name)) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能修改文件；把结论写在交付 note 交回 Lead。`);
-      if (DELEGATION_TOOLS.has(name) || commandDelegate) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能继续委派子代理；只做范围内的读取和结论交付。`);
+      if (DELEGATION_TOOLS.has(name) || commandDelegate || cindyDelegate) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能继续委派子代理；只做范围内的读取和结论交付。`);
     }
-    const modeDenied = taskModeDenial(owned.task, name, event, resolved, session.preparation || null, commandDelegate);
+    const modeDenied = taskModeDenial(owned.task, name, event, resolved, session.preparation || null, commandDelegate || cindyDelegate);
     if (modeDenied) return preToolUseDeny(modeDenied);
     return {};
   }
@@ -536,6 +550,36 @@ async function preToolUse(directory, event, options, agent) {
       return denial ? preToolUseDeny(denial) : {};
     }
     return preToolUseDeny(taskMessage(`实施委派被拦下（${commandDelegation.entry}）`));
+  }
+  // Cindy：Orca 是唯一受控派工入口；Session task 没有可靠 Agent 映射，开工后带包标记一律拒绝。
+  // create_workers 逐项核对，任一项不合规即整体拒绝并指出是哪一项。
+  if (cindyCall) {
+    if (cindyCall.error) return preToolUseDeny(`${cindyCall.error}；已拒绝本次派工`);
+    if (active) {
+      const modeDenied = taskModeDenial(task, name, event, resolved, preparation, true);
+      if (modeDenied) return preToolUseDeny(modeDenied);
+      for (const item of cindyCall.items) {
+        const label = item.index === undefined ? item.entry : `${item.entry}[${item.index}]${item.label ? `（${item.label}）` : ''}`;
+        if (item.invalid) return preToolUseDeny(`${label} ${item.invalid}；已整体拒绝本次 create_workers`);
+        if (cindyCall.kind === 'session') {
+          if (item.packageMarkers.length) {
+            return preToolUseDeny(`Session task 没有可靠的 Agent 映射，不能用 workflow-package 做受控派工；受控派工请改用 Orca create_worker（通道 cindy:orca:<agent>）`);
+          }
+          return preToolUseDeny(`${packageDelegationDenial(task, null)}；Session task 即使补包标记也不能作为受控派工，受控派工请改用 Orca create_worker`);
+        }
+        if (item.packageMarkers.length > 1) return preToolUseDeny(`${label} 同时给出多个工作包标记（${item.packageMarkers.join('、')}）；一次委派只能关联一个包`);
+        // create_worker/create_workers 创建的就是执行 Agent，没有 initial_task 也不能免包关联；
+        // send_to_worker 没有 Agent 字段，只按 cindy:orca:<agent> 通道尾部核对准备记录。
+        if (item.entry !== 'cindy-orca-send_to_worker' && !item.agent) {
+          return preToolUseDeny(`${label} 未给出可解析的 agent，无法核对工作包的 Agent；显式指定 agent 后再派发`);
+        }
+        const pkg = item.packageMarkers[0] ? task.packages?.[item.packageMarkers[0]] : null;
+        const denial = commandDelegationDenial(task, pkg, item);
+        if (denial) return preToolUseDeny(`${label}：${denial}`);
+      }
+      return {};
+    }
+    return preToolUseDeny(taskMessage(`实施委派被拦下（${cindyCall.items[0]?.entry || name}）`));
   }
   if (COMMAND_TOOLS.has(name)) {
     const details = signalInvocationDetails(event);
@@ -745,8 +789,8 @@ export async function handleHook(directory, event, options = {}) {
         const seenVersion = session?.productVersion;
         // Herdr GUI 子会话汇报也会作为 UserPromptSubmit 进入：它仍开新回合/票据，但不是用户回答，
         // 不撤销在途包；上一回合在 waiting-user 时保留该 phase，并在入口上下文里声明来源。
-        // 其它适配器的固定开头并入同一张表（Cindy 在 W2 接入），不按自然语言猜。
-        const hostMessage = name === 'UserPromptSubmit' ? recognizeHostMessage(event.prompt, HOST_MESSAGE_PREFIXES) : null;
+        // 各适配器（Herdr GUI、Cindy）的固定开头并入同一张表，不按自然语言猜。
+        const hostMessage = name === 'UserPromptSubmit' ? recognizeHostMessage(event.prompt, HOST_MESSAGE_TABLE) : null;
         let preserveWaiting = false;
         if (name === 'UserPromptSubmit') {
           preserveWaiting = hostMessage !== null && session?.phase === 'waiting-user';
