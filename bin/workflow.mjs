@@ -43,7 +43,7 @@ const help = {
     'project align scan|status --root <目录> [--max-files N]',
     'project align apply|decide|suggest --root <目录> --input <JSON文件>（sources 增量确认来源基线）',
     'context --role lead|worker|reviewer [--project <目录>] [--session <sessionId>]',
-    'task show --task <taskId> [--project <目录>]（只读查看分流、工作包账本、变更条数与门禁缺项）',
+    'task show --task <taskId> [--project <目录>]（只读查看分流、工作包账本、变更条数、门禁缺项与预声明审查豁免）',
     'spec check [--project <目录>] [--ref <提交>]（只读检查 .spec 管辖文件是否漂移；指定 ref 时 spec 与代码均取自该提交，HEAD 仍按当前 worktree；有发现或失败时退出码 1）',
     'signal <task-start|task-update|phase|role-claim|task-end|packages|prepare> --session <id> --turn <id> --id <signalId> [--task <id>] [--goal --route --size simple|complex --size-reason "<理由>" --mode --paths a,b --paths-mode replace|append --plans a,b --channels worker=x,reviewer=y --parent | --phase --delivery | --role --package | --final-ref | --plan --sections] [--input <补充字段 JSON>]（推荐：身份由本机状态补齐；新任务须有完整准备、带理由的简单声明或 operation-only；task-update 仅该任务有效 Lead 可用，目标/范围变化时用 --input 同时给 preparation、preparationReason 与 preparationTarget；移除包用 preparationRemove）',
     'signal prepare ... --input <准备记录 JSON> [--plan <项目内计划路径>] [--sections <章节,逗号分隔>]（准备记录可在尚无业务任务时保存，不创建任务或工作包）',
@@ -102,10 +102,10 @@ async function showTask(state, root, taskId) {
   const task = state.tasks[taskKey(resolved.project.projectId, taskId)];
   if (!task) fail('TASK', '任务不存在或不属于当前项目');
   const { taskId: id, goal, parentTaskId, route = null, channels = null, size = null, sizeReason = null, preparation = null, lifecycle, packages = {}, validation = null, waivers = [], finalRef = null, changes = [], updates = [] } = task;
-  const gate = lifecycle === 'active' ? gateReport(state, task, finalRef, resolved.worktree) : { missing: [], findings: [], diagnostic: [] };
+  const gate = lifecycle === 'active' ? gateReport(state, task, finalRef, resolved.worktree) : { missing: [], findings: [], diagnostic: [], reviewWaived: [] };
   const plans = (task.plans || []).map(plan => plan.path);
   const planUnchanged = lifecycle === 'active' ? unchangedPlans(state, task, resolved.worktree) : [];
-  return { taskId: id, goal, parentTaskId, route, channels, size, sizeReason, preparation, lifecycle, packages: Object.values(packages), validation, acceptance: acceptanceSummary(task), waivers, finalRef, changes: changes.length, updates: updates.length, gateMissing: gate.missing, specFindings: gate.findings, diagnostic: gate.diagnostic || [], plans, planUnchanged, note: '门禁核对声明记录一致性，不证明审查或测试真实发生，也不证明诊断包进程实际未写' };
+  return { taskId: id, goal, parentTaskId, route, channels, size, sizeReason, preparation, lifecycle, packages: Object.values(packages), validation, acceptance: acceptanceSummary(task), waivers, finalRef, changes: changes.length, updates: updates.length, gateMissing: gate.missing, specFindings: gate.findings, diagnostic: gate.diagnostic || [], reviewWaived: gate.reviewWaived || [], plans, planUnchanged, note: '门禁核对声明记录一致性，不证明审查或测试真实发生，也不证明诊断包进程实际未写' };
 }
 // spec check 的检查根：先按本机绑定找到当前 worktree（与 hook 同一解析，--project 已在此前的 root 中生效），
 // 未接入或不在绑定时退回 Git 顶层目录；都不是 Git 目录就按给定目录检查。

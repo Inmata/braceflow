@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { readState } from '../src/store.mjs';
 import { taskKey } from '../src/protocol.mjs';
 import { cli, emit, entry, event, fixture, gitFixture, identity, legacyEmit } from './helpers.mjs';
@@ -237,4 +237,40 @@ test('Stop 在途提示：cindy 通道说明结果自动送回，只在需要时
   assert.doesNotMatch(stop.reason, /herdr agent wait/);
   assert.doesNotMatch(stop.reason, /hc wait/);
   assert.doesNotMatch(stop.reason, /get_delegation_status/);
+});
+
+// W3：task show 单独列出复杂任务预声明的审查豁免，未预声明时为空。
+async function reviewWaivedFixture({ waiver } = {}) {
+  const f = await fixture();
+  const plan = 'docs/plans/review-waived.md';
+  await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(f.project, plan), '# 审查豁免\n\nA01\n');
+  const declared = [{ packageId: 'w1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', delivers: '完整行为', dependsOn: [], ...(waiver ? { reviewWaiver: waiver } : {}) }];
+  const prepared = await emit(f, {
+    action: 'prepare',
+    preparation: {
+      size: 'complex',
+      sizeReason: '逐包审查与豁免需要准备记录声明',
+      requirements: [{ id: 'A01', summary: '完整行为', acceptance: ['定向测试通过'], packages: ['w1'], verification: 'node --test test/channels.test.mjs' }],
+      research: [{ source: '本仓 protocol.mjs', conclusion: 'task show 复用 gateReport.reviewWaived' }],
+      solution: { summary: '复杂任务逐包审查，豁免须预声明', decisions: [{ decision: '只接受准备快照中的豁免', reason: '避免开工后补挂' }] },
+      packages: declared,
+      verification: ['node --test test/channels.test.mjs'],
+      confirmation: { scope: ['需求', '分包', 'Agent'], basis: '用户确认复杂任务与豁免' },
+      pending: [], source: { path: plan },
+    },
+  });
+  assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
+  const started = await emit(f, { action: 'task-start', goal: '复杂任务审查豁免', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const dispatched = declared.map(item => ({ packageId: item.packageId, role: item.role, status: 'dispatched', agent: item.agent, channel: item.channel, scope: item.scope }));
+  assert.equal((await packages(f, dispatched)).result.accepted, true);
+  return f;
+}
+const showTaskResult = f => JSON.parse(cli(['task', 'show', '--task', f.taskId, '--project', f.project, '--state-dir', f.directory]).stdout);
+
+test('task show：复杂 delegated 预声明的 reviewWaiver 单独列出，未预声明时列表为空', async () => {
+  const waiver = { reason: '用户同意先交付，后续单独安排审查', consent: '用户 2026-11-02 明确同意' };
+  assert.deepEqual(showTaskResult(await reviewWaivedFixture({ waiver })).reviewWaived, ['w1']);
+  assert.deepEqual(showTaskResult(await reviewWaivedFixture()).reviewWaived, []);
 });
