@@ -568,11 +568,11 @@ Worker 与 Reviewer（drift-sim）：Codex Worker 包 w-mul 增加 `mul` 和测�
 | A16 | 中断后接续 | 已验证 | `test/signal.test.mjs`、`test/gate.test.mjs` 的 suspended/接续与 `task-start` 保留原目标；未做真实宿主长会话恢复 | 真实中断会话恢复按 `docs/adapters` 步骤复核；Lead |
 | A17 | 交付新分包并请用户选 Agent | 人工待验 | 计划、Lead 入口和 Stop 提示要求先说明顺序再逐包选择；尚未用真实新分包观察用户是否被正确询问 | 下一个真实分包时记录询问顺序；Lead |
 | A18 | 不使用 Codeg，通过已有原生入口工作 | 已验证 | `docs/acceptance.md` 10.7/10.8 真实 Claude Code 路径；`test/adapters.test.mjs` 与 hooks 测试；公共提示不要求 Codeg | 无；Codeg 不是使用前提 |
-| A19 | 用户想换一种管理 Agent 的软件 | 人工待验 | 现有原生入口已由 `docs/acceptance.md` 10.7/10.8 真实验证；独立本机状态、换会话资料复用和同一计划重建安排由 `test/preparation.test.mjs`、`test/r2-regressions.test.mjs` 与 hooks/adapters 测试覆盖；本轮尚未在真实换用另一套管理软件后的项目里走一次完整短任务。Herdr 本体安装、配置、专用接入和实测明确不在本轮范围，但不等于整项 A19 延期 | 换用另一种原生入口或新会话，按同一计划重建准备并完成一次真实短任务，记录资料复用与未覆盖项；Herdr 另列接入任务；Lead |
+| A19 | 用户想换一种管理 Agent 的软件 | 人工待验 | 现有原生入口已由 `docs/acceptance.md` 10.7/10.8 真实验证；独立本机状态、换会话资料复用和同一计划重建安排由 `test/preparation.test.mjs`、`test/r2-regressions.test.mjs` 与 hooks/adapters 测试覆盖。本轮已实现 Herdr TUI/GUI 与 Cindy 专用适配（第 13 节），合成测试覆盖委派核对、宿主消息与等待说明；尚未在真实换用后的项目里走一次完整短任务 | 按第 13.3 节 M1–M4 在真实软件中验收；再换用另一种原生入口或新会话，按同一计划重建准备并完成一次真实短任务，记录资料复用与未覆盖项；Lead/用户 |
 | A20 | 整理公共流程与 Codeg 接入后原有能力仍可用 | 受阻 | `src/adapters/codeg.mjs` 提取与合成测试通过；真实 Codeg ACP 未运行，无法证明派工、提问、等待和结果提示实际可用 | 在 Codeg 实际环境回归派工/提问/等待/role-claim；Lead |
-| A21 | 软件显示空闲或恢复了会话 | 人工待验 | 程序不把宿主空闲/恢复自动记为审查通过或授权续跑；尚无真实管理软件观察记录 | 在 Codeg/Herdr 实际入口观察一次空闲与恢复；Lead |
+| A21 | 软件显示空闲或恢复了会话 | 人工待验 | 程序不把宿主空闲/恢复自动记为审查通过或授权续跑；尚无真实管理软件观察记录。本轮新增的 Herdr/Cindy 适配只处理委派命令、宿主消息与等待说明，不改变该判定 | 在 Codeg/Herdr/Cindy 实际入口观察一次空闲与恢复；Lead |
 
-**本节边界：** A01–A21 的分类只反映 2026-11-01 的实际证据。`已验证` 中的自动化项可复跑对应 `node --test` 文件；真实宿主项以 `docs/acceptance.md` 10.7/10.8 为限。A08 的资料恢复行为已由独立状态目录测试验证，真实换机仅为可选补充，不是交付前提。A01、A02、A04、A05、A09、A14、A15、A17、A19、A21 仍需真实短任务、真实 UI 操作或真实软件观察，不能用程序测试替代。A19 只把 Herdr 本体安装、配置、专用接入和实测列为范围外，不把整项 A19 延期；其原生入口与独立状态资料复用已有 10.7/10.8 和准备/接续测试覆盖，真实换软件复用仍按人工待验记录。其他事项没有据此自动延期。A20 的真实 Codeg ACP 未运行，不把合成测试写成已通过。
+**本节边界：** A01–A21 的分类只反映 2026-11-01 的实际证据（A19、A21 的说明按 2026-11-02 第 13 节补充，状态不变）。`已验证` 中的自动化项可复跑对应 `node --test` 文件；真实宿主项以 `docs/acceptance.md` 10.7/10.8 为限。A08 的资料恢复行为已由独立状态目录测试验证，真实换机仅为可选补充，不是交付前提。A01、A02、A04、A05、A09、A14、A15、A17、A19、A21 仍需真实短任务、真实 UI 操作或真实软件观察，不能用程序测试替代。A19 的 Herdr/Cindy 专用接入已由第 13 节的合成测试覆盖，真实软件实测仍按 13.3 节人工待验；其原生入口与独立状态资料复用已有 10.7/10.8 和准备/接续测试覆盖，真实换软件复用仍按人工待验记录。其他事项没有据此自动延期。A20 的真实 Codeg ACP 未运行，不把合成测试写成已通过。
 
 ## 12. Lead 最终集成记录（2026-11-01）
 
@@ -605,3 +605,51 @@ W1/R1、W2/R2、W3/R3 均完成独立审查并 PASS；W3 提交为 `855901f`。R
 - 接续验收范围：旧标题、首次试点链接和 A08 把资料可恢复扩大为必须真实换机验收，超出了用户要求和现有恢复测试的判定范围；现改为中性验收入口，A08 按独立状态目录的实际恢复证据记为已验证，真实换机仅作可选补充。
 
 详细历史位置见计划第 7 节各包的冲突表。真实 MCP、NotebookEdit、文件符号链接、Codex/Codeg ACP 及第 11 节人工待验/受阻项保留；此次集成通过不替代这些场景的真实验收。
+
+## 13. Herdr 与 Cindy 适配验收（2026-11-02）
+
+本轮为 Herdr TUI/GUI 与 Cindy 补齐与 Codeg 同级的软件适配，并让安装器支持 Codex 的显式附加配置目录。代码基线为 `fc044cb`（W1 `961765f`、W3b `640b155`、W2 `fc044cb`），三包分别经 R1、R2、R3b 独立只读审查 PASS。计划与逐包安排见 `docs/plans/2026-11-02-01-herdr-cindy-adapters.md`；本节只记录集成后的实际验证结果与未验边界。
+
+| 需求 | 状态 | 实际证据 | 未覆盖 / 下一步 |
+| --- | --- | --- | --- |
+| H1 Herdr TUI 委派受工作包核对 | 已验证（合成） | `test/adapters.test.mjs`、`test/hooks.test.mjs`：未开工的 `herdr agent prompt` 被拒；开工后缺包标记、包未 `dispatched`、通道或 Agent 不符被拒，正确时放行；复合命令提示改单条调用 | 真实 TUI pane 派发仍需人工 M1；门禁是提醒式识别，不是沙箱 |
+| H2 Herdr GUI（`hc`）委派受工作包核对 | 已验证（合成） | 同一批测试覆盖 `hc run --bg <agent>`、`hc send`、模板必须精确通道 `hc:template:<name>`、纯启动只做未开工拦截 | 真实 GUI 的 hooks 触发与回报文本仍需人工 M2 |
+| H3 `hc` 子会话汇报不被当作用户回合 | 已验证（合成） | `test/hooks.test.mjs`：`<hc from="…">` 仍开新回合和新票据，但保留 `waiting-user` 与在途包，入口注明来源 | 真实 `<hc from=…>` 文本格式待 M2 确认 |
+| H4 在途包按通道给出正确等待方法 | 已验证（合成） | `test/channels.test.mjs`：`herdr:` 要求同回合阻塞等待，`hc:` 可结束回合或 `hc wait`，`cindy:` 自动回送不轮询，混合通道逐一列出 | 无 |
+| C1 Cindy Orca 派工受核对、Session task 受控派工被拒 | 已验证（合成） | `test/adapters.test.mjs`、`test/hooks.test.mjs`：`create_worker`/`create_workers`/`send_to_worker` 按包核对；`create_workers` 任一项不合规整体拒绝；Session task 带包标记被拒并提示改用 Orca | Orca 回报原文格式未知，未猜；`code_mode_only` 下嵌套 MCP 是否被 `PreToolUse` 观察仍未验（M3） |
+| C2 Cindy 提问工具与宿主消息正确识别 | 已验证（合成） | 同上：`mcp__cindy_helper__ask_user_question_async` 记 `waiting-user`；`[Task delivery] Host bookkeeping` 保留 `waiting-user`，普通输入不识别 | 真实 Cindy 会话待 M3 |
+| C3 Cindy 的 Codex 能装上并检出 workflow hooks | 已验证（合成） | `test/install.test.mjs` 26/26、`test/onboard.test.mjs` 20/20：附加目录与默认目录分别安装、互不覆盖；只有附加位置时 `doctor` 报默认未装并列出位置，`onboard` 不报未安装 | 真实 `%APPDATA%\Cindy\codex-home` 的安装与重建后保留待人工 M4 |
+
+### 13.1 全量 `npm run verify`（2026-11-02T07:15:23Z）
+
+实际结果：**总体失败（退出码 1）**，未运行项为无。原始输出在 `<localAppData>\workflow-verify\workflow-herdr-cindy\2026-11-02T07-15-23-041Z\`。
+
+| 检查 | 结果 | 说明 |
+| --- | --- | --- |
+| check | 失败 | 60 个语法文件、37 份文档、256 个本地链接；3 个错误均为发布副本缺少链接目标：`docs/adapters/cindy.md → CLAUDE.md`、`docs/adapters/herdr.md → CLAUDE.md`、`docs/adapters/herdr.md → ../plans/2026-11-02-01-herdr-cindy-adapters.md` |
+| test | 失败 | tests 453、pass 445、fail 5、skipped 3、约 359 秒 |
+| demo | 失败 | `examples/demo.mjs:52`：`uninstall --agent codex` 实际返回 `not-installed`，期望 `uninstalled` |
+
+文档同步完成后单独复跑 `npm run check`：仍为上述同样 3 个发布链接错误，没有因本次 spec、验收文档和计划索引同步新增链接错误。
+
+失败用例与单独复跑：
+
+- `test/hooks.test.mjs` 的 `F05 spec 慢 Git 在状态锁外预检：竞争会话不被阻塞，Hook 仍返回回执`、`F05 预检期间正常并发改动受管文件：task-end 按过期拒绝，锁内不重跑慢 Git`、`F05 预检期间正常并发改动受管文件：Stop 明确无法确认，不报门禁无缺项`：全量运行中 3 条均因 `spec-check:git`（Git 预算耗尽）失败。单独以 `--test-name-pattern="F05"` 复跑 5/5 通过，判断为全量并发负载下的时序波动，与已知 F05 偶发一致；未修改代码。
+- `test/install.test.mjs` 的 `V14 双宿主 prepared 恢复保留原 current，其他宿主不得接管在途共享入口`、`V14 current 断链/错链只做最小修复，完好重复安装不改配置`：全量运行中分别出现 current 指向不同发布快照（`installed` vs `repaired`）的差异。单独复跑 `test/install.test.mjs` 26/26 通过，未复现。运行期间工作区被本包之外的写入改动：`examples/pelican-beach-bike.html`（15:21:03）和 `examples/pelican-seaside-ride.html`（15:26:14）先后出现，而 `examples` 属于发布文件路径，会改变安装器按内容计算的发布快照；`check` 在验证开始时计 57 个发布文件、文档同步后计 59 个，与两文件新增吻合。两条失败的时间与发布快照被并发改写吻合，判断为运行期间工作区被外部改动，不是本轮代码回归；未删除或修改这些外部文件。后续全量验证应在工作区静默时重跑确认。
+- demo 的 `not-installed` 可稳定复现。原因：demo 以显式临时 `--user-dir <area>/.codex` 安装，按本轮安装语义该位置是非默认的附加位置；而无参数 `uninstall` 只处理默认位置，因此返回 `not-installed`。修复需改 `examples/demo.mjs`（卸载时带同一 `--user-dir`，或在 demo 内把临时目录声明为默认位置），属于代码/样例改动，不在本轮文档包范围，未修改。
+
+### 13.2 文档与代码冲突（如实保留）
+
+- `docs/adapters/herdr.md`、`docs/adapters/cindy.md` 的“Claude Code 适配”链接指向 `CLAUDE.md`，发布副本中不存在该目标；正确目标应为 `claude.md`（与 `docs/adapters/claude.md` 的实际文件名一致）。`docs/adapters/herdr.md` 另链到 `../plans/2026-11-02-01-herdr-cindy-adapters.md`，而计划目录不在发布文件清单中。三处导致 `check` 失败；文件不在 W4 允许范围，未修改。
+- 上述 check 失败与 demo 失败都不是本轮文档同步引入，但会使整次 `verify` 保持失败；需在后续代码/文档修复中处理。
+
+### 13.3 人工验收（待用户执行）
+
+| ID | 场景 | 状态 | 步骤 |
+| --- | --- | --- | --- |
+| M1 | Herdr TUI 真实门禁 | 人工待验 | 在 Herdr TUI 新开本仓会话，确认 workflow 入口；按计划第 6 节 M1 验证未开工拒绝、带包标记放行、去掉标记拒绝 |
+| M2 | Herdr GUI（`hc`）拉活与回报 | 人工待验 | 在 herdr-app 新会话确认入口；登记 `hc:claude` 包后 `hc run --bg` 放行；子会话回报后确认 `<hc from=…>` 不覆盖 `waiting-user` |
+| M3 | Cindy · Claude | 人工待验 | 确认入口；未开工 Session task 被拒；开工后带标记被拒并提示 Orca；Orca `create_worker` 放行；记录回报原文开头 |
+| M4 | Cindy · Codex | 人工待验 | 对 `%APPDATA%\Cindy\codex-home` 执行 install/doctor；新会话确认入口；重启与切换账号后确认 hooks.json 未被覆盖 |
+
+**本节边界：** 上表“已验证（合成）”只证明对合成 hook 输入的解析与包核对逻辑，不证明真实软件每次调用都会触发 hook，也不证明目标会话实际运行的 Agent。Herdr GUI 的 hooks 触发、Cindy 的 hooks 注册与 `code_mode_only` 嵌套调用、Session task/Orca 回报文本仍以人工 M1–M4 为准。`npm run verify` 的失败项与复跑结果按实际记录保留，未把局部复跑通过写成全量通过。

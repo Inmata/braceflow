@@ -13,5 +13,6 @@
 | `version-080-benchmark.json` | [2026-10-30-01-version-080-benchmark.json](2026-10-30-01-version-080-benchmark.json) |
 | `session-learning-implementation.md` | [2026-10-30-02-session-learning-implementation.md](2026-10-30-02-session-learning-implementation.md) |
 | `preparation-and-delivery.md` | [2026-11-01-01-preparation-and-delivery.md](2026-11-01-01-preparation-and-delivery.md) |
+| `plan.md` | [2026-11-02-01-herdr-cindy-adapters.md](2026-11-02-01-herdr-cindy-adapters.md) |
 
 已有任务或准备记录可能保存了旧路径；本次重命名不会自动迁移这些记录。继续使用时，请根据实际任务核对计划来源与关联路径，必要时重新绑定。准备记录的使用方式见[准备与接续](../references/preparation.md)。

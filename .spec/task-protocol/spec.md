@@ -16,6 +16,9 @@ related:
 ## 目标
 
 - 新任务必须显式声明合法的 `route`（`operation-only`、`lead-direct`、`delegated`）；漏填或值非法返回 `ROUTE`，不建立任务。三种分流的原有契约不变：`operation-only` 跳过 spec 与 delegated 门禁；`lead-direct` 做 spec 检查，复杂 `lead-direct`（有准备需求且非只读、非简单）还要按需求 ID 核对 `validation` 与验收矩阵；`delegated` 另核对包终态与审查。`route` 只决定门禁与检查范围，不是任务复杂度认证；用户明确要求 Worker/Reviewer 时，Lead 不得借 `operation-only` 或 `lead-direct` 消除已要求的分工。用户指定 `channels` 后，工作包通道偏离（含漏填，或 delegated 的 worker 包由 Lead 实施）必须在同一 `packages` 信号用 `change.packages` 记录并先取得用户同意，否则返回 `CHANNEL`；不能先声明错误通道再以实际执行与声明一致为由通过。
+- 委派核对覆盖宿主工具与软件命令两条路径：宿主工具按工具名（含 Codeg 与 Cindy Orca）；Herdr TUI（`herdr agent start/prompt`）和 Herdr GUI（`hc run --bg`/`hc send`）从 `Bash`/`PowerShell` 的单条直接调用解析；Cindy Session task 从 `mcp__cindy_helper__call_tool` 的 `name` 字段解析。通道前缀分别为 `herdr:`、`hc:`、`cindy:orca:<agent>`。未开工时拒绝实施委派；开工后要求任务文本首行 `workflow-package:<id>`（或结构化 `packageId`），并核对包已登记且为 `dispatched`、依赖已终态、通道前缀、通道尾部 Agent 与准备记录中的 Agent 一致。命令中出现委派子命令但不是单条直接调用（含 `&&`、`;`、管道、变量赋值或子 shell）时拒绝并提示改为单条调用，不解析复合 shell。`herdr agent start` 和不带任务的 `hc run --bg` 是纯启动，只做未开工拦截；`herdr agent prompt`、`hc send` 和 Orca `send_to_worker` 没有 Agent 来源，只能按通道尾部核对；`hc run` 的模板名不能映射 Agent，必须以 `hc:template:<name>` 精确匹配；`hc send` 无包标记时可能是子会话回报，开工后不按派工核对。Session task 没有可靠 Agent 映射，不作为受控派工通道：带包标记或开工后的实施调用被拒绝并提示改用 Orca。`create_workers` 逐项核对，任一项不合规即整体拒绝并指出该项。只读命令（`agent list/get/read/wait`、`hc ls/get/read/wait`、`check_session_task` 等）和 Orca 团队管理动作不拦。
+- 宿主注入的子会话或宿主消息按去掉前导空白后的固定开头识别（Herdr GUI 的 `<hc from="`、Cindy 的 `[Task delivery] Host bookkeeping` 等），不按自然语言猜来源：仍开新回合和新票据，但上一回合为 `waiting-user` 时保留该 phase，不撤销在途包，并在入口上下文注明这不是用户指令、核对实际交付后再记 `consumed`。未取得实测文本的回报格式不猜、不加入识别表。Cindy 的 `mcp__cindy_helper__ask_user_question_async` 与宿主原生提问工具一样在调用后记 `waiting-user`。
+- `Stop` 的在途包等待说明按实际通道给出：Herdr TUI 不会唤醒父会话，要求同一回合用 `herdr agent wait` 或 `herdr agent prompt … --wait` 阻塞等待，超时先查状态再决定；Herdr GUI 的 `<hc from=…>` 会唤醒本会话，可以结束回合等汇报或 `hc wait --children any` 阻塞等待，超时只是 check-in；Cindy 结果自动送回，不轮询，只在用户问进度或疑似丢失时查一次 `check_session_task`；Codeg、内置子代理与未知通道保留原说明。同一批包通道混合时逐通道列出，不把“非 builtin”一概当成 Codeg。
 - 历史任务按任务记录自身识别：记录不存在即新任务；记录存在但没有 `route` 字段时视为旧版本任务，允许续接，可在续接时补声明一次，声明后不可更改。不引入迁移字段，也不改写历史数据。
 - `prepare` 在尚无活动任务时保存会话级准备记录（需求、调研、方案、分包、逐包 `role`/`agent`/`channel`/`scope`、验证、确认与来源），不创建任务或账本。复杂任务 `task-start` 必须绑定无缺项记录，并把 `size`、来源摘要、需求和逐包选择固定到 `task.preparation`；简单任务要求非空理由，`operation-only` 保持轻量路径。`packages` 按包 ID 核对准备快照；已开工任务用 `task-update` 的 `preparation`+`preparationReason` 更新，按包 ID 与需求 ID 合并，未列出的旧内容保留，无意义顺序不构成实际变化。
 - `task-start` 接续保留原 `goal` 与 `permissions`；新任务缺 `goal`、`permissions` 或 `route` 时回执点名缺项。
@@ -29,6 +32,8 @@ related:
 - `route` 原先只是可选字段，新任务漏填会静默跳过 delegated 门禁，直到 `task-end` 才得到 `route-missing` 警告，门禁已经被绕过。
 - 新旧任务不需要额外迁移：新任务的 taskId 在状态里没有记录，历史任务则有记录；以记录缺失与 `route` 字段缺失区分两种情况，既不改历史数据也不新增 schema 字段。
 - 只在 CLI 便捷参数层校验不足以覆盖 `signal --input` 的完整 payload；协议是唯一校验点，避免两条入口行为不一致。
+- 旧实现只按工具名识别委派：Herdr 经 shell 命令派发、Cindy 经 MCP 间接调用，都能绕过工作包核对；Cindy 和 hc 的宿主注入文本还会被当成用户新回合，重置 `phase` 并丢失 `waiting-user`。
+- 等待说明若只区分 Codeg 与内置子代理，会把不会唤醒父会话的 Herdr TUI 和自动回送结果的 Cindy 说成同一类，导致错误轮询或提前结束回合。
 - 只看当前 reviewer 状态判断 PASS，会被同一批或后续信号的 verdict 改写洗掉；重复 `packageId` 又让批前预校验看不到批内前项。因此把曾 PASS 落成单调事实，并用“一批一包”的显式规则保证 `diagnostic` 只能在首次创建时声明。
 - `wasReviewed` 只看当前 reviewer、取消预校验只看批前已有包，同样会漏掉历史事实：换审查对象后再改 `waived`、或同批新建 `canceled` 包并补一条指向它的 PASS，都能绕开“已审包不能放弃审查”的约束。因此把批前当前结论、本批合并后的最终结论与单调 `reviewPasses` 合成同一份审查事实，统一沿 `supersedes` 链遍历；同一批内改指不会立即洗掉批前 FIX/BLOCKED，取消仍只按其中的 PASS 事实。
 
@@ -53,6 +58,9 @@ related:
 - 慢 Git 预检期间其他会话能用短预算取得状态锁；4 秒是当次预检内 Git 调用共享的截止预算，卡住的 Git 只使用剩余预算并在耗尽后停止发起新调用，但同步文件读取无法强制中断，锁内复核另有独立预算，整个回执的总时长不在该保证内，也不承诺在宿主 10 秒回执窗口内返回；root、ref、任务或会话快照变化时列出 `spec-check:stale`，不复用旧结果。干净预检后受管代码被改动、HEAD 或分支等可移动 ref 移动、会话/任务快照变化或索引快照被改写时，旧报告同样作废；`spec-check:stale` 不接受 `spec`、`spec:<id>`、`spec-check` 或完整条目的豁免。锁内复核只做一次有界 ref 解析与文件快照比对，不新增 status/log/rev-list 调用。
 - Stop 在预检过期或检查失败时不报“门禁无缺项”，而是明确列出 `spec 检查无法确认（spec-check:<原因>）` 并提示重试；其余缺项照常列出。
 - Stop 检查当前 worktree 的 HEAD，task-end 使用显式 `finalRef`；非 Git 且没有 `.spec` 的项目仍按 `no-spec` 跳过。
+- 合成 hook 输入下：未开工的 `herdr agent prompt`、`hc run --bg <agent> "<任务>"`、Cindy Orca `create_worker` 和 Session task 实施委派被拒；开工后缺包标记、包未 `dispatched`、通道前缀或 Agent 不符被拒，正确时放行；`create_workers` 任一项不合规整体拒绝并指出该项；复合命令被拒绝并提示单条调用；纯启动只做未开工拦截；`hc send` 无包标记放行；Session task 带包标记被拒并提示改用 Orca。
+- 以 `<hc from="` 或 `[Task delivery] Host bookkeeping` 开头的输入仍开新回合和新票据，但保留 `waiting-user` 与在途包；普通输入和原生通知不按宿主消息识别。Cindy 异步提问工具调用后记 `waiting-user`。
+- 在途 `herdr:`、`hc:`、`cindy:` 包分别得到阻塞等待、可结束回合或自动回送的说明；混合通道逐一列出各自方式。
 - 既有协议、门禁、信号、hooks 测试保持通过，状态文件 schema 版本不变。
 
 ## 边界
@@ -64,3 +72,5 @@ related:
 - 回执消费是宿主/模型行为边界：插件只保证拒绝原因可见、未落盘失败可安全幂等重发，不能保证模型一定阅读回执，也不自动猜测或重放失败信号。
 - 校验只放在协议层，不在 `signal.mjs` 复制一套规则；接收仍只认 PostToolUse 中可核对的直接调用。不覆盖宿主权限真实性的证明，也不代替用户授权；spec 的 Git 调用与预算留在 `src/spec.mjs`，协议只消费生产 Hook 预检的内部结果。`binding` 只随当次预检在内存中传递，不写状态、不做持久缓存；锁内复核的重解析上限独立于 4 秒预检预算，超时按过期处理。
 - 4 秒总预算与 10 秒单次上限只约束 Git 子进程；同步文件读取不检查也无法中断截止时间，其耗时仍会消耗绝对剩余量、缩短后续 Git 可用时间，因此 4 秒不保证整次预检或 Hook 的总时长；宿主自身超时和真实超大仓库的耗时同样不做承诺。不为慢检查新增调度器、持久缓存或 schema 字段。
+- 命令型委派只识别 `Bash`/`PowerShell`/`pwsh`/`exec_command` 中的单条直接调用；脚本、别名、函数或包装命令可绕过，这是提醒式门禁，不是沙箱。Agent 核对使用通道尾部/程序名与准备记录做词级匹配，不能证明目标会话实际运行的 Agent；Orca 的 `model` 只记录、不参与核对。
+- 宿主消息识别只按固定开头；实测未取得的 Session task/Orca 回报格式不猜、不识别。Herdr GUI 的 hooks 触发、`<hc from=…>` 的真实文本，以及 Cindy 的 hooks 注册与 code mode 嵌套调用是否被 `PreToolUse` 观察，仍须真实软件验收；合成测试只证明解析与包核对逻辑。
