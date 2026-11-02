@@ -43,7 +43,7 @@
 - 完成后的可验证行为，不只写改了哪些文件；
 - 依赖的包，以及可以并行和必须串行的关系；
 - 用户选定的 Agent 和实际调用通道 `channel`；
-- 实施包可选的 `reviewWaiver: { reason, consent }`：只在准备阶段经用户同意时声明，仅限 `worker` 包，两字段都须为非空字符串；同一包不得同时声明 `diagnostic`，也不能已有审查历史。复杂 `delegated` 任务收尾只认这份预声明，收尾临时 waiver 和未预声明包的 `waived` 都不生效；
+- 实施包可选的 `reviewWaiver: { reason, consent }`：可在准备阶段或符合条件的 `task-update` 中经用户同意预声明，仅限 `worker` 包，两字段都须为非空字符串；同一包不得同时声明 `diagnostic`，补挂时也不能已有审查历史。复杂 `delegated` 任务收尾只认这份预声明，收尾临时 waiver 和未预声明包的 `waived` 都不生效；
 - 指定验证入口（可写在包上，也可放在统一的 `verification` 列表）；无法自动验证的人工步骤单独列出。
 
 每条需求还要有稳定 `id`、负责实施包 `packages[]` 和检查入口 `verification`。负责包只能引用已登记且角色为 `worker` 的包；审查包不交付需求。需求没有负责包或检查入口时，准备回执按需求 ID 返回 `requirement:<id>:packages`、`requirement:<id>:verification`，不能借“所有包都 PASS”代替整项需求已覆盖。收集最终证据属于收尾的交付声明，不在准备阶段伪造。
@@ -94,7 +94,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 
 `channel` 填实际调用通道，格式沿用现有协议：`builtin:<宿主内置类型>`（如 `builtin:agent`）、`codeg:<agent_type>`（如 `codeg:claude_code`）或 `lead`（Lead 自己实施）。示例中的值只表示本次工具选择，不是固定默认；不使用 Codeg 时按当前入口填写，不要求安装 Codeg。用户只指定 Agent 而工具通道唯一时由 Lead 按可用工具填写。
 
-需要免列独立审查的实施包，可在准备阶段经用户同意后补 `reviewWaiver`，例如 `"reviewWaiver": { "reason": "只改文档链接，已有逐链接核对", "consent": "用户 2026-11-02 明确同意免独立审查" }`。审查包不能携带，同一包也不能同时声明 `diagnostic` 或已有审查历史。
+需要免列独立审查的实施包，可在准备阶段或符合条件的 `task-update` 中经用户同意后补 `reviewWaiver`，例如 `"reviewWaiver": { "reason": "只改文档链接，已有逐链接核对", "consent": "用户 2026-11-02 明确同意免独立审查" }`。审查包不能携带，同一包也不能同时声明 `diagnostic`；补挂时该包还不能已有审查历史，已被实际送审则预声明失效。
 
 回执会保存规范化的准备记录，并返回：
 
@@ -143,7 +143,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 - 人工待验、受阻和经用户同意延期可以如实阶段结束；回执返回各状态数量和剩余项，`allVerified` 为 `false`，不能宣称全部验收通过。适用矩阵时 `validation` 与 `acceptance*` 缺项不能用 waiver 抵扣。
 - 验收证据绑定 `validation.ref`，该值必须等于最终交付版本。最终版本改变后旧证据不沿用，要重新提交 `validation`；需求内容或负责包变化时，对应 ID 的旧验收声明失效，未变化条目和原顺序保留；审查版本仍按现有 `deliveredRef`/`reviewedRef` 门禁核对。
 - 准备更新按需求 ID 合并后，仍按最终快照核对负责 worker 包与包依赖；保留需求指向已移除包时拒绝并点名，同批迁到现存包才接受。
-- 复杂 `delegated`（`task.preparation.size === 'complex'`）的 `review` / `review:<id>` 不能用 `task-end` 临时 `waivers` 抵扣；未在准备快照预声明 `reviewWaiver` 的实施包标 `waived` 返回 `PACKAGE`。只有准备阶段经用户同意、两字段非空、未与 `diagnostic` 同包且未被送审推翻的预声明才免列对应 `review:<id>`，结果在 `gateReport.reviewWaived` 和 `task show` 单独列出；无 `preparation` 的历史任务保持原兼容。
+- 复杂 `delegated`（`task.preparation.size === 'complex'`）的 `review` / `review:<id>` 不能用 `task-end` 临时 `waivers` 抵扣；未在准备快照预声明 `reviewWaiver` 的实施包标 `waived` 返回 `PACKAGE`。只有准备阶段或符合条件的 `task-update` 中经用户同意、仅限 `worker` 包、两字段非空、未与 `diagnostic` 同包、补挂时无审查历史且未被送审推翻的预声明才免列对应 `review:<id>`，结果在 `gateReport.reviewWaived` 和 `task show` 单独列出；无 `preparation` 的历史任务保持原兼容。
 - 回执和 `task show` 只汇总声明记录；`verified` 的证据内容、用户实际操作和延期同意仍由 Lead 与 Reviewer 核对。简单任务、`operation-only`、`read-only` 和没有 route 的历史任务不要求这套矩阵。
 
 ## 按已有计划接续
