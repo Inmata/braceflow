@@ -193,3 +193,35 @@ test('内置子代理调用 signal：回执说明没有身份，状态不变；�
   assert.deepEqual(await event(f, 'PostToolUse', { ...sub, tool_input: { command: 'npm test' } }), {});
   assert.equal(await readFile(file, 'utf8'), before);
 });
+
+// W1：在途包的等待方式按实际通道给出，不把“非 builtin”一概当成 Codeg。
+test('Stop 在途提示按通道区分：herdr 要求同回合阻塞等待，hc 说明会唤醒本会话，混合通道逐一列出', async () => {
+  const herdrOnly = await fixture();
+  await legacyDelegated(herdrOnly);
+  await packages(herdrOnly, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'w1:p9', channel: 'herdr:claude' }]);
+  const herdrStop = await event(herdrOnly, 'Stop');
+  assert.match(herdrStop.reason, /herdr agent wait/);
+  assert.match(herdrStop.reason, /不盲目重发/);
+  assert.doesNotMatch(herdrStop.reason, /get_delegation_status/);
+  assert.doesNotMatch(herdrStop.reason, /hc wait/);
+
+  const hcOnly = await fixture();
+  await legacyDelegated(hcOnly);
+  await packages(hcOnly, [{ packageId: 'w1', role: 'worker', status: 'dispatched', handle: 't7', channel: 'hc:claude' }]);
+  const hcStop = await event(hcOnly, 'Stop');
+  assert.match(hcStop.reason, /hc wait --children any/);
+  assert.match(hcStop.reason, /<hc from=/);
+  assert.doesNotMatch(hcStop.reason, /herdr agent wait/);
+
+  const mixed = await fixture();
+  await legacyDelegated(mixed);
+  await packages(mixed, [
+    { packageId: 'w1', role: 'worker', status: 'dispatched', handle: 'a', channel: 'codeg:codex' },
+    { packageId: 'w2', role: 'worker', status: 'dispatched', handle: 'b', channel: 'herdr:claude' },
+    { packageId: 'w3', role: 'worker', status: 'dispatched', handle: 'c', channel: 'hc:claude' },
+  ]);
+  const mixedStop = await event(mixed, 'Stop');
+  assert.match(mixedStop.reason, /get_delegation_status/);
+  assert.match(mixedStop.reason, /herdr agent wait/);
+  assert.match(mixedStop.reason, /hc wait --children any/);
+});

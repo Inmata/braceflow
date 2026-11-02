@@ -4,6 +4,7 @@ import { deferredLifecycleEvents, digest, fail, id, lifecycleEvents, lifecycleSc
 import { checkSpecs, describeFindings, verifySpecBinding } from './spec.mjs';
 import { mergePreparationSnapshot, normalizePreparation, preparationConsistencyGaps, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath } from './preparation.mjs';
 import { isCodegChannel, codegWaitInstruction } from './adapters/codeg.mjs';
+import { isHcChannel, isHerdrChannel, hcWaitInstruction, herdrWaitInstruction } from './adapters/herdr.mjs';
 
 export const PHASES = ['unknown', 'operation-only', 'executing', 'waiting-user', 'delivering'];
 export const ROUTES = ['operation-only', 'lead-direct', 'delegated'];
@@ -1182,6 +1183,31 @@ function planDeliveryReason(task) {
   const channelNote = 'task-start 的 channels 只能按角色各记一个；同一角色各包通道不同时省略该角色键或整项不带 channels，以准备记录的逐包 channel 和 packages 的实际 channel 为准。开工时会固定准备记录，packages 按包 ID 核对 role、agent、channel、scope；新增、拆分或重新分包需先请用户确认并更新 prepare 记录。已声明角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施时，仍按原规则要求 change。';
   return `workflow 计划交付核对：本回合已进入计划交付但尚未向用户提问确认。若本回合在交付完整实施计划，请列出建议分流与工作包划分（分几个包、每包范围与依赖，或说明免拆包理由），并说明执行顺序与串并行关系。只交付纯技术方案时，按用户给定范围停在方案，不要求分包或逐包选择。${existing}${ask}${channelNote}并在计划末尾写明 spec 影响（无影响写“无”）；结构化提问工具会自动记 waiting-user，文本提问先发 signal phase --phase waiting-user。若本回合只是回答讨论而非交付计划，直接回复即可（本回合不再重复阻挡）。`;
 }
+// W2 接入 Cindy 后按实际通道行为完善；当前先占位：结果自动送回，不轮询。
+function cindyWaitInstruction() {
+  return 'Cindy 子代理结果会自动送回本会话：不需要轮询，结束回合等结果即可；结果回来后按交付核对。';
+}
+// 按在途包的通道给出等待方式；混合通道逐一说明，内置子代理单独补一句“宿主会通知”。
+// 不能把“非 builtin”一概当成 Codeg：Herdr TUI 不会唤醒父会话，hc 会唤醒，两者等待方式相反。
+function inflightWaitInstruction(inflight) {
+  const channels = inflight.map(([, item]) => item.channel);
+  const hasBuiltin = channels.some(channel => channel?.startsWith('builtin:'));
+  const groups = [];
+  if (channels.some(channel => isCodegChannel(channel))) groups.push(['Codeg', codegWaitInstruction()]);
+  if (channels.some(channel => isHerdrChannel(channel))) groups.push(['Herdr TUI', herdrWaitInstruction()]);
+  if (channels.some(channel => isHcChannel(channel))) groups.push(['Herdr GUI（hc）', hcWaitInstruction()]);
+  if (channels.some(channel => channel?.startsWith('cindy:'))) groups.push(['Cindy', cindyWaitInstruction()]);
+  const builtinNote = '内置子代理包结束时宿主会通知本会话。';
+  if (!groups.length) {
+    return hasBuiltin
+      ? '这些包由宿主内置子代理执行，结束时宿主会通知本会话：向用户说明在等哪些包、结果回来后做什么，再结束回合。'
+      : '按当前通道实际支持的方式等待结果；如果该入口不会在子任务结束时通知本会话，结束回合就收不到结果。二选一：用该通道支持的阻塞等待/查询方式等到终态，或者向用户说明在等哪些包、为什么暂停、结果回来后由谁接续。';
+  }
+  const detail = groups.length === 1
+    ? groups[0][1]
+    : groups.map(([label, text]) => `其中 ${label} 包按该通道方式等待：${text}`).join(' ');
+  return detail + (hasBuiltin ? builtinNote : '');
+}
 // 回合结束核对：Lead 没发 task-end 就收尾时，按门禁算一次缺项并挡下一轮。只读任务状态，只在 session 上记“本回合已挡”。
 // 经验采集独立于业务交付；Stop 从不启动复盘或要求补写经验。
 export function stop(state, project, session, event = {}, { root, spec } = {}) {
@@ -1203,18 +1229,8 @@ export function stop(state, project, session, event = {}, { root, spec } = {}) {
     let reason = '';
     if (inflight.length) {
       const list = inflight.map(([id, item]) => item.handle ? `${id}(${item.handle})` : id).join('、');
-      // 宿主内置子代理结束时会通知父会话，只需说明在等什么；Codeg 才给 Codeg 专有等待方法。
-      // 其他通道（含未填）按当前工具能力处理，不把“非 builtin”一概当成 Codeg。
-      const builtin = inflight.every(([, item]) => item.channel?.startsWith('builtin:'));
-      const codeg = inflight.every(([, item]) => isCodegChannel(item.channel));
-      const someCodeg = inflight.some(([, item]) => isCodegChannel(item.channel));
-      const how = builtin
-        ? '这些包由宿主内置子代理执行，结束时宿主会通知本会话：向用户说明在等哪些包、结果回来后做什么，再结束回合。'
-        : codeg
-          ? codegWaitInstruction()
-          : someCodeg
-            ? `其中 Codeg 包按 Codeg 方式等待：${codegWaitInstruction()} 其他通道按各自入口支持的方式等待；` + '内置子代理包结束时宿主会通知本会话。'
-            : '按当前通道实际支持的方式等待结果；如果该入口不会在子任务结束时通知本会话，结束回合就收不到结果。二选一：用该通道支持的阻塞等待/查询方式等到终态，或者向用户说明在等哪些包、为什么暂停、结果回来后由谁接续。';
+      // 按实际通道给出各自的等待方式；混合通道逐一说明，不把“非 builtin”一概当成 Codeg。
+      const how = inflightWaitInstruction(inflight);
       reason = `workflow 回合结束核对：任务 ${task.taskId} 仍有 ${inflight.length} 个工作包在途（${list}）。${how}`;
     }
     if (planDelivery && planning) reason = reason ? `${reason} 另：${planDeliveryReason(task)}` : planDeliveryReason(task);

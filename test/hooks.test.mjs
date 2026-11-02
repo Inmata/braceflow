@@ -1096,6 +1096,114 @@ test('R2 简单任务允许审查与只读诊断包，实施 worker 必须显式
   assert.equal(retried.result.accepted, true, JSON.stringify(retried.result));
 });
 
+// W1：Herdr TUI/GUI 委派只从 Bash/PowerShell 单条直接调用识别，Agent 来源按入口区分。
+const herdrPackages = [
+  { packageId: 'W1', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'herdr:claude', scope: 'src/hooks.mjs', delivers: 'TUI 核对', dependsOn: [] },
+  { packageId: 'W2', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'hc:claude', scope: 'src/protocol.mjs', delivers: 'GUI 核对', dependsOn: [] },
+  { packageId: 'W3', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'herdr:claude', scope: 'src/adapters/herdr.mjs', delivers: '已交付', dependsOn: [] },
+  { packageId: 'W4', role: 'worker', agent: 'Claude Code (group/worker, high)', channel: 'herdr:claude', scope: 'test/adapters.test.mjs', delivers: '依赖未终态', dependsOn: ['W1'] },
+  { packageId: 'W5', role: 'worker', agent: 'Codex (gpt-6.1-terra, high)', channel: 'hc:claude', scope: 'test/hooks.test.mjs', delivers: 'Agent 不符', dependsOn: [] },
+  { packageId: 'W6', role: 'worker', agent: 'Claude Code', channel: 'herdr:codex', scope: 'test/channels.test.mjs', delivers: '通道 Agent 不符', dependsOn: [] },
+  { packageId: 'R1', role: 'reviewer', agent: 'Codex (gpt-6.1-terra, high)', channel: 'herdr:codex', scope: '审查 W1', delivers: '审查结论', dependsOn: [] },
+];
+const herdrRegistered = herdrPackages.map(item => ({ ...item, status: 'dispatched' }));
+async function herdrTask() {
+  const f = await fixture();
+  await w2Prepare(f, { packages: herdrPackages });
+  const started = await emit(f, { action: 'task-start', goal: 'Herdr 委派核对', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/hooks.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const registered = await emit(f, { action: 'packages', packages: herdrRegistered });
+  assert.equal(registered.result.accepted, true, JSON.stringify(registered.result));
+  const delivered = await emit(f, { action: 'packages', packages: [{ packageId: 'W3', status: 'delivered', deliveredRef: 'v1' }] });
+  assert.equal(delivered.result.accepted, true, JSON.stringify(delivered.result));
+  return f;
+}
+const deniedReason = output => output.hookSpecificOutput?.permissionDecisionReason;
+
+test('W1 PreToolUse：未开工的 herdr/hc 实施委派被拒，纯启动与只读命令放行，复合命令要求单条调用', async () => {
+  const f = await fixture();
+  for (const [tool, command] of [
+    ['Bash', 'herdr agent prompt w1 "实现"'],
+    ['Bash', 'herdr agent start w1 --kind claude'],
+    ['PowerShell', 'hc run --bg claude "实现"'],
+    ['Bash', 'hc send t7 "workflow-package:W1 实现"'],
+    ['Bash', 'hc send t7 "普通回执"'],
+  ]) {
+    const denied = await pre(f, tool, { command });
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `${command}: ${JSON.stringify(denied)}`);
+    assert.match(deniedReason(denied), /实施委派被拦下/);
+  }
+  for (const command of ['herdr agent list', 'herdr agent get w1', 'herdr agent read w1', 'herdr agent wait w1', 'hc ls', 'hc get t7', 'hc wait --children any', 'npm test']) {
+    assert.deepEqual(await pre(f, 'Bash', { command }), {}, command);
+  }
+  const composed = await pre(f, 'Bash', { command: 'herdr agent prompt w1 "实现" | Out-Null' });
+  assert.equal(composed.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(composed));
+  assert.match(deniedReason(composed), /单条直接调用/);
+});
+
+test('W1 PreToolUse：开工后按包核对标记、通道前缀、通道 Agent 和依赖；正确时放行', async () => {
+  const f = await herdrTask();
+  // 缺包标记。
+  const unbound = await pre(f, 'Bash', { command: 'herdr agent prompt w1 "实现"' });
+  assert.equal(unbound.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(unbound));
+  assert.match(deniedReason(unbound), /workflow-package/);
+  // 正确：herdr prompt 不带 Agent，按通道尾部与准备 Agent 的词匹配；全路径同样识别。
+  assert.deepEqual(await pre(f, 'Bash', { command: 'herdr agent prompt w1 "workflow-package:W1 实现"' }), {});
+  assert.deepEqual(await pre(f, 'PowerShell', { command: 'C:\\tools\\herdr.exe agent prompt w1 "workflow-package:W1 实现" --wait --timeout 600000' }), {});
+  // 正确：hc run 的程序名映射 Agent，同时匹配准备记录与通道尾部。
+  assert.deepEqual(await pre(f, 'Bash', { command: 'hc run --bg --name w2 claude "workflow-package:W2 实现"' }), {});
+  // 通道前缀不符。
+  const wrongPrefix = await pre(f, 'Bash', { command: 'herdr agent prompt w2 "workflow-package:W2 实现"' });
+  assert.match(deniedReason(wrongPrefix), /herdr:\*/);
+  const wrongPrefixHc = await pre(f, 'Bash', { command: 'hc run --bg claude "workflow-package:W1 实现"' });
+  assert.match(deniedReason(wrongPrefixHc), /hc:\*/);
+  const wrongSend = await pre(f, 'Bash', { command: 'hc send t7 "workflow-package:W1 回执"' });
+  assert.match(deniedReason(wrongSend), /hc:\*/);
+  // Agent 不符：声明 Codex 而实际 hc 程序是 claude；或通道尾部是 codex 而声明 Claude。
+  const wrongAgent = await pre(f, 'Bash', { command: 'hc run --bg claude "workflow-package:W5 实现"' });
+  assert.match(deniedReason(wrongAgent), /Agent 与本次委派不一致/);
+  const wrongChannelAgent = await pre(f, 'Bash', { command: 'herdr agent prompt w6 "workflow-package:W6 实现"' });
+  assert.match(deniedReason(wrongChannelAgent), /通道尾部核对|不一致/);
+  // 未派发与依赖未终态。
+  const notDispatched = await pre(f, 'Bash', { command: 'herdr agent prompt w3 "workflow-package:W3 实现"' });
+  assert.match(deniedReason(notDispatched), /不是 dispatched/);
+  const dependency = await pre(f, 'Bash', { command: 'herdr agent prompt w4 "workflow-package:W4 实现"' });
+  assert.match(deniedReason(dependency), /依赖 W1 尚未终态/);
+  // 纯启动与只读命令开工后不受影响；hc send 无标记按子会话回报放行。
+  for (const command of ['herdr agent start w9 --kind claude', 'hc run --bg claude', 'hc send t7 "普通回执"', 'herdr agent read w1', 'hc wait --children any']) {
+    assert.deepEqual(await pre(f, 'Bash', { command }), {}, command);
+  }
+  const composed = await pre(f, 'Bash', { command: 'hl=1; herdr agent prompt w1 "workflow-package:W1 实现"' });
+  assert.match(deniedReason(composed), /单条直接调用/);
+});
+
+test('W1 UserPromptSubmit：<hc from=…> 仍开新票据，但保留 waiting-user 与在途包；普通输入和原生通知不识别', async () => {
+  const f = await herdrTask();
+  await emit(f, { action: 'phase', phase: 'waiting-user' });
+  const before = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
+  f.turnId = 'turn-hc-message';
+  const output = await event(f, 'UserPromptSubmit', { prompt: '\n  <hc from="t7 review">交付完成</hc>' });
+  assert.match(output.hookSpecificOutput.additionalContext, /不是用户指令/);
+  assert.match(output.hookSpecificOutput.additionalContext, /consumed/);
+  const after = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
+  assert.equal(after.phase, 'waiting-user');
+  assert.equal(after.turnId, 'turn-hc-message');
+  assert.notEqual(after.ticket, before.ticket);
+  assert.equal(after.taskId, f.taskId);
+  const task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.equal(task.packages.W1.status, 'dispatched');
+  assert.equal(task.packages.W3.status, 'delivered');
+  // 普通输入与 Claude Code 原生 task-notification 不保留 waiting-user。
+  let turn = 0;
+  for (const prompt of ['继续实施', '<task-notification>done</task-notification>']) {
+    f.turnId = `turn-plain-${turn++}`;
+    const normal = await event(f, 'UserPromptSubmit', { prompt });
+    assert.doesNotMatch(JSON.stringify(normal), /不是用户指令/);
+    const current = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
+    assert.equal(current.phase, 'unknown', prompt);
+  }
+});
+
 // R2 中 7：准备资料只限真实项目内的指定计划和 docs/plans Markdown；链接不能逃逸，失败不放行。
 test('R2 准备资料路径按 realpath 限制，.local/任意后缀/项目外/junction 逃逸都拒绝', async () => {
   const f = await fixture();

@@ -1,6 +1,6 @@
 # 公共工作方法
 
-项目首次明确接入后，Lead 读取本文件和[Lead 指引](roles/lead.md)，其余按场景读取（Lead 指引开头有导航表）。实施工作包只附本文件、[Worker 指引](roles/worker.md)、直接项目资料和包内列出的相关技能；审查工作包改附[Reviewer 指引](roles/reviewer.md)。需要讨论、调研或拆包时读[准备流程](references/preparation.md)；验证或实际失败时读[验证约定](references/validation.md)，需要复杂交付时读[报告约定](references/reports.md)。Codex 原生接入见 [Codex 适配](adapters/codex.md)；使用 Codeg 管理 Agent 时读 [Codeg 适配](adapters/codeg.md)，它是一层可选的软件适配，不是使用 workflow 的前提。
+项目首次明确接入后，Lead 读取本文件和[Lead 指引](roles/lead.md)，其余按场景读取（Lead 指引开头有导航表）。实施工作包只附本文件、[Worker 指引](roles/worker.md)、直接项目资料和包内列出的相关技能；审查工作包改附[Reviewer 指引](roles/reviewer.md)。需要讨论、调研或拆包时读[准备流程](references/preparation.md)；验证或实际失败时读[验证约定](references/validation.md)，需要复杂交付时读[报告约定](references/reports.md)。Codex 原生接入见 [Codex 适配](adapters/codex.md)；使用 Codeg 管理 Agent 时读 [Codeg 适配](adapters/codeg.md)，它是一层可选的软件适配，不是使用 workflow 的前提。使用 Herdr TUI 或 Herdr GUI（`hc`）委派时读 [Herdr 适配](adapters/herdr.md)：两种形态的委派命令、通道写法和等待方式不同，门禁只识别单条直接调用。
 
 Lead、Worker、Reviewer 按职责分配，依据用户已确认的安排、当前可用工具和任务需要选择智能体；不按客户端或模型名称固定角色。主会话承担 Lead，受委派会话按工作包承担 Worker 或 Reviewer；同一种智能体可在独立会话中承担不同角色。hook 安装参数只选择宿主接入方式，自动接入的支持范围见 [README](../README.md#角色与接入支持)。
 
