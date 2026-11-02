@@ -30,6 +30,13 @@ Agent 来源：
 
 “按通道尾部核对”不等于已经验证实际执行者：`prompt`/`send` 只能证明命令文本与准备记录里声明的通道一致，无法从命令本身确认目标运行的是哪个 Agent。
 
+## 实操防呆要点
+
+1. **先绑定 worktree**：新建独立 worktree 后、派发前，先在主入口执行 `node <workflow.mjs> project attach-worktree --project <projectId> --root <worktree 绝对路径>`；否则子会话没有项目绑定，无法 `role-claim`。绑定后从该 worktree 内启动 Agent。
+2. **核对完整模型 ID**：`herdr agent start` 或原生 CLI 启动前，核对模型全名（含 `[1m]` 等长上下文后缀）与 effort 档位，与准备记录的逐包 `Agent` 一致后再发首条任务；模型简称或丢后缀会造成准备核对不一致。
+3. **Git Bash 防路径改写**：Windows Git Bash 下发送 `/model`、`/fast` 等 `/` 开头命令或含根斜杠参数时，前置 `MSYS_NO_PATHCONV=1`（或改用 PowerShell 单引号调用），避免 MSYS 把参数改写成盘符路径。
+4. **TUI 必须同回合前台等待**：`herdr:` 通道结束不会唤醒父会话，派发时在同一回合前台执行 `--wait`（或紧接着 `herdr agent wait`）阻塞；不要放宿主后台命令（`run_in_background: true`），也不要直接结束回合等通知。GUI `hc:` 才可按宿主消息等待。
+
 ## 等待与纠正
 
 - `herdr:` 包：子 Agent 结束不会唤醒父会话。派发时用 `herdr agent prompt <名> "<任务>" --wait --timeout <ms>` 在**同一回合**阻塞等待，或随后 `herdr agent wait <名>`。超时或状态 stalled 不证明未送达：先 `herdr agent get/read` 核对，再决定续等，不盲目重发。
