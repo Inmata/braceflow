@@ -3,7 +3,7 @@ import { lstat, readdir, readFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import { canonical, digest, fail, mutate, readState, readText, samePath } from './store.mjs';
 import { agentsFile, blockFrom, disableProject, enableProject, identity, identityEqual } from './projects.mjs';
-import { installRecord, registrationStatus, releaseIntegrity } from './install.mjs';
+import { installLocations, registrationStatus, releaseIntegrity } from './install.mjs';
 import { learningConfig, setLearningEnabled } from './learning-config.mjs';
 import { scanAlignment } from './alignment.mjs';
 import { migrateCandidates } from './learning.mjs';
@@ -55,15 +55,23 @@ export async function learningDoctor(directory, project, { root, execute = runPr
 
 async function installProblems(directory, state) {
   const problems = [];
-  const records = HOSTS.map(agent => [agent, installRecord(state, agent)]).filter(([, record]) => record?.status === 'installed');
-  const reinstall = agent => command(['install', '--agent', agent], { stateDir: directory, cli: path.join(PRODUCT_ROOT, 'bin', 'workflow.mjs') });
-  if (!records.length) problems.push({ code: 'NOT_INSTALLED', message: '没有任何宿主安装本插件，接入后 hook 不会触发。在插件仓库目录执行安装（按实际使用的宿主选一条或两条）。', commands: HOSTS.map(reinstall) });
-  for (const [agent, record] of records) {
+  // 默认记录和附加位置都算已安装；只有全部位置都缺失时才是未安装。
+  const locations = HOSTS.flatMap(agent => installLocations(state, agent)
+    .filter(({ record }) => record?.status === 'installed')
+    .map(item => ({ agent, ...item })));
+  const reinstall = ({ agent, record, location }) => command([
+    'install', '--agent', agent,
+    ...(location === 'extra' && record?.configFile ? ['--user-dir', path.dirname(record.configFile)] : []),
+  ], { stateDir: directory, cli: path.join(PRODUCT_ROOT, 'bin', 'workflow.mjs') });
+  if (!locations.length) problems.push({ code: 'NOT_INSTALLED', message: '没有任何宿主安装本插件，接入后 hook 不会触发。在插件仓库目录执行安装（按实际使用的宿主选一条或两条）。', commands: HOSTS.map(agent => reinstall({ agent })) });
+  for (const item of locations) {
+    const { agent, record, location } = item;
+    const label = location === 'extra' ? `${agent} 的附加位置 ${record.configFile}` : agent;
     const registration = await registrationStatus(record, agent);
-    if (registration !== 'registered') problems.push({ code: 'REGISTRATION', message: `${agent} 的 hooks 实际注册缺失、被修改或无法读取（${registration}），先核对宿主配置差异再重装。`, commands: [reinstall(agent)] });
+    if (registration !== 'registered') problems.push({ code: 'REGISTRATION', message: `${label} 的 hooks 实际注册缺失、被修改或无法读取（${registration}），先核对宿主配置差异再重装。`, commands: [reinstall(item)] });
     const integrity = await releaseIntegrity(directory, record);
-    if (integrity !== 'verified') problems.push({ code: 'INTEGRITY', message: `${agent} 的安装副本不完整或 current 链接未指向登记版本，hook 会被保守放行。`, commands: [reinstall(agent)] });
-    else if (PRODUCT_VERSION && record.version !== PRODUCT_VERSION) problems.push({ code: 'VERSION', message: `${agent} 已安装 ${record.version}，当前运行的是 ${PRODUCT_VERSION}。hook 会按旧版本工作，先重装。`, commands: [reinstall(agent)] });
+    if (integrity !== 'verified') problems.push({ code: 'INTEGRITY', message: `${label} 的安装副本不完整或 current 链接未指向登记版本，hook 会被保守放行。`, commands: [reinstall(item)] });
+    else if (PRODUCT_VERSION && record.version !== PRODUCT_VERSION) problems.push({ code: 'VERSION', message: `${label} 已安装 ${record.version}，当前运行的是 ${PRODUCT_VERSION}。hook 会按旧版本工作，先重装。`, commands: [reinstall(item)] });
   }
   return problems;
 }

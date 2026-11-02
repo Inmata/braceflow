@@ -32,7 +32,7 @@ node bin/workflow.mjs doctor --agent codex --user-dir "$env:APPDATA\Cindy\codex-
 node bin/workflow.mjs uninstall --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
 ```
 
-第一次安装的位置是权威记录（通常为 `~/.codex`），附加位置按规范化后的配置文件路径单独登记，第二条不会覆盖第一条；各位置的 `hooks.json` 分别维护。`doctor --user-dir` 只报告该位置；不带 `--user-dir` 时顶层报告默认位置，并在 `locations` 中列出所有已登记位置及各自的 status/registration/integrity/version。`uninstall --user-dir` 只撤销该位置自己登记的 handlers，其他位置、其他插件和用户新增配置保持不变。同一目录的不同大小写或分隔符写法视为同一位置，不会重复登记。Cindy 升级或切换账号可能重建 `codex-home`，重建后 hooks 可能丢失：需对当前目录重新执行 `doctor`，按结果重新 `install`。多个 Codex 配置位置共用同一个 `current`，升级时建议对每个已登记位置都重新安装，避免某个位置仍登记旧快照而在 doctor 中显示 `integrity: unavailable`。
+默认 Codex 配置位置（通常为 `~/.codex`）是权威记录，附加位置按规范化后的配置文件路径单独登记，第二条不会覆盖第一条；即使默认位置还没安装，显式传入的其他目录也只登记为附加位置，不会因为“先装”而抢占权威记录。各位置的 `hooks.json` 分别维护。`doctor --user-dir` 只报告该位置；不带 `--user-dir` 时顶层报告默认位置，并在 `locations` 中列出所有已登记位置及各自的 status/registration/integrity/version；默认位置未安装时顶层为 `not-installed`，附加位置仍会列在 `locations` 中。`uninstall --user-dir` 只撤销该位置自己登记的 handlers，其他位置、其他插件和用户新增配置保持不变；不带 `--user-dir` 时只撤销默认位置，不撤销附加位置，并在结果的 `locations`/`extras` 中列出仍登记的附加位置。同一目录的不同大小写或分隔符写法视为同一位置，不会重复登记。Cindy 升级或切换账号可能重建 `codex-home`，重建后 hooks 可能丢失：需对当前目录重新执行 `doctor`，按结果重新 `install`。多个 Codex 配置位置共用同一个 `current`，升级时建议对每个已登记位置都重新安装，避免某个位置仍登记旧快照而在 doctor 中显示 `integrity: unavailable`。
 
 然后接入项目，并在该目录用所选宿主打开新主会话，当前主会话承担 Lead：
 
@@ -262,7 +262,7 @@ node bin/workflow.mjs uninstall --agent claude
 node bin/workflow.mjs uninstall --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
 ```
 
-disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手改则保留并报告。uninstall 仅撤销未被修改的自有 handlers，保留其他插件/新增配置，保留发布副本、项目资料、LESSONS 和追溯记录。用户改动冲突不整文件覆盖。Codex 附加配置位置用 `--user-dir` 单独撤销，只移除该位置的 handlers；不带 `--user-dir` 时处理默认位置，其他已登记位置保持不变。
+disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手改则保留并报告。uninstall 仅撤销未被修改的自有 handlers，保留其他插件/新增配置，保留发布副本、项目资料、LESSONS 和追溯记录。用户改动冲突不整文件覆盖。Codex 附加配置位置用 `--user-dir` 单独撤销，只移除该位置的 handlers；不带 `--user-dir` 时只处理默认位置，不撤销其他已登记位置，并在结果的 `locations`/`extras` 中列出仍登记的附加位置。
 
 多个插件共存时状态、信号、个人库独立；workflow 不重跑另一插件学习，旧 `coexistence-mode` 参数保留兼容。停止后台学习使用 `learning disable`，撤销系统任务使用 `learning schedule remove`；撤销宿主安装前先执行这两步。不要把关闭另一插件作为排错的默认步骤。
 

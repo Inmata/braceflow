@@ -137,34 +137,60 @@ const hostFor = agent => {
   return host;
 };
 // codex 保留 state.install 作为旧版兼容权威记录，installs.codex 只是同步镜像；claude 只写 installs.claude。
-// JSON 读回后两者是不同对象，这里先指回同一记录，附加位置挂在权威记录上才不会写丢。
+// 没有默认记录时，installs.<agent> 可只保存 { extra } 容器；真正记录必须带 configFile，不能把容器当权威记录。
+const isInstallRecord = value => Boolean(value && typeof value === 'object' && !Array.isArray(value) && value.configFile);
+const isExtraContainer = value => Boolean(value && typeof value === 'object' && !Array.isArray(value) && !value.configFile && value.extra && typeof value.extra === 'object' && !Array.isArray(value.extra));
 export function installRecord(state, agent) {
   state.installs ||= {};
-  if (agent !== 'codex') return state.installs[agent] || null;
-  const record = state.install || state.installs.codex || null;
+  if (agent !== 'codex') return isInstallRecord(state.installs[agent]) ? state.installs[agent] : null;
+  const legacy = isInstallRecord(state.install) ? state.install : null;
+  const slot = state.installs.codex;
+  const slotRecord = isInstallRecord(slot) ? slot : null;
+  const record = legacy || slotRecord || null;
   if (record) {
+    // JSON 读回后 install 与 installs.codex 是不同对象；两边都可能带着附加位置，先合并再指回同一记录。
+    if (legacy && slotRecord && legacy !== slotRecord && slotRecord.extra && typeof slotRecord.extra === 'object') {
+      legacy.extra = { ...slotRecord.extra, ...(legacy.extra && typeof legacy.extra === 'object' ? legacy.extra : {}) };
+    }
+    if (!slotRecord && isExtraContainer(slot)) {
+      record.extra = { ...slot.extra, ...(record.extra && typeof record.extra === 'object' ? record.extra : {}) };
+    }
     state.install = record;
     state.installs.codex = record;
+  } else if (isExtraContainer(slot)) {
+    state.install = null;
   }
   return record;
 }
-// 第一个位置是权威记录（兼容旧版单条 install/state.install）；附加位置按规范化配置文件路径登记在
-// primary.extra 下。Windows 的大小写和分隔符差异不能让同一目录变成两条记录。
+// 默认 Codex 配置位置才是权威记录（兼容旧版单条 install/state.install）；附加位置按规范化配置文件路径
+// 登记在 extra 下。Windows 的大小写和分隔符差异不能让同一目录变成两条记录。
 function locationKey(file) {
   const resolved = path.resolve(file);
   return (process.platform === 'win32' ? resolved.toLowerCase() : resolved).replaceAll(path.sep, '/');
 }
 const sameLocation = (left, right) => Boolean(left?.configFile && right?.configFile && locationKey(left.configFile) === locationKey(right.configFile));
+function defaultConfigFile(agent) {
+  const host = hostFor(agent);
+  return path.join(path.resolve(host.defaultUserDir()), host.configName);
+}
+const isDefaultLocation = (agent, configFile) => Boolean(configFile) && locationKey(configFile) === locationKey(defaultConfigFile(agent));
 function extraRecords(state, agent, create = false) {
   const primary = installRecord(state, agent);
-  if (!primary) return {};
-  if (primary.extra && typeof primary.extra === 'object' && !Array.isArray(primary.extra)) return primary.extra;
+  if (primary) {
+    if (primary.extra && typeof primary.extra === 'object' && !Array.isArray(primary.extra)) return primary.extra;
+    if (!create) return {};
+    primary.extra = {};
+    return primary.extra;
+  }
+  const slot = state.installs?.[agent];
+  if (isExtraContainer(slot)) return slot.extra;
   if (!create) return {};
-  primary.extra = {};
-  return primary.extra;
+  state.installs ||= {};
+  state.installs[agent] = { extra: {} };
+  return state.installs[agent].extra;
 }
 // 只读遍历：primary 在前，附加位置按登记顺序；手工状态里与 primary 指向同一文件的重复项跳过。
-function installLocations(state, agent) {
+export function installLocations(state, agent) {
   const primary = installRecord(state, agent);
   const list = primary ? [{ record: primary, location: 'primary' }] : [];
   for (const record of Object.values(extraRecords(state, agent))) {
@@ -180,9 +206,15 @@ function locateInstall(state, agent, configFile) {
   }
   return { record: null, location: null, key };
 }
+// 无参数卸载不能撤销附加位置，只报告仍在登记的全部附加记录；这里不读取配置，只看登记状态。
+function extraSummary(state, agent) {
+  return installLocations(state, agent).filter(item => item.location === 'extra').map(({ record }) => ({
+    location: 'extra', configFile: record.configFile, status: record.status, version: record.version || null,
+  }));
+}
 const samePrimary = (state, agent, record) => {
   const primary = installRecord(state, agent);
-  return !primary || primary === record || sameLocation(primary, record);
+  return Boolean(primary && (primary === record || sameLocation(primary, record)));
 };
 async function readConfig(file) {
   const text = await readText(file);
@@ -237,14 +269,22 @@ function addHandlers(config, handlers, slots = {}) {
 const textHash = text => text === null ? null : digest(text);
 function registerInstall(state, agent, record) {
   const primary = installRecord(state, agent);
-  if (!primary || primary === record || sameLocation(primary, record)) {
-    // 替换权威记录对象时保留已登记的附加位置，避免升级后丢失其他目录。
-    if (primary && primary !== record && primary.extra && record.extra === undefined) record.extra = primary.extra;
-    state.installs[agent] = record;
-    if (agent === 'codex') state.install = record;
+  const isPrimary = primary && (primary === record || sameLocation(primary, record));
+  if (!isPrimary && !isDefaultLocation(agent, record.configFile)) {
+    extraRecords(state, agent, true)[locationKey(record.configFile)] = record;
     return;
   }
-  extraRecords(state, agent, true)[locationKey(record.configFile)] = record;
+  // 默认位置成为权威记录时，已有的附加位置（含旧版把非默认位置误当权威记录的那一条）全部转入 extra，
+  // 不丢记录也不让默认目录被挡在 extra。
+  const extras = { ...extraRecords(state, agent) };
+  delete extras[locationKey(record.configFile)];
+  if (primary && primary !== record && !sameLocation(primary, record) && !isDefaultLocation(agent, primary.configFile)) {
+    extras[locationKey(primary.configFile)] = primary;
+    delete primary.extra;
+  }
+  if (Object.keys(extras).length) record.extra = { ...extras, ...(record.extra && typeof record.extra === 'object' ? record.extra : {}) };
+  state.installs[agent] = record;
+  if (agent === 'codex') state.install = record;
 }
 // prepared 只保存自有定义和前后指纹，不保存含其他插件/凭据的整份用户配置。
 // 重试按原意图续做：配置必须仍为 before/after，current 必须仍为原目标/新目标。
@@ -365,8 +405,14 @@ export async function uninstall(directory, { agent = 'codex', userDir } = {}) {
   const host = hostFor(agent);
   const configFile = userDir ? path.join(path.resolve(userDir), host.configName) : null;
   return mutate(directory, async (state, save) => {
+    // 无参数只处理默认位置；附加位置不撤销，但把仍在登记的附加记录一起返回给调用方。
+    const withExtras = result => {
+      if (configFile) return result;
+      const extras = extraSummary(state, agent);
+      return extras.length ? { ...result, locations: extras, extras } : result;
+    };
     const record = configFile ? locateInstall(state, agent, configFile).record : installRecord(state, agent);
-    if (!record || record.status === 'uninstalled') return { status: 'not-installed' };
+    if (!record || record.status === 'uninstalled') return withExtras({ status: 'not-installed' });
     if (record.status === 'prepared') await finishPrepared(directory, state, save, record, agent);
     if (record.status !== 'installed') fail('RECOVERY', '安装事务尚未确认，需要先核对注册差异');
     const finish = () => {
@@ -378,7 +424,7 @@ export async function uninstall(directory, { agent = 'codex', userDir } = {}) {
         state.installs[agent] = record;
         if (agent === 'codex') state.install = record;
       }
-      return { status: 'uninstalled', releaseRetained: record.releaseRoot, reason: '发布副本和追溯记录保留，可通过系统回收站清理' };
+      return withExtras({ status: 'uninstalled', releaseRetained: record.releaseRoot, reason: '发布副本和追溯记录保留，可通过系统回收站清理' });
     };
     // 撤销意图先落盘：配置移除成功后若最终状态保存失败，重试可按前后指纹识别已完成并收敛。
     const intent = record.uninstallIntent;

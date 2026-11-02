@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { cp, copyFile, mkdir, readFile, readdir, writeFile, lstat, unlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
-import { install, doctor } from '../src/install.mjs';
+import { install, doctor, HOSTS } from '../src/install.mjs';
 import { onboardProject, removeProject, learningDoctor } from '../src/onboard.mjs';
 import { alignmentStatus, applyAlignment, decideAlignment, suggestAlignment } from '../src/alignment.mjs';
 import { getContext } from '../src/context.mjs';
@@ -41,8 +41,12 @@ async function environment({ installed = true, settings = true } = {}) {
   await writeFile(path.join(project, 'README.md'), '# 项目\n');
   await mkdir(path.join(project, 'docs'));
   await writeFile(path.join(project, 'docs', 'usage.md'), '# 使用\n');
+  // 测试里的显式 userDir 代表默认宿主目录；不改真实用户目录。
+  const user = path.join(area, 'user');
+  HOSTS.codex.defaultUserDir = () => path.join(user, '.codex');
+  HOSTS.claude.defaultUserDir = () => path.join(user, '.claude');
   if (installed) {
-    const userDir = path.join(area, 'user', '.codex');
+    const userDir = HOSTS.codex.defaultUserDir();
     await mkdir(userDir, { recursive: true });
     assert.equal((await install(directory, { userDir })).status, 'installed');
   }
@@ -70,6 +74,16 @@ test('onboard 核心预检不过时一次列出全部问题且不写入，也不
   assert.ok(result.problems.find(p => p.code === 'NOT_INSTALLED').commands.every(c => c.startsWith('node ')));
   assert.deepEqual(Object.keys((await readState(f.directory)).projects), []);
   assert.ok((await readFile(path.join(f.project, 'AGENTS.md'), 'utf8')).includes('复制来的管理区'));
+});
+
+test('只有附加位置时 onboard 不报未安装', async () => {
+  const f = await environment({ installed: false });
+  const extra = path.join(f.area, 'cindy-codex-home');
+  await mkdir(extra, { recursive: true });
+  assert.equal((await install(f.directory, { userDir: extra })).status, 'installed');
+  const result = await onboardProject(f.directory, f.project, { skipLearning: true });
+  assert.equal(result.status, 'onboarded', JSON.stringify(result));
+  assert.ok((await readFile(path.join(f.project, 'AGENTS.md'), 'utf8')).includes(BEGIN));
 });
 
 test('核心接入被阻断时不预检项目配置指定的执行器；--enable-learning 只记录请求', async () => {
