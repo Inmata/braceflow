@@ -1,5 +1,6 @@
+import os from 'node:os';
 import path from 'node:path';
-import { realpathSync } from 'node:fs';
+import { lstatSync, realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { archiveLifecycleEvents, canonical, digest, id, mutate, observeHost, readState, recordLifecycleEvent, samePath, within } from './store.mjs';
 import { acceptSignal, consumeLifecycleEvents, interrupt, LIFECYCLE_EVENTS, openTurn, pendingFor, sessionKey, stop, taskKey, TERMINAL_PACKAGE } from './protocol.mjs';
@@ -8,7 +9,7 @@ import { precheckSpecs } from './spec.mjs';
 import { projectContext, readOptionalContext, signalUsage } from './context.mjs';
 import { hostTool, PRODUCT_ROOT, PRODUCT_VERSION, TRANSPORT_FLAG, transportArguments } from './entry.mjs';
 import { findExtraction, markExtractionStart, registerExtraction } from './capture.mjs';
-import { PLAN_DIRECTORY, preparationMissing, resolvePlanPath } from './preparation.mjs';
+import { agentBaseWords, preparationMissing, resolvePlanPath, sameBaseAgent } from './preparation.mjs';
 import { CODEG_DELEGATION_STATUS_TOOLS, CODEG_DELEGATION_TERMINAL, CODEG_DELEGATION_TOOLS, CODEG_QUESTION_TOOLS, delegationTasks } from './adapters/codeg.mjs';
 import { HOST_MESSAGE_PREFIXES, commandDelegation as resolveCommandDelegation, mentionsHerdrDelegation, recognizeHostMessage } from './adapters/herdr.mjs';
 import { CINDY_HOST_MESSAGE_PREFIXES, CINDY_ORCA_DELEGATION_TOOLS, CINDY_QUESTION_TOOLS, cindyToolDelegation } from './adapters/cindy.mjs';
@@ -198,28 +199,56 @@ function toolTargets(event) {
   const value = input.file_path ?? input.notebook_path ?? input.path;
   return typeof value === 'string' && value ? [value] : [];
 }
-// 准备阶段只允许维护指定源计划或 docs/plans 下的 Markdown；业务源码、测试、.local 和任意后缀都不在范围内。
-// 与 preparation.normalizeSource 共用 resolvePlanPath：字面路径和真实路径都必须是 docs/plans 下的 Markdown，
-// 且路径链上不能有 symlink/junction，所以“字面 md、实际指业务文件”的别名不会因 realpath 相等而放行。
-function isPreparationTarget(resolved, rawPath, preparation, plans = []) {
+// 准备阶段只允许维护 docs/plans 下的合规 Markdown（含已绑定源计划与已登记关联计划）；业务源码、测试、
+// .local 和任意后缀都不在范围内。与 preparation.normalizeSource 共用 resolvePlanPath：字面路径和真实路径
+// 都必须在 docs/plans 下，且路径链上不能有 symlink/junction，所以“字面 md、实际指业务文件”的别名不会放行。
+function isPreparationTarget(realRoot, target) {
+  if (!target || typeof target !== 'string') return false;
+  if (!within(realRoot, target)) return false;
+  const relative = path.relative(realRoot, target).replaceAll('\\', '/');
+  if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return false;
+  return !resolvePlanPath(realRoot, relative).error;
+}
+// 未开工与 plan 模式额外放行系统临时目录里的写入。测试夹具本身位于 os.tmpdir()、项目根又在夹具内部，
+// 因此还要拒绝落在项目根上级（夹具父目录）的路径，避免从临时目录反向写进夹具业务文件。
+// 路径链逐段 lstat 拒绝链接；目标已存在时，其真实路径必须仍在 tmp 内且不回到项目/状态目录。
+function isSystemTempTarget(realRoot, realStateDir, realTmp, target) {
+  if (within(realRoot, target) || (realStateDir && within(realStateDir, target))) return false;
+  if (within(realTmp, realRoot) && within(path.dirname(target), realRoot)) return false;
+  if (!within(realTmp, target) || samePath(realTmp, target)) return false;
+  const parts = path.relative(realTmp, target).split(path.sep).filter(Boolean);
+  let existing = realTmp;
+  for (const [index, segment] of parts.entries()) {
+    existing = path.join(existing, segment);
+    let stat;
+    try { stat = lstatSync(existing); } catch (error) {
+      // 第一个不存在的段之后都不会存在；此前的父目录已逐段确认无链接且仍在 tmp 内。
+      // ENOTDIR 等其它错误不能证明安全，保守拒绝。
+      return error.code === 'ENOENT';
+    }
+    if (stat.isSymbolicLink()) return false;
+    if (index === parts.length - 1) {
+      let real;
+      try { real = realpathSync(target); } catch { return false; }
+      return within(realTmp, real) && !samePath(realTmp, real)
+        && !within(realRoot, real) && !(realStateDir && within(realStateDir, real));
+    }
+  }
+  return false;
+}
+function planModeTargetAllowed(resolved, stateDir, tempDir, rawPath) {
   if (!rawPath || typeof rawPath !== 'string') return false;
   let realRoot;
   try { realRoot = realpathSync(resolved.worktree); } catch { return false; }
   const literal = path.resolve(resolved.cwd || resolved.worktree, rawPath);
-  if (!within(realRoot, literal)) return false;
-  const relative = path.relative(realRoot, literal).replaceAll('\\', '/');
-  if (!relative || relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) return false;
-  // exact docs/plans/plan.md 是准备阶段唯一固定候选；仍走同一真实路径与链接检查。
-  const target = resolvePlanPath(realRoot, relative);
-  if (target.error) return false;
-  if (relative === `${PLAN_DIRECTORY}/plan.md`) return true;
-  const allowed = [preparation?.source?.path, ...(Array.isArray(plans) ? plans : [])].filter(Boolean);
-  for (const plan of allowed) {
-    const declared = resolvePlanPath(realRoot, plan);
-    if (declared.error) continue;
-    if (samePath(target.realPath, declared.realPath)) return true;
-  }
-  return false;
+  if (isPreparationTarget(realRoot, literal)) return true;
+  let realStateDir = null;
+  let realTmp;
+  try {
+    if (stateDir) realStateDir = realpathSync(stateDir);
+    realTmp = realpathSync(tempDir || os.tmpdir());
+  } catch { return false; }
+  return isSystemTempTarget(realRoot, realStateDir, realTmp, literal);
 }
 // 角色会话只按显式 roleTaskId 找父任务；没有绑定或包不存在时返回具体原因，不再跨活动任务按包 ID 首匹配。
 function packageForSession(state, projectId, session) {
@@ -250,16 +279,12 @@ function delegationPackageMarkers(input) {
   }
   return [...new Set(markers)];
 }
-const normalizeAgent = value => typeof value === 'string' ? value.toLowerCase().replace(/[^a-z0-9]/g, '') : '';
 // 准备记录里的 Agent 常带模型/effort 说明（如“Claude Code (group/worker, high)”），
-// 而通道尾部只能给出软件名（herdr:claude）。命令委派按词匹配：通道/程序名必须作为
-// 声明文本里的一个独立词出现，既不放宽 Codeg 的精确归一化比较，也不把任意子串当匹配。
+// 而通道尾部只能给出软件名（herdr:claude）。命令委派按基础词包含匹配：通道/程序名必须作为
+// 声明文本里的一个独立词出现；codeg 与通道尾部的相等性用 sameBaseAgent 的完整词序比较。
 function agentMatchesDeclared(declared, expected) {
-  // expected 可能带连字符（Orca 的 claude-code）或模型/effort 说明；按词比较，
-  // 要求 expected 的每个词都作为独立词出现在准备声明里，避免整串“Claude Code (…, high)”无法匹配。
-  const words = value => String(value || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).map(normalizeAgent).filter(Boolean);
-  const wanted = words(expected);
-  const tokens = words(declared);
+  const wanted = agentBaseWords(expected);
+  const tokens = agentBaseWords(declared);
   if (!wanted.length) return false;
   return wanted.every(token => tokens.includes(token));
 }
@@ -349,20 +374,18 @@ function delegationDenial(task, pkg, name, input) {
     if (!readOnlyNative) return `工作包 ${pkg.packageId} 是只读诊断包：只能用明确只读的 Explore/Plan 子代理派发，不能使用 ${name}（${requested || '未指定'}）；诊断包不提供写入授权`;
     return null;
   }
-  const expected = normalizeAgent(requested);
-  const declared = normalizeAgent(pkg.agent);
-  const channelAgent = normalizeAgent(String(pkg.channel).split(':').slice(1).join(':'));
+  const channelTail = String(pkg.channel).split(':').slice(1).join(':');
   // Codeg 的通道本身编码实际 agent_type，必须同时匹配准备 Agent 与通道中的 Agent；
   // 只匹配其中一个会让“准备 agent=codex、channel=codeg:claude_code、实际 claude_code”通过。
-  // 通道尾部没有可归一化 Agent 时保守拒绝，不为未知名称新建映射框架。
+  // 比较按基础词序进行，允许准备记录带模型/effort 括号说明；通道尾部没有可解析 Agent 时保守拒绝。
   if (entry.channel === 'codeg:') {
-    if (!channelAgent) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；Codeg 委派需要 codeg:<agent_type> 形式的实际通道，先更新准备记录`;
-    if (!expected || expected !== declared || expected !== channelAgent) {
+    if (!agentBaseWords(channelTail).length) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；Codeg 委派需要 codeg:<agent_type> 形式的实际通道，先更新准备记录`;
+    if (!sameBaseAgent(requested, pkg.agent) || !sameBaseAgent(requested, channelTail)) {
       return `工作包 ${pkg.packageId} 的 Agent 与本次委派不一致（准备记录：${pkg.agent}；通道：${pkg.channel}；委派：${requested}）；Codeg 委派必须同时匹配准备 Agent 与通道中的 Agent`;
     }
     return null;
   }
-  if (!expected || (expected !== declared && expected !== channelAgent)) {
+  if (!agentBaseWords(requested).length || (!sameBaseAgent(requested, pkg.agent) && !sameBaseAgent(requested, channelTail))) {
     return `工作包 ${pkg.packageId} 的 Agent 与本次委派不一致（准备记录：${pkg.agent}；委派：${requested}）`;
   }
   return null;
@@ -390,18 +413,16 @@ function commandDelegationDenial(task, pkg, descriptor) {
     return `工作包 ${pkg.packageId} 的通道是 ${pkg.channel}，与委派入口 ${descriptor.entry} 要求的 ${descriptor.channelPrefix}* 不一致；先用该通道的委派方式，或更新准备绑定`;
   }
   const channelTail = String(pkg.channel).slice(descriptor.channelPrefix.length);
-  const channelAgent = normalizeAgent(channelTail);
   if (descriptor.agent) {
-    const requested = normalizeAgent(descriptor.agent);
     // declaredAgent 是同一 Agent 的声明级别名（如 Orca 的 claude-code → claude），只用于和准备记录比对。
     const declaredAgent = descriptor.declaredAgent ?? descriptor.agent;
-    if (!requested || !agentMatchesDeclared(pkg.agent, declaredAgent) || requested !== channelAgent) {
+    if (!agentBaseWords(descriptor.agent).length || !agentMatchesDeclared(pkg.agent, declaredAgent) || !sameBaseAgent(descriptor.agent, channelTail)) {
       return `工作包 ${pkg.packageId} 的 Agent 与本次委派不一致（准备记录：${pkg.agent}；通道：${pkg.channel}；委派：${descriptor.agent}）；命令委派必须同时匹配准备 Agent 与通道中的 Agent`;
     }
     return null;
   }
   // 没有 Agent 来源的入口（herdr prompt、hc send、Orca send_to_worker）：只按通道尾部核对准备记录，不宣称已验证目标 Agent。
-  if (!channelAgent) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；该委派入口需要 ${descriptor.channelPrefix}<agent> 形式的实际通道，先更新准备记录`;
+  if (!agentBaseWords(channelTail).length) return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 没有可映射的 Agent；该委派入口需要 ${descriptor.channelPrefix}<agent> 形式的实际通道，先更新准备记录`;
   if (!agentMatchesDeclared(pkg.agent, channelTail)) {
     return `工作包 ${pkg.packageId} 的通道 ${pkg.channel} 与准备记录 Agent ${pkg.agent} 不一致；该入口不带 Agent 字段，只能按通道尾部核对，先修正准备绑定`;
   }
@@ -445,8 +466,8 @@ function preparationGapText(gaps) {
   return gaps.map(gap => gap.message).join('、');
 }
 // 任务声明的只读/计划权限是实际写入的上限；宿主模式仍是更高优先级的约束，这里只补任务声明这一层。
-// 计划模式只继续允许准备资料维护，不把计划任务变成业务写入授权。
-function taskModeDenial(task, name, event, resolved, preparation, externalDelegate = false) {
+// 计划模式只继续允许准备资料维护和系统临时目录写入，不把计划任务变成业务写入授权。
+function taskModeDenial(task, name, event, resolved, stateDir, tempDir, externalDelegate = false) {
   const mode = task?.permissions?.mode;
   if (mode !== 'read-only' && mode !== 'plan') return null;
   if (externalDelegate) {
@@ -462,8 +483,8 @@ function taskModeDenial(task, name, event, resolved, preparation, externalDelega
   if (mode === 'read-only') return '任务权限为 read-only：不能修改文件；只做读取、检索和结论交付，确需写入先由 Lead 用 task-update 取得用户授权。';
   const targets = toolTargets(event);
   if (!targets.length) return '任务权限为 plan：无法识别这次写入目标；计划模式只允许维护准备资料。';
-  const blocked = targets.filter(target => !isPreparationTarget(resolved, target, preparation, task.plans?.map(plan => plan.path)));
-  return blocked.length ? `任务权限为 plan：不能修改业务文件（${blocked.join('、')}）；计划模式只允许维护准备资料。` : null;
+  const blocked = targets.filter(target => !planModeTargetAllowed(resolved, stateDir, tempDir, target));
+  return blocked.length ? `任务权限为 plan：不能修改业务文件（${blocked.join('、')}）；计划模式只允许维护准备资料和系统临时目录。` : null;
 }
 // PreToolUse 只做三类可判定的事：未开工时的业务写入、实施委派、本插件 task-start/packages 命令。
 // 读、检索、写计划、prepare 以及普通 shell 命令不读取状态直接放行；普通 shell 里的任意文件写入无法可靠区分。
@@ -526,7 +547,7 @@ async function preToolUse(directory, event, options, agent) {
       if (WRITE_TOOLS.has(name)) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能修改文件；把结论写在交付 note 交回 Lead。`);
       if (DELEGATION_TOOLS.has(name) || commandDelegate || cindyDelegate) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能继续委派子代理；只做范围内的读取和结论交付。`);
     }
-    const modeDenied = taskModeDenial(owned.task, name, event, resolved, session.preparation || null, commandDelegate || cindyDelegate);
+    const modeDenied = taskModeDenial(owned.task, name, event, resolved, directory, options.tempDir, commandDelegate || cindyDelegate);
     if (modeDenied) return preToolUseDeny(modeDenied);
     return {};
   }
@@ -534,12 +555,12 @@ async function preToolUse(directory, event, options, agent) {
   const active = task?.lifecycle === 'active';
   const preparation = session.preparation || null;
   const gaps = preparation ? preparationMissing(preparation) : null;
-  const taskMessage = plan => `${plan}。准备阶段可以继续读代码、检索和写计划（docs/plans/plan.md、已绑定源计划或已登记关联计划）；完整准备保存后先 task-start；简单任务用 task-start --size simple --size-reason "<理由>" 声明。`;
+  const taskMessage = plan => `${plan}。准备阶段可以继续读代码、检索和写系统临时目录，并可维护 docs/plans/ 下任意合规 Markdown 计划；完整准备保存后先 task-start；简单任务用 task-start --size simple --size-reason "<理由>" 声明。`;
   // 命令型委派：Herdr TUI / hc 没有宿主工具事件，只能在这里按工作包核对。
   // 纯启动（agent start、不带任务的 hc run）只做未开工拦截；hc send 无包标记时可能是子会话回报，开工后不按派工核对。
   if (commandDelegation) {
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, preparation, true);
+      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir, true);
       if (modeDenied) return preToolUseDeny(modeDenied);
       if (commandDelegation.pureStart) return {};
       const markers = commandDelegation.packageMarkers;
@@ -556,7 +577,7 @@ async function preToolUse(directory, event, options, agent) {
   if (cindyCall) {
     if (cindyCall.error) return preToolUseDeny(`${cindyCall.error}；已拒绝本次派工`);
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, preparation, true);
+      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir, true);
       if (modeDenied) return preToolUseDeny(modeDenied);
       for (const item of cindyCall.items) {
         const label = item.index === undefined ? item.entry : `${item.entry}[${item.index}]${item.label ? `（${item.label}）` : ''}`;
@@ -614,12 +635,12 @@ async function preToolUse(directory, event, options, agent) {
   // 业务写入：没有活动任务时，只允许准备资料维护；已有活动任务则沿用任务权限/包所有权，不把准备齐当成任意写入。
   if (WRITE_TOOLS.has(name)) {
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, preparation);
+      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir);
       return modeDenied ? preToolUseDeny(modeDenied) : {};
     }
     const targets = toolTargets(event);
     if (!targets.length) return preToolUseDeny(taskMessage('无法识别这次写入的目标文件'));
-    const blocked = targets.filter(target => !isPreparationTarget(resolved, target, preparation, task?.plans?.map(plan => plan.path)));
+    const blocked = targets.filter(target => !planModeTargetAllowed(resolved, directory, options.tempDir, target));
     if (!blocked.length) return {};
     if (preparation && gaps.length) return preToolUseDeny(preparationGapText(gaps) + '。' + taskMessage(`业务写入被拦下：${blocked.join('、')}`));
     return preToolUseDeny(taskMessage(`业务写入被拦下：${blocked.join('、')}`));
@@ -627,7 +648,7 @@ async function preToolUse(directory, event, options, agent) {
   // 实施委派：没有活动任务时只放行明确只读的子代理；Codex 的 spawn 参数不含可核对的只读标记，故一律要求先开工。
   if (DELEGATION_TOOLS.has(name)) {
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, preparation);
+      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir);
       if (modeDenied) return preToolUseDeny(modeDenied);
       // 先解析包标记：只读子代理只有在没有声明工作包时才保留免关联豁免。
       // 带了 workflow-package:<id> 就必须按该包核对状态、通道、Agent 和角色，不能借 Explore/Plan 绕过。
@@ -644,7 +665,7 @@ async function preToolUse(directory, event, options, agent) {
       // 未开工时也只放行没有包标记的明确只读子代理；有标记就说明在冒充已登记委派。
       if (READ_ONLY_SUBAGENTS.has(type) && !delegationPackageMarkers(input).length) return {};
     }
-    return preToolUseDeny(taskMessage('实施委派被拦下'));
+    return preToolUseDeny(`实施委派被拦下（${name}）：未开工时只放行不带 workflow-package 标记、subagent_type 为 Explore 或 Plan 的只读子代理；实施/审查包需要先保存准备记录，并由用户明确授权后用 task-start 开工。`);
   }
   return {};
 }
@@ -897,6 +918,8 @@ export async function handleHook(directory, event, options = {}) {
         const project = state.projects[entry.resolved.project.projectId] || entry.resolved.project;
         const context = await projectContext(state, { ...entry.resolved, project }, entry.role, event.session_id, {
           directory, incremental: true, full: name === 'SessionStart' || Boolean(entry.upgraded), optional,
+          // 压缩后的 SessionStart 需要把核心纪律重新完整带回；不能当成普通增量入口省略。
+          compact: event.source === 'compact',
         });
         return { text: `${entry.upgraded}workflow 入口：${JSON.stringify(context)}${entry.hostMessage ? `\n${entry.hostMessage}` : ''}` };
       }, { budgetMs: lockBudget(name) });

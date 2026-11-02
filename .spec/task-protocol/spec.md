@@ -20,7 +20,11 @@ related:
 - 宿主注入的子会话或宿主消息按去掉前导空白后的固定开头识别（Herdr GUI 的 `<hc from="`、Cindy 的 `[Task delivery] Host bookkeeping` 等），不按自然语言猜来源：仍开新回合和新票据，但上一回合为 `waiting-user` 时保留该 phase，不撤销在途包，并在入口上下文注明这不是用户指令、核对实际交付后再记 `consumed`。未取得实测文本的回报格式不猜、不加入识别表。Cindy 的 `mcp__cindy_helper__ask_user_question_async` 与宿主原生提问工具一样在调用后记 `waiting-user`。
 - `Stop` 的在途包等待说明按实际通道给出：Herdr TUI 不会唤醒父会话，要求同一回合用 `herdr agent wait` 或 `herdr agent prompt … --wait` 阻塞等待，超时先查状态再决定；Herdr GUI 的 `<hc from=…>` 会唤醒本会话，可以结束回合等汇报或 `hc wait --children any` 阻塞等待，超时只是 check-in；Cindy 结果自动送回，不轮询，只在用户问进度或疑似丢失时查一次 `check_session_task`；Codeg、内置子代理与未知通道保留原说明。同一批包通道混合时逐通道列出，不把“非 builtin”一概当成 Codeg。
 - 历史任务按任务记录自身识别：记录不存在即新任务；记录存在但没有 `route` 字段时视为旧版本任务，允许续接，可在续接时补声明一次，声明后不可更改。不引入迁移字段，也不改写历史数据。
-- `prepare` 在尚无活动任务时保存会话级准备记录（需求、调研、方案、分包、逐包 `role`/`agent`/`channel`/`scope`、验证、确认与来源），不创建任务或账本。复杂任务 `task-start` 必须绑定无缺项记录，并把 `size`、来源摘要、需求和逐包选择固定到 `task.preparation`；简单任务要求非空理由，`operation-only` 保持轻量路径。`packages` 按包 ID 核对准备快照；已开工任务用 `task-update` 的 `preparation`+`preparationReason` 更新，按包 ID 与需求 ID 合并，未列出的旧内容保留，无意义顺序不构成实际变化。
+- `prepare` 在尚无活动任务时保存会话级准备记录（需求、调研、方案、分包、逐包 `role`/`agent`/`channel`/`scope`、验证、确认与来源），不创建任务或账本。复杂任务 `task-start` 必须绑定无缺项记录，并把 `size`、来源摘要、需求和逐包选择固定到 `task.preparation`；简单任务要求非空理由，`operation-only` 保持轻量路径。`packages` 按包 ID 核对准备快照；已开工任务用 `task-update` 的 `preparation`+`preparationReason` 更新，按包 ID 与需求 ID 合并，未列出的旧内容保留，无意义顺序不构成实际变化；增量更新只把本次实际提到的条目交给快照合并，完整记录用于缺项校验和会话基线，未提到的 `research`/`solution` 等正文不丢失。`task-update` 新增或修改合规 `docs/plans/*.md` 不计为业务范围扩张；`plan -> write` 且无业务路径扩张、目标未变时沿用已绑定准备；处于 `dispatched` 且尚无交付的包，可在 `role`/`channel`/`scope`/`delivers`/`dependsOn`/`reviewWaiver` 全等且基础 Agent 相同时更新 `agent` 的模型/effort 备注，换基础 Agent 或已交付仍返回 `PREPARATION`。
+- PreToolUse 对未开工与 `plan` 模式的写入边界：放行 `docs/plans/` 下经真实路径、Markdown 扩展名与逐级符号链接/junction 校验的全部合规文件；放行 `worktree` 与 `stateDir` 之外、真实位于 `os.tmpdir()` 且无符号链接/junction 逃逸的 `Write`/`Edit`/`MultiEdit`/`NotebookEdit` 目标。相对段 `..`、空段、`.`、非计划路径、项目内业务文件、`docs/plans` 符号链接和项目外非临时路径仍拒绝；`plan` 模式即使 `allowedPaths` 包含业务文件也不放行。未开工拦截非只读或无只读标记的 `Agent`/`Task` 时，拒绝文案必须建议改用不带 `workflow-package` 标记的 `subagent_type` `Explore` 或 `Plan`，并说明实施/审查包需先保存准备记录并取得用户 `task-start` 授权。
+- 委派核对使用基础 Agent 词根：从准备记录 `agent` 中剥离括号说明（`(...)`/`（...）`）与 `--model`/`-m`/`--effort` 等运行参数后做词级比较；`codeg:` 整串、`builtin:` 与命令型委派均按剥离后的基础 Agent 核对，不能因 `(group/worker[1m], high)` 等模型/effort 备注误拒。
+- 复杂 `delegated` 审查豁免：`task-end` 的 `waivers` 不能抵扣 `review`/`review:<id>`；未在准备快照预声明 `reviewWaiver` 的实施包不能标 `waived`。仅 worker 包在准备记录中声明 `reviewWaiver: { reason, consent }` 且尚无审查历史、不是只读诊断包时可免列 `review:<id>`；准备阶段与 `task-update` 均可在满足条件时补挂或修改，通过后在 `reviewWaived` 列出；已有 PASS/FIX/BLOCKED 或其他审查结论时预声明失效。无 `preparation` 的历史任务保持原 waiver/`waived` 行为。
+- 入口上下文在 Lead 角色与压缩恢复（`source: compact`）时必须重新携带三条核心纪律：三步确认、逐包 Agent/model/effort 选择和用户明确“开工”前不得 `task-start` 或委派实施/审查包，`prepare.ready` 不等于授权；Worker 已给出通过测试或结果时 Lead 不重复跑同一单项测试，只在最终集成时跑一次总验证；复杂 `delegated` 任务必须逐包独立审查，不得擅自用 `waivers` 或 `waived` 豁免。
 - `task-start` 接续保留原 `goal` 与 `permissions`；新任务缺 `goal`、`permissions` 或 `route` 时回执点名缺项。
 - 已登记工作包的 `role` 不可修改；需要更换角色时新建接替包，不能借改 `role` 改写既有审查与取消事实。
 - 信号只在当前 shell 确实直接执行本安装副本的 `signal` 子命令后由 PostToolUse 接受；完整 payload 与便捷子命令走同一协议校验。拒绝时业务状态整体回滚；宿主 `permission_mode` 属于当前事件的可信观测，不随信号声明回滚，普通工具事件在模式变化时也会同步该观测。
@@ -36,6 +40,8 @@ related:
 - 等待说明若只区分 Codeg 与内置子代理，会把不会唤醒父会话的 Herdr TUI 和自动回送结果的 Cindy 说成同一类，导致错误轮询或提前结束回合。
 - 只看当前 reviewer 状态判断 PASS，会被同一批或后续信号的 verdict 改写洗掉；重复 `packageId` 又让批前预校验看不到批内前项。因此把曾 PASS 落成单调事实，并用“一批一包”的显式规则保证 `diagnostic` 只能在首次创建时声明。
 - `wasReviewed` 只看当前 reviewer、取消预校验只看批前已有包，同样会漏掉历史事实：换审查对象后再改 `waived`、或同批新建 `canceled` 包并补一条指向它的 PASS，都能绕开“已审包不能放弃审查”的约束。因此把批前当前结论、本批合并后的最终结论与单调 `reviewPasses` 合成同一份审查事实，统一沿 `supersedes` 链遍历；同一批内改指不会立即洗掉批前 FIX/BLOCKED，取消仍只按其中的 PASS 事实。
+- 仅放行字面量计划文件或整串匹配 `agent`，会锁死规范命名的计划创建与带模型后缀的同一基础 Agent；收尾临时 `waivers` 则存在未经用户同意跳过独立审查的缺口。计划路径必须与开工写入限制共用同一真实路径判定，临时目录放行也必须逐段拒绝符号链接/junction，否则“放行计划”和“放行临时目录”会变成任意写入后门。
+- 增量准备更新若把未提到的旧条目也塞进本次输入，`mergePreparationSnapshot` 就无法区分保留与重传，`preserved` 统计和“漏传不删除”的语义都会失真；因此完整记录只用于缺项校验与会话基线，快照合并仍只接收本次实际提到的条目。
 
 ## 验收
 
@@ -52,6 +58,10 @@ related:
 - 用户指定分工后，`operation-only`/`lead-direct` 不能消除用户要求的 Worker/Reviewer 分工；`route` 只决定门禁范围，不认证任务复杂度。通道偏离必须在同一 `packages` 信号附 `change.packages`，先声明错误通道再“实际执行与声明一致”不能绕过；未声明通道或未指定角色的旧行为不变。
 - 曾有 PASS 审查的 worker 包（含沿 `supersedes` 链的曾 PASS 事实）改 `canceled` 返回 `PACKAGE`，原账本不变；PASS 事实是单调的：同一批把审查改成 `FIX`/`BLOCKED`、或先单独改 `FIX` 再取消，都不能抹掉曾 PASS，取消仍被拒。旧账本没有历史字段时按当前 PASS 动态推导，并在下一次写账本前落成历史；随后合法返修新 `deliveredRef` 再取得匹配 PASS 仍可通过，不阻塞新 ref 再审。从未有 PASS 的包可合法取消（当前只有 FIX/BLOCKED 而没有 PASS 的包也在内），已合法 `waived` 的语义保持不变；审查对象改成指向其他包后，历史 PASS 仍算已审：该包不能改标 `waived`，其 `review:<id>` 缺项也不能用 waiver 抵扣；`waived` 预校验的已审事实取批前当前 reviewer 结论、本批合并后的最终结论（含 FIX/BLOCKED）与历史 PASS 的并集，因此同一批把审查对象从 A 改指 B 时 A 的批前 FIX/BLOCKED 仍参与（A 同时 waived 返回 `PACKAGE`）；重指在单独信号中成功落盘后，后续信号才不再保留旧 FIX/BLOCKED；PASS 历史跨信号沿 `supersedes` 链单调保留。`waived` 判定与数组顺序无关，取消只按 PASS 事实。审查取消而无结论的包仍算未审、可合法 waived。同包返修后旧 `reviewedRef` 不再匹配新 `deliveredRef`，必须重新送审；换新包只能在创建时声明 `supersedes`，接替包需要自己的 PASS，继承的旧结论不能直接抵扣。历史上已被标成 `canceled` 但链路有 PASS 的包仍列入 `review:<id>`。
 - 同一批新建 worker 包并把它标成 `canceled` 时，按本批合并后的目标包与 `supersedes` 链接替关系核对曾 PASS：若同批 reviewer 的 PASS 指向它，或它接替的旧包（链）有 PASS，返回 `PACKAGE`，且不因数组顺序改变；拒绝整批回滚，不写入 worker、reviewer 或 `reviewPasses`。从未有 PASS 的新包仍可合法取消。
+- 未开工与 `plan` 模式下，写 `docs/plans/2026-11-02-*.md` 与独立系统临时目录放行；符号链接/junction、相对段 `..`、项目内非计划路径和其他项目外路径返回 `deny`；`plan` 模式即使 `allowedPaths` 含业务文件仍拒绝业务写入。未开工 `Agent(general-purpose)` 被拒，原因包含可改用 `Explore`/`Plan` 的提示。
+- 准备记录 `agent` 含 `(group/worker[1m], high)` 时，`codeg:claude_code` 委派放行；`task-update` 仅追加 `docs/plans/*.md` 不强制重传准备记录，增量更新未交付 `dispatched` 包的模型后缀成功刷新包记录，换基础 Agent 或包已交付时仍返回 `PREPARATION`。
+- 复杂 `delegated` 任务未预声明 `reviewWaiver` 时，`packages` 标 `waived` 返回 `PACKAGE`，`task-end` 传 `review`/`review:<id>` 的 `waivers` 仍返回 `GATE` 并保留缺项；预声明有效 `{ reason, consent }` 且未被送审推翻时 `task-end` 通过并在 `reviewWaived` 列出；无 `preparation` 的历史 `delegated` 任务保持原兼容行为。
+- 压缩恢复与 Lead 入口的 `instruction` 均包含上述三条核心纪律；普通 Worker/Reviewer 入口不额外注入 Lead 调度纪律。
 - 同一批 `packages` 中同一 `packageId` 重复出现返回 `PACKAGE`，整批不写入；因此不能借“先消费、再改 `dispatched` 带 `diagnostic`、再消费并写 `note`”绕开首次声明限制。`diagnostic` 的其余首次创建约束不变。
 - 只读诊断免审只能在首次创建 worker 包时用 `diagnostic:{purpose, scope[], reason}` 声明：只允许 `dispatched`、不带 `deliveredRef`、不接替已有包；用途与理由非空，`scope` 为 1-50 项项目内相对路径。合法声明记入包记录，`gateReport` 的 `diagnostic` 列出这些包，免去 `review:<id>`。交付时必须在 `note` 写可定位结论与证据；缺结论列 `diagnostic:<id>` 且不能用 waiver 抵扣。实现包、审查包、事后补声明或修改声明、空理由、空/绝对/越界范围、接替已审包都返回 `PACKAGE`。历史未声明包仍要求审查。
 - 拒绝信号在真实 PostToolUse 回执中给出可定位原因（`accepted:false` 与 `reason`）：PASS 缺 `reviewedRef`、`reviews` 指向未登记包或非 worker 包、包状态/角色错误、审查版本与最终交付不匹配等；修正声明后重发被接受。同 `signalId` 同正文重试保持幂等并标记重放，同 ID 改正文返回 `SIGNAL_ID`；组合命令不被接收，同一 payload 改为独立直接调用后接受。CLI 退出成功不等于 `accepted`；未落盘的失败信号不猜测内容、不自动重放，只依据当前宿主回执与幂等重发恢复。
@@ -72,5 +82,5 @@ related:
 - 回执消费是宿主/模型行为边界：插件只保证拒绝原因可见、未落盘失败可安全幂等重发，不能保证模型一定阅读回执，也不自动猜测或重放失败信号。
 - 校验只放在协议层，不在 `signal.mjs` 复制一套规则；接收仍只认 PostToolUse 中可核对的直接调用。不覆盖宿主权限真实性的证明，也不代替用户授权；spec 的 Git 调用与预算留在 `src/spec.mjs`，协议只消费生产 Hook 预检的内部结果。`binding` 只随当次预检在内存中传递，不写状态、不做持久缓存；锁内复核的重解析上限独立于 4 秒预检预算，超时按过期处理。
 - 4 秒总预算与 10 秒单次上限只约束 Git 子进程；同步文件读取不检查也无法中断截止时间，其耗时仍会消耗绝对剩余量、缩短后续 Git 可用时间，因此 4 秒不保证整次预检或 Hook 的总时长；宿主自身超时和真实超大仓库的耗时同样不做承诺。不为慢检查新增调度器、持久缓存或 schema 字段。
-- 命令型委派只识别 `Bash`/`PowerShell`/`pwsh`/`exec_command` 中的单条直接调用；脚本、别名、函数或包装命令可绕过，这是提醒式门禁，不是沙箱。Agent 核对使用通道尾部/程序名与准备记录做词级匹配，不能证明目标会话实际运行的 Agent；Orca 的 `model` 只记录、不参与核对。
+- 命令型委派只识别 `Bash`/`PowerShell`/`pwsh`/`exec_command` 中的单条直接调用；脚本、别名、函数或包装命令可绕过，这是提醒式门禁，不是沙箱。Agent 核对使用通道尾部/程序名与准备记录做词级匹配，不能证明目标会话实际运行的 Agent；Orca 的 `model` 只记录、不参与核对。系统临时目录放行只针对 `Write`/`Edit`/`MultiEdit`/`NotebookEdit` 的路径参数，不解析 shell 重定向；`reviewWaiver.consent` 只记录用户同意依据的可核对文本，不自动验证聊天原文。
 - 宿主消息识别只按固定开头；实测未取得的 Session task/Orca 回报格式不猜、不识别。Herdr GUI 的 hooks 触发、`<hc from=…>` 的真实文本，以及 Cindy 的 hooks 注册与 code mode 嵌套调用是否被 `PreToolUse` 观察，仍须真实软件验收；合成测试只证明解析与包核对逻辑。

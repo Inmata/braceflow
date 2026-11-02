@@ -4,7 +4,7 @@ import path from 'node:path';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { digest, readState } from '../src/store.mjs';
 import { getContext } from '../src/context.mjs';
-import { normalizePreparation, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary } from '../src/preparation.mjs';
+import { agentBaseWords, normalizePreparation, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, resolvePlanPath, sameBaseAgent } from '../src/preparation.mjs';
 import { cli, emit, entry, event, fixture } from './helpers.mjs';
 
 const PLAN_PATH = 'docs/plans/preparation-demo.md';
@@ -286,6 +286,46 @@ test('源计划的目录链接指向项目外时仍按项目边界拒绝', async
   assert.equal(receipt.reason, 'PLAN');
   assert.match(receipt.message, /docs\/plans|项目内/);
   assert.equal((await stored(f)).preparation, undefined);
+});
+
+test('计划路径只接受 docs/plans 下合规 Markdown，空段与点段不参与归一', async () => {
+  const f = await fixture();
+  // 文件尚未创建时仍返回真实目标路径，供开工门禁放行“先写计划”。
+  const missing = resolvePlanPath(f.project, PLAN_PATH);
+  assert.equal(missing.error, undefined);
+  assert.equal(missing.missing, true);
+  assert.equal(path.basename(missing.realPath), 'preparation-demo.md');
+
+  await writePlan(f);
+  const existing = resolvePlanPath(f.project, PLAN_PATH);
+  assert.equal(existing.error, undefined);
+  assert.equal(existing.missing, undefined);
+  assert.equal(existing.realPath, path.join(f.project, PLAN_PATH));
+
+  const nested = resolvePlanPath(f.project, 'docs/plans/nested/deep.markdown');
+  assert.equal(nested.error, undefined);
+  assert.equal(nested.missing, true);
+
+  for (const relative of ['docs/plans//plan.md', 'docs/plans/./plan.md', 'docs/plans/../plan.md', 'docs/other/plan.md', 'README.md']) {
+    assert.equal(resolvePlanPath(f.project, relative).error, 'scope', relative);
+  }
+  assert.equal(resolvePlanPath(f.project, 'docs/plans/plan.txt').error, 'suffix');
+  assert.equal(resolvePlanPath(f.project, path.join(f.project, PLAN_PATH)).error, 'scope');
+});
+
+test('基础 Agent 词根剥离括号与运行参数，只比较词序', () => {
+  assert.deepEqual(agentBaseWords('Claude Code (group/worker[1m], high)'), ['claude', 'code']);
+  assert.deepEqual(agentBaseWords('Claude Code --model opus --effort high'), ['claude', 'code']);
+  assert.deepEqual(agentBaseWords('Claude Code -m opus'), ['claude', 'code']);
+  assert.deepEqual(agentBaseWords('Codex（group/worker[1m], high）'), ['codex']);
+
+  assert.equal(sameBaseAgent('Claude Code (group/worker[1m], high)', 'claude_code'), true);
+  assert.equal(sameBaseAgent('Claude Code --model opus --effort high', 'Claude Code'), true);
+  assert.equal(sameBaseAgent('Claude Code -m opus', 'claude code'), true);
+  assert.equal(sameBaseAgent('Codex（group/worker[1m], high）', 'codex'), true);
+  assert.equal(sameBaseAgent('Claude Code', 'Codex'), false);
+  // 空名没有可比词根，不能因为“都为空”被判为同一 Agent。
+  assert.equal(sameBaseAgent('', ''), false);
 });
 
 test('依赖未登记、绝对路径、未知顶层字段和缺失 preparation 都给出可定位拒绝', async () => {

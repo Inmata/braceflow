@@ -2,7 +2,7 @@ import path from 'node:path';
 import { readFileSync } from 'node:fs';
 import { deferredLifecycleEvents, digest, fail, id, lifecycleEvents, lifecycleScope, readDeferredLifecycleNote, samePath, SCHEMA_VERSION, WorkflowError } from './store.mjs';
 import { checkSpecs, describeFindings, verifySpecBinding } from './spec.mjs';
-import { mergePreparationSnapshot, normalizePreparation, preparationConsistencyGaps, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath } from './preparation.mjs';
+import { mergePreparationSnapshot, normalizePreparation, preparationConsistencyGaps, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, PREPARATION_SIZES, resolvePlanPath, sameBaseAgent } from './preparation.mjs';
 import { isCodegChannel, codegWaitInstruction } from './adapters/codeg.mjs';
 import { isHcChannel, isHerdrChannel, hcWaitInstruction, herdrWaitInstruction } from './adapters/herdr.mjs';
 import { cindyWaitInstruction, isCindyChannel } from './adapters/cindy.mjs';
@@ -413,6 +413,10 @@ function validateBatch(task, items) {
     if (role === 'worker' && next.status === 'waived' && previous?.status !== 'waived' && chainHas(mergedTask, next, facts.reviewed)) {
       fail('PACKAGE', `工作包 ${item.packageId} 已有审查结论，不能标 waived：让审查对上最终交付版本，或用 supersedes 接替，或 canceled 放弃`);
     }
+    // 复杂分工任务的审查豁免只能在准备阶段逐包预声明；开工后临时标 waived 会绕过独立审查。
+    if (role === 'worker' && next.status === 'waived' && previous?.status !== 'waived' && complexDelegated(task) && !preparedReviewWaiver(mergedTask, next)) {
+      fail('PACKAGE', `复杂分工任务的工作包 ${item.packageId} 未在准备记录中预声明 reviewWaiver，不能标 waived：请补独立审查，或回到准备阶段经用户同意后预声明`);
+    }
     if (item.diagnostic !== undefined) {
       const parsed = diagnosticInput(item.diagnostic);
       diagnostics.set(item, parsed);
@@ -692,12 +696,13 @@ export function gateReport(state, task, finalRef, root, spec) {
       if (!task.validation || (finalRef && task.validation.ref !== finalRef)) missing.push('validation');
       missing.push(...acceptanceMissing(task));
     }
-    return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic: [] };
+    return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic: [], reviewWaived: [] };
   }
   const packages = Object.values(task.packages || {});
   for (const item of packages) if (!TERMINAL_PACKAGE.includes(item.status)) missing.push(`terminal:${item.packageId}`);
   const passTargets = passTargetsOf(task);
   const diagnostic = [];
+  const reviewWaived = [];
   // 曾有 PASS 的 worker 包即使历史记录里被标成 canceled、或当前 verdict 后来改成 FIX，也不能因此退出审查；未审取消照旧放行。
   for (const worker of packages.filter(item => item.role === 'worker' && item.status !== 'waived' && !item.supersededBy)) {
     if (worker.status === 'canceled' && !chainHas(task, worker, passTargets)) continue;
@@ -708,13 +713,19 @@ export function gateReport(state, task, finalRef, root, spec) {
       continue;
     }
     const passed = packages.some(item => item.role === 'reviewer' && item.reviews === worker.packageId && item.verdict === 'PASS' && !!item.reviewedRef && item.reviewedRef === worker.deliveredRef);
-    if (!passed) missing.push(`review:${worker.packageId}`);
+    if (passed) continue;
+    // 复杂分工任务只认准备阶段经用户同意的逐包豁免；一旦已有实际审查结论，豁免不再生效。
+    if (complexDelegated(task) && preparedReviewWaiver(task, worker) && !wasReviewed(task, worker)) {
+      reviewWaived.push(worker.packageId);
+      continue;
+    }
+    missing.push(`review:${worker.packageId}`);
   }
   // 验证证据必须绑定集成后的最终版本；finalRef 缺省时以 validation.ref 为准。
   if (!task.validation || (finalRef && task.validation.ref !== finalRef)) missing.push('validation');
   // 版本变化后旧 validation 失效；验收矩阵随交付声明一起重报，不能沿用旧版本证据。
   missing.push(...acceptanceMissing(task));
-  return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic };
+  return { missing: [...missing, ...specResult.missing], findings: specResult.findings, diagnostic, reviewWaived };
 }
 // 豁免可写完整条目（review:pkg-1）或整类步骤（review）；spec 漂移任何豁免都不抵扣。
 // 审过的 worker 包，审查缺项（未 PASS 或审的不是最终交付版本）也不抵扣：只能补审或用 supersedes 接替。
@@ -725,10 +736,23 @@ const reviewed = (task, entry) => entry.startsWith('review:') && wasReviewed(tas
 // 真实的人工待验/受阻/延期要用对应状态如实结束，而不是豁免成“通过”。旧任务没有矩阵时保持原豁免兼容。
 const waived = (task, entry, waivers) => {
   if (entry === 'spec' || entry.startsWith('spec:') || entry === 'spec-check:stale' || entry.startsWith('diagnostic:')) return false;
+  // 复杂分工任务的独立审查是固定门禁：准备阶段没有逐包预声明豁免时，task-end 的 waivers 不能整类抵扣。
+  if (complexDelegated(task) && (entry === 'review' || entry.startsWith('review:'))) return false;
   if (reviewed(task, entry)) return false;
   if (acceptanceApplies(task) && (entry === 'validation' || entry.startsWith('acceptance:') || entry.startsWith('acceptance-unknown:'))) return false;
   return waivers.some(w => w.step === entry || w.step === entry.split(':')[0]);
 };
+const complexDelegated = task => task.route === 'delegated' && task.preparation?.size === 'complex';
+// 按包本身或它接替过的旧包查找准备声明；返修接替包沿用被接替包的选择与豁免。
+function preparationDeclaration(task, item) {
+  const declared = task.preparation?.packages || [];
+  for (let current = item, hops = 0; current && hops <= MAX_PACKAGES; current = task.packages?.[current.supersedes], hops++) {
+    const match = declared.find(entry => entry.packageId === current.packageId);
+    if (match) return match;
+  }
+  return null;
+}
+const preparedReviewWaiver = (task, item) => preparationDeclaration(task, item)?.reviewWaiver || null;
 // 准备更新的显式目标：新增准备必须能对得上本次目标与权限，而不仅是“理由非空”。
 function preparationTargetInput(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail('PREPARATION', 'preparationTarget 需为 {goal, permissions:{mode, allowedPaths}}');
@@ -752,6 +776,69 @@ const sameStringSet = (left, right) => {
   const b = [...new Set(right)].sort();
   return a.length === b.length && a.every((item, index) => item === b[index]);
 };
+// 计划文档不是业务写入：task-update 只追加合规 docs/plans Markdown 时不算扩大业务范围。
+// 路径判定与开工限制共用 resolvePlanPath，链接、穿越和非计划文件仍按业务路径处理。
+function planDocumentPath(root, relative) {
+  if (typeof relative !== 'string' || path.isAbsolute(relative) || /^[A-Za-z]:/.test(relative)) return false;
+  return !resolvePlanPath(root, relative).error;
+}
+// 同一基础 Agent 只调整括号备注或 --model/--effort 时，允许更新尚未交付的已派发包；
+// 其余选择（含审查豁免）必须完全一致，换基础 Agent 仍需先结束或接替该包。
+const sameSelection = (left, right) =>
+  (left.role || '') === (right.role || '') &&
+  (left.channel || '') === (right.channel || '') &&
+  (left.scope || '') === (right.scope || '') &&
+  (left.delivers || '') === (right.delivers || '') &&
+  JSON.stringify([...(left.dependsOn || [])].sort()) === JSON.stringify([...(right.dependsOn || [])].sort()) &&
+  JSON.stringify(left.reviewWaiver || null) === JSON.stringify(right.reviewWaiver || null);
+function agentRetuneAllowed(pkg, before, after) {
+  if (!pkg || !before || !after) return false;
+  if (pkg.status !== 'dispatched' || pkg.deliveredRef || pkg.deliverySeq > 0) return false;
+  return sameSelection(before, after) && sameBaseAgent(before.agent, after.agent);
+}
+// task-update 的 preparation 支持增量：快照提供开工后固定过的需求/分包/来源，
+// 会话记录补 research/solution/verification/confirmation 等快照不保存的正文。
+function preparationBase(snapshot, sessionRecord) {
+  const base = {};
+  if (sessionRecord) {
+    for (const field of ['size', 'sizeReason', 'requirements', 'research', 'solution', 'packages', 'verification', 'confirmation', 'pending']) base[field] = sessionRecord[field];
+    if (sessionRecord.source) base.source = { path: sessionRecord.source.path, sections: sessionRecord.source.sections };
+  }
+  if (!snapshot) return Object.keys(base).length ? base : null;
+  base.size = snapshot.size;
+  base.sizeReason = snapshot.sizeReason;
+  base.requirements = snapshot.requirements;
+  base.packages = snapshot.packages;
+  if (snapshot.source?.path) base.source = { path: snapshot.source.path, sections: base.source?.sections || [] };
+  return base;
+}
+// 同 ID 条目只覆盖本次重传的子字段；未重传的字段保留旧值，显式移除只走 preparationRemove。
+// includeUnmentioned=false 时只返回本次提到的条目，交给 mergePreparationSnapshot 统计 preserved。
+function mergePreparationItems(baseItems, incomingItems, key, removeIds = [], includeUnmentioned = true) {
+  const baseList = (Array.isArray(baseItems) ? baseItems : []).filter(item => !removeIds.includes(item?.[key]));
+  if (!Array.isArray(incomingItems)) return includeUnmentioned ? baseList : [];
+  const baseMap = new Map(baseList.map(item => [item[key], item]));
+  const merged = [];
+  const fresh = [];
+  for (const item of incomingItems) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || item[key] === undefined) { merged.push(item); continue; }
+    const filled = { ...(baseMap.get(item[key]) || {}), ...item };
+    merged.push(filled);
+  }
+  if (!includeUnmentioned) return merged;
+  for (const item of baseList) if (!incomingItems.some(entry => entry?.[key] === item[key])) fresh.push(item);
+  return [...merged, ...fresh];
+}
+function mergePreparationInput(base, incoming, removeIds, { includeUnmentioned = true } = {}) {
+  if (!base || !incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming;
+  const merged = { ...base, ...incoming };
+  merged.packages = mergePreparationItems(base.packages, incoming.packages, 'packageId', removeIds, includeUnmentioned);
+  merged.requirements = mergePreparationItems(base.requirements, incoming.requirements, 'id', [], includeUnmentioned);
+  if (base.source && incoming.source && typeof incoming.source === 'object' && !Array.isArray(incoming.source)) merged.source = { ...base.source, ...incoming.source };
+  if (base.solution && incoming.solution && typeof incoming.solution === 'object' && !Array.isArray(incoming.solution)) merged.solution = { ...base.solution, ...incoming.solution };
+  if (base.confirmation && incoming.confirmation && typeof incoming.confirmation === 'object' && !Array.isArray(incoming.confirmation)) merged.confirmation = { ...base.confirmation, ...incoming.confirmation };
+  return merged;
+}
 // task-update：同任务显式改 goal 与 permissions。沿用同一身份/修订/回执与失败回滚；
 // 只改本机任务声明，不碰 route/channels/账本，也不改宿主全局配置。调用方须已有用户授权，插件只记录声明。
 function updateTask(payload, task, session, root) {
@@ -801,18 +888,21 @@ function updateTask(payload, task, session, root) {
       nextPaths = unique;
     }
   }
-  // operation-only 不是写入豁免：不能借 task-update 取得 write 或扩大写入范围。
-  if (task.route === 'operation-only' && (nextMode === 'write' || added.length)) {
+  // 合规计划文档不是业务写入：计划阶段补计划、或实现中同步计划，都不要求重新确认准备。
+  const addedBusiness = added.filter(relative => !planDocumentPath(root || session.root, relative));
+  const planToWrite = nextMode === 'write' && previous.mode === 'plan';
+  // operation-only 不是写入豁免：不能借 task-update 取得 write 或扩大业务写入范围。
+  if (task.route === 'operation-only' && (nextMode === 'write' || addedBusiness.length)) {
     fail('PERMISSION', 'operation-only 任务不能取得业务写入权限或扩大写入范围；需要写业务文件时结束本任务，按 lead-direct 或 delegated 重新准备开工');
   }
   // 宿主只读/计划模式优先：信号只能记录声明，不能把实际写入权限抬到宿主之上。
-  if (HOST_BLOCKED_MODES.includes(session.permissionMode) && ((nextMode === 'write' && previous.mode !== 'write') || added.length)) {
+  if (HOST_BLOCKED_MODES.includes(session.permissionMode) && ((nextMode === 'write' && previous.mode !== 'write') || addedBusiness.length)) {
     fail('PERMISSION', `宿主当前为 ${session.permissionMode} 模式：task-update 不能提升宿主权限；回到可写模式后再更新`);
   }
   // 目标或权限范围确实变化时，不能拿开工时那份旧声明继续走；必须显式提交与该变化关联的准备更新。
-  // 只更新进度、路径或同步事实不要求重新确认；旧任务没有准备快照时保持兼容。
+  // plan -> write 且只增加计划文档时沿用已绑定准备；只更新进度、路径或同步事实不要求重新确认；旧任务保持兼容。
   const goalChanged = goal !== undefined && goal !== previous.goal;
-  const scopeExpanded = (nextMode === 'write' && previous.mode !== 'write') || added.length > 0;
+  const scopeExpanded = addedBusiness.length > 0 || (nextMode === 'write' && previous.mode !== 'write' && !planToWrite);
   const hasPreparation = payload.preparation !== undefined;
   const hasRemove = payload.preparationRemove !== undefined;
   const hasTarget = payload.preparationTarget !== undefined;
@@ -826,23 +916,32 @@ function updateTask(payload, task, session, root) {
   }
   let preparationChange = null;
   if (hasPreparation) {
-    const record = normalizePreparation(payload.preparation, { root: root || session.root });
+    // preparation 支持增量：只重传变化的条目/字段，未提到的保持开工时的绑定值；移除必须走 preparationRemove。
+    const removeIds = hasRemove ? preparationRemoveInput(payload.preparationRemove) : [];
+    const incoming = payload.preparation;
+    const base = preparationBase(task.preparation, session.preparation);
+    // 完整记录用于缺项校验和会话基线；交给快照合并的只保留本次实际提到的条目，
+    // 否则 mergePreparationSnapshot 无法区分“保留的旧条目”和“这次重新传入”。
+    const record = normalizePreparation(mergePreparationInput(base, incoming, removeIds), { root: root || session.root });
+    const incomingRecord = task.preparation
+      ? normalizePreparation(mergePreparationInput(base, incoming, removeIds, { includeUnmentioned: false }), { root: root || session.root })
+      : record;
     const gaps = preparationMissing(record);
     if (gaps.length) preparationFailure(gaps, '任务准备更新前，记录还有缺项');
     if (task.preparation?.size === 'complex' && record.size !== 'complex') {
       preparationFailure([{ field: 'preparation:size', message: '复杂任务的准备记录不能降为简单任务后再扩大范围' }], '准备检查未通过');
     }
-    const removeIds = hasRemove ? preparationRemoveInput(payload.preparationRemove) : [];
     const previousIds = new Set((task.preparation?.packages || []).map(item => item.packageId));
+    const incomingPackages = Array.isArray(incoming?.packages) ? incoming.packages : [];
     for (const packageId of removeIds) {
       if (!previousIds.has(packageId)) fail('PREPARATION', `preparationRemove 要求移除未在准备记录中的包 ${packageId}`);
       const pkg = task.packages?.[packageId];
       if (pkg && !TERMINAL_PACKAGE.includes(pkg.status) && !pkg.supersededBy) {
         fail('PREPARATION', `工作包 ${packageId} 仍在 ${pkg.status}，不能从准备记录移除；先结束或接替该包`);
       }
-      if (record.packages.some(item => item.packageId === packageId)) fail('PREPARATION', `工作包 ${packageId} 同时出现在 preparation 与 preparationRemove 中；移除和保留只能选一种`);
+      if (incomingPackages.some(item => item?.packageId === packageId)) fail('PREPARATION', `工作包 ${packageId} 同时出现在 preparation 与 preparationRemove 中；移除和保留只能选一种`);
     }
-    const merged = mergePreparationSnapshot(task.preparation, record, { removePackageIds: removeIds });
+    const merged = mergePreparationSnapshot(task.preparation, incomingRecord, { removePackageIds: removeIds });
     // 本次记录自身完整不代表合并结果完整：保留的旧需求可能仍指向已被移除的工作包。
     // 拒绝时点名具体需求与包，不能用“只校验 incoming”或暗删旧需求绕过。
     const consistency = preparationConsistencyGaps(merged.snapshot);
@@ -855,12 +954,32 @@ function updateTask(payload, task, session, root) {
       invalidatedAcceptance = task.validation.acceptance.filter(entry => stale.has(entry.id)).map(entry => entry.id);
       if (invalidatedAcceptance.length) task.validation.acceptance = task.validation.acceptance.filter(entry => !stale.has(entry.id));
     }
-    // 活动包不能被静默换 Agent/范围：先结束或接替该包，再更新准备。
+    // 活动包不能被静默换 Agent/范围；已派发未交付的包允许同一基础 Agent 调整 model/effort 等备注，
+    // 其余选择必须完全一致。换基础 Agent 仍需先结束或接替该包。
     for (const packageId of merged.changed) {
       const pkg = task.packages?.[packageId];
-      if (pkg && !TERMINAL_PACKAGE.includes(pkg.status) && !pkg.supersededBy) {
-        fail('PREPARATION', `工作包 ${packageId} 仍在 ${pkg.status}，不能改写它的准备选择；先结束或接替该包，再更新准备记录`);
+      if (!pkg) continue;
+      const beforeDeclared = task.preparation?.packages?.find(item => item.packageId === packageId);
+      const afterDeclared = merged.snapshot.packages.find(item => item.packageId === packageId);
+      const agentChanged = Boolean(beforeDeclared && afterDeclared && beforeDeclared.agent !== afterDeclared.agent);
+      if (TERMINAL_PACKAGE.includes(pkg.status) || pkg.supersededBy) {
+        if (agentChanged) fail('PREPARATION', `工作包 ${packageId} 已交付或已结束，不能再调整 Agent；返修请新建接替包`);
+        continue;
       }
+      if (agentRetuneAllowed(pkg, beforeDeclared, afterDeclared)) {
+        task.packages[packageId] = { ...pkg, agent: afterDeclared.agent };
+        continue;
+      }
+      fail('PREPARATION', `工作包 ${packageId} 仍在 ${pkg.status}，不能改写它的准备选择；先结束或接替该包，再更新准备记录`);
+    }
+    // 审查豁免只能事先约定：包已有审查事实或本身是只读诊断时，不能再补挂或修改豁免。
+    for (const declared of merged.snapshot.packages) {
+      if (!declared.reviewWaiver) continue;
+      const beforeDeclared = task.preparation?.packages?.find(item => item.packageId === declared.packageId);
+      if (JSON.stringify(beforeDeclared?.reviewWaiver || null) === JSON.stringify(declared.reviewWaiver)) continue;
+      const pkg = task.packages?.[declared.packageId];
+      if (pkg?.diagnostic) fail('PREPARATION', `工作包 ${declared.packageId} 是只读诊断包，本就走诊断结论门禁，不能补挂 reviewWaiver`);
+      if (pkg && wasReviewed(task, pkg)) fail('PREPARATION', `工作包 ${declared.packageId} 已有实际审查结论，不能再补挂或修改 reviewWaiver`);
     }
     // 目标/权限变化必须由本次准备的实际变化支撑：仅重放旧记录和一条理由不算。
     // 程序不判断自然语言授权真伪，只核对声明、目标与可审计差异。
@@ -901,6 +1020,8 @@ function updateTask(payload, task, session, root) {
       after: merged.snapshot,
     });
     task.preparation = merged.snapshot;
+    // 后续增量以本次完整记录为基线：快照不含 research/solution 等正文，只靠 task.preparation 会丢字段。
+    session.preparation = record;
     task.size = merged.snapshot.size;
     task.sizeReason = merged.snapshot.sizeReason;
     preparationChange = {
@@ -1127,7 +1248,8 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
         const specText = report.findings.length ? `。spec 检查：${describeFindings(report.findings)}；更新 spec，或在内容提交附 Spec-OK 写明不需要更新的理由（需要追认既有历史时才用空提交）` : '';
         const reviewText = missing.some(entry => reviewed(task, entry)) ? '。已安排审查的包不能豁免审查缺项：让审查结论对上最终交付版本（reviewedRef=deliveredRef），或用 supersedes 接替' : '';
         const diagnosticText = missing.some(entry => entry.startsWith('diagnostic:')) ? '。只读诊断包需要交付可定位结论：在 packages 的 note 写明结论与证据；该缺项不能用 waiver 抵扣' : '';
-        const error = new WorkflowError('GATE', `完成门禁未满足：${missing.join(', ')}${specText}${reviewText}${diagnosticText}`);
+        const complexReviewText = complexDelegated(task) && missing.some(entry => entry === 'review' || entry.startsWith('review:')) ? '。复杂分工任务的独立审查不能临时豁免：补齐独立 Reviewer PASS，或使用准备阶段经用户同意的预声明 reviewWaiver；返修用 supersedes 接替' : '';
+        const error = new WorkflowError('GATE', `完成门禁未满足：${missing.join(', ')}${specText}${reviewText}${diagnosticText}${complexReviewText}`);
         error.missing = missing;
         if (report.findings.length) error.findings = report.findings;
         throw error;
@@ -1137,7 +1259,7 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
       task.lifecycle = 'complete';
       session.phase = 'unknown';
       if (!task.route) extra = { warning: 'route-missing' };
-      else if (task.route === 'delegated') extra = { gate: 'declared-records-consistent' };
+      else if (task.route === 'delegated') extra = { gate: 'declared-records-consistent', ...(report.reviewWaived.length ? { reviewWaived: report.reviewWaived } : {}) };
       const stale = unchangedPlans(state, task, root);
       if (stale.length) extra = { ...extra, planUnchanged: stale, reminder: planReminder(stale) };
       // 阶段交付如实区分：门禁通过只表示记录齐全与格式有效，不表示所有验收都已由用户或真实入口证明。

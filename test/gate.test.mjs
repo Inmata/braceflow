@@ -555,6 +555,32 @@ test('压缩后 compact SessionStart 上下文含紧凑账本且不含结果正�
   assert.equal(context.ledger.route, 'delegated');
   assert.deepEqual(context.ledger.packages, ['w1 worker consumed abc123 - 0 - -', 'r1 reviewer consumed - PASS@w1:abc123 0 - -']);
   assert.ok(!output.hookSpecificOutput.additionalContext.includes('结果正文不应出现'));
+  // U5：压缩恢复也必须重新给出三条核心纪律，避免压缩后跳过确认与审查。
+  assert.match(context.instruction, /核心纪律/);
+  assert.match(context.instruction, /三步确认/);
+  assert.match(context.instruction, /Worker 已给出通过/);
+  assert.match(context.instruction, /复杂 delegated.*独立审查/);
+});
+
+test('U5 Lead 入口携带核心纪律，Worker 角色入口不加载', async () => {
+  const f = await fixture({ autoOwner: true });
+  const entry = await event(f, 'UserPromptSubmit');
+  const context = JSON.parse(entry.hookSpecificOutput.additionalContext.slice('workflow 入口：'.length));
+  assert.equal(context.role, 'lead');
+  assert.match(context.instruction, /核心纪律/);
+  assert.match(context.instruction, /三步确认/);
+  assert.match(context.instruction, /Worker 已给出通过/);
+  assert.match(context.instruction, /复杂 delegated.*独立审查/);
+
+  await start(f);
+  const worker = { ...f, sessionId: 'discipline-worker', turnId: 'discipline-turn-1' };
+  await event(worker, 'UserPromptSubmit');
+  assert.equal((await emit(worker, { action: 'role-claim', role: 'worker', packageId: 'w1' })).result.accepted, true);
+  worker.turnId = 'discipline-turn-2';
+  const workerEntry = await event(worker, 'UserPromptSubmit');
+  const workerContext = JSON.parse(workerEntry.hookSpecificOutput.additionalContext.slice('workflow 入口：'.length));
+  assert.equal(workerContext.role, 'worker');
+  assert.ok(!workerContext.instruction.includes('核心纪律'));
 });
 
 test('task show 只读返回账本与门禁缺项', async () => {
@@ -1334,6 +1360,87 @@ test('W3 复杂 lead-direct 也要过需求验证与验收矩阵；简单 lead-d
   const done = await emit(simple, { action: 'task-end' });
   assert.equal(done.result.accepted, true, JSON.stringify(done.result));
   assert.equal(done.result.acceptance, undefined);
+});
+
+// U4：复杂 delegated 的逐包审查豁免只能来自准备快照的 reviewWaiver。
+async function reviewWaiverFixture({ waiver, reviewer = false } = {}) {
+  const f = await fixture();
+  const plan = 'docs/plans/review-waiver.md';
+  await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
+  await writeFile(path.join(f.project, plan), '# 审查豁免\n\nA01\n');
+  const declared = [{ packageId: 'w1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', delivers: '完整行为', dependsOn: [], ...(waiver ? { reviewWaiver: waiver } : {}) }];
+  if (reviewer) declared.push({ packageId: 'r1', role: 'reviewer', agent: 'Codex', channel: 'codeg:codex', scope: '审查 w1', delivers: '审查结论', dependsOn: ['w1'] });
+  const prepared = await emit(f, {
+    action: 'prepare',
+    preparation: {
+      size: 'complex',
+      sizeReason: '逐包审查与豁免需要准备记录声明',
+      requirements: [{ id: 'A01', summary: '完整行为', acceptance: ['定向测试通过'], packages: ['w1'], verification: 'node --test test/gate.test.mjs' }],
+      research: [{ source: '本仓 protocol.mjs', conclusion: '复用 reviewWaived 门禁' }],
+      solution: { summary: '复杂任务逐包审查，豁免须预声明', decisions: [{ decision: '只接受准备快照中的豁免', reason: '避免开工后补挂' }] },
+      packages: declared,
+      verification: ['node --test test/gate.test.mjs'],
+      confirmation: { scope: ['需求', '分包', 'Agent'], basis: '用户确认复杂任务与豁免' },
+      pending: [], source: { path: plan },
+    },
+  });
+  assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
+  const started = await emit(f, { action: 'task-start', goal: '复杂任务审查豁免', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const dispatched = declared.map(item => ({ packageId: item.packageId, role: item.role, status: 'dispatched', agent: item.agent, channel: item.channel, scope: item.scope }));
+  const result = await emit(f, { action: 'packages', packages: dispatched });
+  assert.equal(result.result.accepted, true, JSON.stringify(result.result));
+  return f;
+}
+const waiverValidation = {
+  ref: 'v1', evidence: ['node --test test/gate.test.mjs 通过'],
+  acceptance: [{ id: 'A01', status: 'verified', evidence: ['node --test: 30 pass'] }],
+};
+const reviewWaiver = { reason: '用户同意先交付，后续单独安排审查', consent: '用户 2026-11-02 明确同意' };
+
+test('U4 准备阶段预声明的 reviewWaiver 让复杂任务如实结束并在门禁回执列出', async () => {
+  const f = await reviewWaiverFixture({ waiver: reviewWaiver });
+  await packages(f, [{ packageId: 'w1', status: 'consumed', deliveredRef: 'v1' }]);
+  const ended = await emit(f, { action: 'task-end', finalRef: 'v1', validation: waiverValidation });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.deepEqual(ended.result.reviewWaived, ['w1']);
+  const task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.equal(task.lifecycle, 'complete');
+});
+
+test('U4 未预声明时不能把复杂任务工作包标 waived，task-end 的 waivers 也不能抵扣审查', async () => {
+  const f = await reviewWaiverFixture();
+  const waived = await packages(f, [{ packageId: 'w1', status: 'waived' }]);
+  assert.equal(waived.result.accepted, false, JSON.stringify(waived.result));
+  assert.equal(waived.result.reason, 'PACKAGE');
+  assert.match(waived.result.message, /reviewWaiver/);
+  await packages(f, [{ packageId: 'w1', status: 'consumed', deliveredRef: 'v1' }]);
+  const ended = await emit(f, { action: 'task-end', finalRef: 'v1', validation: waiverValidation, waivers: [{ step: 'review', reason: '想直接通过' }] });
+  assert.equal(ended.result.accepted, false, JSON.stringify(ended.result));
+  assert.equal(ended.result.reason, 'GATE');
+  assert.ok(ended.result.missing.includes('review:w1'), JSON.stringify(ended.result));
+});
+
+test('U4 已有实际审查结论后预声明豁免失效；无准备的历史任务保留 review waiver 兼容', async () => {
+  const f = await reviewWaiverFixture({ waiver: reviewWaiver, reviewer: true });
+  await packages(f, [
+    { packageId: 'w1', status: 'consumed', deliveredRef: 'v1' },
+    { packageId: 'r1', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'FIX' },
+  ]);
+  const ended = await emit(f, { action: 'task-end', finalRef: 'v1', validation: waiverValidation });
+  assert.equal(ended.result.accepted, false, JSON.stringify(ended.result));
+  assert.ok(ended.result.missing.includes('review:w1'), JSON.stringify(ended.result));
+
+  // 升级前没有准备快照的旧任务不算 complexDelegated，原有 waiver 兼容保持不变。
+  const legacy = await fixture();
+  await legacyDelegated(legacy);
+  await packages(legacy, [{ packageId: 'w1', role: 'worker', status: 'consumed', deliveredRef: 'abc123' }]);
+  const accepted = await emit(legacy, {
+    action: 'task-end', finalRef: 'abc123',
+    validation: { ref: 'abc123', evidence: ['旧任务验证'] },
+    waivers: [{ step: 'review', reason: '旧任务没有准备快照，保留兼容' }],
+  });
+  assert.equal(accepted.result.accepted, true, JSON.stringify(accepted.result));
 });
 
 test('W3 验收矩阵不能用 waiver 抵扣：类别、精确 ID 和 validation 都拒绝，人工待验可如实结束', async () => {

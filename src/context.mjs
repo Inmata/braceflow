@@ -175,7 +175,9 @@ export async function projectContext(state, resolved, role = 'lead', sessionId, 
   const planHint = planning ? '当前为计划模式：交付完整实施计划时才须列出分几个工作包（每包范围与依赖）或说明免拆包理由，并先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。普通解释和讨论不触发这项核对。' : '';
   const leadRepeat = role === 'lead' ? '交付完整实施计划时先说明执行顺序，再请用户逐包指定 Agent 与实际调用通道，同一套已确认分包沿用原选择；复杂任务先 prepare，简单任务用 --size simple --size-reason 声明；只交付纯技术方案时按用户范围停在方案；' : '';
   const base = repeat ? `入口与本会话上一回合相同（文档、信号用法不变）：${leadRepeat}信号用 identity 字段加 signal <action> 子命令；需要时重读 ${role === 'lead' ? 'Lead' : role === 'worker' ? 'Worker' : 'Reviewer'} 指引。` : instructions[role];
-  const instruction = [base, preparationHint, planHint, note, learning, correction, degraded.join(' ')].filter(Boolean).join(' ');
+  // 压缩恢复和 Lead 入口必须重新带回三条边界：它们不随任务状态变化，不能依赖历史对话记忆。
+  const coreDiscipline = '核心纪律：① 三步确认、逐包 Agent/model/effort 选择和用户明确说“开工”之前，不得 signal task-start 或委派实施/审查包；prepare.ready 不等于授权。② Worker 已给出通过的测试或结果时，Lead 不重复跑同一单项测试，只在最终集成时跑一次总验证；怀疑证据再定向复核。③ 复杂 delegated 任务必须逐包独立审查，不得擅自用 waivers 或 waived 豁免；确需豁免只能在准备阶段逐包预声明并取得用户同意。';
+  const instruction = [base, role === 'lead' || options.compact ? coreDiscipline : '', preparationHint, planHint, note, learning, correction, degraded.join(' ')].filter(Boolean).join(' ');
   const signal = repeat ? { command: signalUsage().command } : signalUsage();
   return {
     enabled: true, projectId: project.projectId, root: project.root, worktree: resolved.worktree,

@@ -15,7 +15,8 @@ const REQUIREMENT_FIELDS = ['id', 'summary', 'acceptance', 'packages', 'verifica
 const RESEARCH_FIELDS = ['source', 'conclusion', 'url'];
 const SOLUTION_FIELDS = ['summary', 'decisions', 'tradeoffs', 'assumptions'];
 const DECISION_FIELDS = ['decision', 'reason'];
-const PACKAGE_FIELDS = ['packageId', 'role', 'agent', 'channel', 'scope', 'delivers', 'dependsOn', 'verification'];
+const PACKAGE_FIELDS = ['packageId', 'role', 'agent', 'channel', 'scope', 'delivers', 'dependsOn', 'verification', 'reviewWaiver'];
+const REVIEW_WAIVER_FIELDS = ['reason', 'consent'];
 const CONFIRMATION_FIELDS = ['scope', 'basis'];
 const SOURCE_FIELDS = ['path', 'sections'];
 // 源计划是供阅读、整理和跨电脑接续的 Markdown；与项目惯例一致，接受常见 Markdown 后缀。
@@ -32,9 +33,11 @@ export function resolvePlanPath(root, relative) {
   if (!isMarkdownPath(relative)) return { error: 'suffix' };
   const normalized = relative.replaceAll('\\', '/');
   if (!normalized.startsWith(`${PLAN_DIRECTORY}/`)) return { error: 'scope' };
+  // 空段、`.` 与 `..` 在字面路径上就能改变落点；先按原始段拒绝，不依赖后续 filter 或真实路径比对。
+  const parts = normalized.split('/');
+  if (parts.some(segment => !segment || segment === '.' || segment === '..')) return { error: 'scope' };
   let realRoot;
   try { realRoot = realpathSync(root); } catch { return { error: 'io' }; }
-  const parts = normalized.split('/').filter(Boolean);
   for (let index = 0; index < parts.length; index++) {
     const current = path.join(realRoot, ...parts.slice(0, index + 1));
     let stat;
@@ -58,6 +61,25 @@ export function resolvePlanPath(root, relative) {
   const inside = path.relative(realPlanDir, realPath);
   if (!inside || inside === '..' || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return { error: 'scope' };
   return { realPath };
+}
+
+// Agent 名称常夹带宿主展示备注：括号里的模型/effort、`--model` / `-m` / `--effort` 运行参数。
+// 委派核对只比较基础名称词序，不把备注当成换了 Agent；两处调用（hooks 与 protocol）共用同一规则。
+const RUNTIME_NOTE = /(?:^|\s)(?:--model|--effort|-m)(?:=|\s+)\S+/gi;
+export function agentBaseWords(value) {
+  if (typeof value !== 'string') return [];
+  return value
+    .replace(/\([^()]*\)/g, ' ')
+    .replace(/（[^（）]*）/g, ' ')
+    .replace(RUNTIME_NOTE, ' ')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+export function sameBaseAgent(left, right) {
+  const a = agentBaseWords(left);
+  const b = agentBaseWords(right);
+  return a.length > 0 && a.length === b.length && a.every((word, index) => word === b[index]);
 }
 
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -179,11 +201,20 @@ function normalizeSolution(value) {
   };
 }
 
+// 审查豁免只能由用户在准备阶段对 worker 实施包逐包声明；理由与同意依据都必须落字，不能靠空对象或角色声明默认豁免。
+function normalizeReviewWaiver(value, label, role) {
+  if (value === undefined || value === null) return null;
+  fields(value, REVIEW_WAIVER_FIELDS, label);
+  if (role !== 'worker') fail('PREPARATION', `${label} 只能用于 worker 实施包`);
+  return { reason: readText(value.reason, `${label}.reason`), consent: readText(value.consent, `${label}.consent`) };
+}
+
 function normalizePackages(value) {
   const items = readArray(value, 'packages').map((item, index) => {
     fields(item, PACKAGE_FIELDS, `packages[${index}]`);
     const role = item.role === undefined || item.role === null || item.role === '' ? '' : readText(item.role, `packages[${index}].role`);
     if (role && !PREPARATION_ROLES.includes(role)) fail('PREPARATION', `packages[${index}].role 只能是 worker 或 reviewer`);
+    const reviewWaiver = normalizeReviewWaiver(item.reviewWaiver, `packages[${index}].reviewWaiver`, role);
     return {
       packageId: readIdentifier(item.packageId, `packages[${index}].packageId`),
       role,
@@ -193,6 +224,7 @@ function normalizePackages(value) {
       delivers: maybeText(item.delivers, `packages[${index}].delivers`),
       dependsOn: readArray(item.dependsOn, `packages[${index}].dependsOn`).map((dependency, at) => readIdentifier(dependency, `packages[${index}].dependsOn[${at}]`)),
       verification: maybeText(item.verification, `packages[${index}].verification`),
+      ...(reviewWaiver ? { reviewWaiver } : {}),
     };
   });
   return noDuplicate(items, 'packages', 'packageId');
@@ -334,6 +366,8 @@ export function preparationSnapshot(record) {
       scope: item.scope || '',
       delivers: item.delivers || '',
       dependsOn: Array.isArray(item.dependsOn) ? [...item.dependsOn] : [],
+      // 只有确实声明过豁免的包才带该字段，旧快照与未声明包的比较结果保持不变。
+      ...(item.reviewWaiver ? { reviewWaiver: { reason: item.reviewWaiver.reason, consent: item.reviewWaiver.consent } } : {}),
     })),
   };
 }
@@ -348,6 +382,7 @@ const canonicalPackage = item => ({
   scope: item.scope || '',
   delivers: item.delivers || '',
   dependsOn: Array.isArray(item.dependsOn) ? [...item.dependsOn].sort() : [],
+  ...(item.reviewWaiver ? { reviewWaiver: { reason: item.reviewWaiver.reason, consent: item.reviewWaiver.consent } } : {}),
 });
 const canonicalPackages = items => (items || []).map(canonicalPackage)
   .sort((left, right) => left.packageId < right.packageId ? -1 : left.packageId > right.packageId ? 1 : 0);

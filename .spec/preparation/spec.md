@@ -17,7 +17,9 @@ related:
 - 准备记录至少保存任务大小及理由、需求与验收条目、调研、选定方案与关键决定、工作包与依赖、逐包 `role`/`agent`/`channel`/`scope`、验证入口、确认范围与依据、源计划相对路径及内容摘要、待决事项。
 - 每条需求使用稳定 `id`，并写明负责实施包 `packages[]` 和检查入口 `verification`；`packages` 只能引用已登记且角色为 `worker` 的包。`prepare` 不解析 Markdown，也不证明用户批准真实存在。
 - 复杂任务的 `task-start` 必须绑定无缺项的准备记录，并把 `size`、来源摘要、需求、负责包和逐包选择固定到 `task.preparation`；简单任务只要求非空理由，`operation-only` 保持轻量路径。准备不齐时仍可继续讨论、调研和写计划。
-- 已开工任务更新准备时按包 ID 和需求 ID 合并：只更新进度时漏传某条需求或包，不删除已确认内容；包顺序、依赖顺序、需求顺序和验收句子顺序不构成实际变化。目标或权限变化仍须在同一 `task-update` 提供完整准备、理由和匹配的 `preparationTarget`。合并后按最终快照核对所有需求的负责 worker 包和包依赖，保留需求指向被移除包时拒绝并点名；同批迁移到现存 worker 包则接受。需求内容实际变化时只失效对应 ID 的旧 `validation.acceptance` 声明，未变化条目的证据、进度和原顺序保留。
+- 已开工任务更新准备时按包 ID 和需求 ID 合并：只更新进度时漏传某条需求或包，不删除已确认内容；包顺序、依赖顺序、需求顺序和验收句子顺序不构成实际变化。目标或权限变化仍须在同一 `task-update` 提供完整准备、理由和匹配的 `preparationTarget`。合并后按最终快照核对所有需求的负责 worker 包和包依赖，保留需求指向被移除包时拒绝并点名；同批迁移到现存 worker 包则接受。需求内容实际变化时只失效对应 ID 的旧 `validation.acceptance` 声明，未变化条目的证据、进度和原顺序保留。增量入参未提供的顶层字段和同 ID 条目内未重传的子字段由既有记录补齐；完整记录用于缺项校验，交给快照合并的仍是本次实际提到的条目，避免未提到旧条目被误算为本次重传。
+- Agent 核对使用基础 Agent 词根：`agentBaseWords` 剥离括号说明（`(...)`/`（...）`）与 `--model`/`-m`/`--effort` 等运行参数，`sameBaseAgent` 对剥离后的词序做全等比较；准备记录中的 `(group/worker[1m], high)` 与 `claude_code` 等同一基础 Agent 不因模型/effort 备注被误判。仅基础 Agent 相同时才允许微调 `agent` 备注。
+- 复杂 `delegated` 的逐包审查豁免只能随准备记录声明：`reviewWaiver` 仅允许 worker 包，必须同时给出非空 `reason` 与 `consent`；声明进入准备快照，准备阶段或 `task-update` 仅在包尚无审查历史且不是只读诊断包时允许补挂或修改，已有实际审查结论时拒绝并令旧声明失效。
 - 复杂 `lead-direct` 与 `delegated` 的 `task-end` 按准备记录逐条核对交付声明 `validation.acceptance`：缺条目、未知 ID 或状态字段不完整时列入缺项。验收状态为 `verified`、`manual-pending`、`blocked`、`deferred`：`verified` 要有最终证据；`manual-pending` 要有负责人和可操作步骤；`blocked` 要有原因和下一步；`deferred` 要有原因和用户同意依据。
 - 交付声明绑定 `validation.ref`（必须等于最终交付版本）；版本变化后旧证据不自动沿用，需重新提交。回执汇总 `verified`/`manual-pending`/`blocked`/`deferred` 数量和剩余项，明确 `allVerified`，不把阶段交付说成全部通过。
 - 适用验收矩阵时，`validation` 与 `acceptance:<id>`/`acceptance-unknown:<id>` 缺项不能用 waiver（类别或精确条目）抵扣；只能补齐，或用 `manual-pending`/`blocked`/`deferred` 如实阶段结束。旧任务没有矩阵时保留原 waiver 兼容。
@@ -42,6 +44,8 @@ related:
 - 所有已登记包都 PASS 但交付声明缺一条需求验收时，`task-end` 返回 `GATE` 并列出 `acceptance:<需求ID>`，任务保持 active；复杂 `lead-direct` 同样适用。
 - `manual-pending` 缺负责人或步骤、`blocked` 缺下一步、`deferred` 缺用户同意依据、`verified` 缺证据时拒绝；合法的人工待验/受阻/延期可以阶段结束，但回执 `allVerified` 为 false 并列出剩余项。适用矩阵时 `validation` 与 `acceptance*` 缺项不能用 waiver 抵扣。
 - `finalRef` 改变后旧 `validation` 不再匹配，必须按新版本重新提交；审查版本仍按现有 `deliveredRef`/`reviewedRef` 门禁核对。
+- 准备记录 `agent` 含 `(group/worker[1m], high)` 时，`sameBaseAgent` 与 `claude_code` 等剥离模型/effort 备注后的基础 Agent 判定为同一；仅改括号备注可微调未交付 `dispatched` 包的 `agent`，换基础 Agent 返回 `PREPARATION`。
+- `reviewWaiver` 仅接受 worker 包与非空 `reason`/`consent`；准备快照按条件字段保存，旧记录没有该字段时快照形状不变。
 - 状态文件 schema 版本不变；旧任务没有准备快照或需求字段时保持可读，不自动补写或迁移。
 
 ## 边界

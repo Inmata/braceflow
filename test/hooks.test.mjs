@@ -793,7 +793,8 @@ test('W2 PreToolUse：活动任务的 read-only 拒绝写入，plan 只放行准
 
   const plan = await fixture();
   await w2Prepare(plan);
-  const planned = await emit(plan, { action: 'task-start', goal: '只交付计划', route: 'lead-direct', permissions: { mode: 'plan', allowedPaths: [] } });
+  // plan 模式即使显式放行业务文件，也只按计划模式放行准备资料与系统临时目录。
+  const planned = await emit(plan, { action: 'task-start', goal: '只交付计划', route: 'lead-direct', permissions: { mode: 'plan', allowedPaths: ['src/hooks.mjs'] } });
   assert.equal(planned.result.accepted, true, JSON.stringify(planned.result));
   assert.deepEqual(await pre(plan, 'Write', { file_path: path.join(plan.project, w2Plan), content: '# 更新' }), {});
   const businessDenied = await pre(plan, 'Write', { file_path: path.join(plan.project, 'src', 'hooks.mjs'), content: 'x' });
@@ -809,6 +810,9 @@ test('W2 PreToolUse：未开工的实施委派被拒，只读子代理放行；C
   const markedExplore = await pre(f, 'Agent', { subagent_type: 'Explore', description: 'workflow-package:W1 只读核对', prompt: '只读核对', run_in_background: false });
   assert.equal(markedExplore.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(markedExplore));
   assert.match(markedExplore.hookSpecificOutput.permissionDecisionReason, /实施委派被拦下/);
+  assert.match(markedExplore.hookSpecificOutput.permissionDecisionReason, /Explore.*Plan/);
+  assert.match(markedExplore.hookSpecificOutput.permissionDecisionReason, /准备记录/);
+  assert.match(markedExplore.hookSpecificOutput.permissionDecisionReason, /task-start/);
   const codex = await pre(f, 'collaborationspawn_agent', { task_name: 'w1', fork_turns: 'all', message: 'x' });
   assert.equal(codex.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(codex));
   for (const tool of ['mcp__codeg-mcp__delegate_to_agent', 'mcp__codeg_mcp__create_work_task']) {
@@ -1064,6 +1068,58 @@ test('R2 task-update 准备更新可新增包/换选择，保留旧包并记录 
   const activeChange = await emit(f, { action: 'task-update', preparation: changedW1, preparationReason: '换 Agent' });
   assert.equal(activeChange.result.accepted, false, JSON.stringify(activeChange.result));
   assert.match(activeChange.result.message, /仍在 dispatched/);
+});
+
+// U3：合规计划文档不算业务范围扩张；plan 转 write 且目标未变时沿用已绑定准备。
+test('U3 task-update 追加计划文档与 plan 转 write 不扩张业务范围，复用已绑定准备', async () => {
+  const f = await fixture();
+  await w2Prepare(f);
+  const started = await emit(f, { action: 'task-start', goal: '先写计划再实施', route: 'lead-direct', permissions: { mode: 'plan', allowedPaths: ['src/hooks.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  const planned = await emit(f, { action: 'task-update', permissions: { allowedPaths: ['docs/plans/extra.md'] }, allowedPathsMode: 'append' });
+  assert.equal(planned.result.accepted, true, JSON.stringify(planned.result));
+  // 追加业务文件仍是范围扩张：没有同一信号里的准备更新就必须重问。
+  const business = await emit(f, { action: 'task-update', permissions: { allowedPaths: ['README.md'] }, allowedPathsMode: 'append' });
+  assert.equal(business.result.accepted, false, JSON.stringify(business.result));
+  assert.equal(business.result.reason, 'PREPARATION');
+  assert.deepEqual(business.result.missing, ['preparation:update']);
+  const implementation = await emit(f, { action: 'task-update', permissions: { mode: 'write' } });
+  assert.equal(implementation.result.accepted, true, JSON.stringify(implementation.result));
+  const task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.equal(task.permissions.mode, 'write');
+  assert.deepEqual(task.permissions.allowedPaths, ['src/hooks.mjs', 'docs/plans/extra.md']);
+  assert.equal(task.preparation.packages.length, 1);
+});
+
+// U3：同一基础 Agent 只调整 model/effort 备注时不算换人；已交付包仍不能再改。
+test('U3 未交付 dispatched 包只允许同一基础 Agent 微调备注，换基础 Agent 或已交付仍拒绝', async () => {
+  const f = await fixture();
+  await w2Prepare(f);
+  const started = await emit(f, { action: 'task-start', goal: 'Agent 备注微调', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/hooks.mjs'] } });
+  assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  await emit(f, { action: 'packages', packages: [{ packageId: 'W1', role: 'worker', status: 'dispatched', agent: 'Claude Code', channel: 'codeg:claude_code', scope: 'src/hooks.mjs' }] });
+  const session = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
+  const current = session.preparation;
+  const withAgent = agent => ({
+    size: current.size, sizeReason: current.sizeReason, requirements: current.requirements, research: current.research,
+    solution: current.solution,
+    packages: current.packages.map(item => item.packageId === 'W1' ? { ...item, agent } : item),
+    verification: current.verification, confirmation: current.confirmation, pending: current.pending || [],
+    source: current.source ? { path: current.source.path, sections: current.source.sections } : undefined,
+  });
+  const retuned = await emit(f, { action: 'task-update', preparation: withAgent('Claude Code (group/worker[1m], high)'), preparationReason: '补充同一 Agent 的 model 与 effort 备注' });
+  assert.equal(retuned.result.accepted, true, JSON.stringify(retuned.result));
+  let task = (await readState(f.directory)).tasks[taskKey(f.projectId, f.taskId)];
+  assert.equal(task.packages.W1.agent, 'Claude Code (group/worker[1m], high)');
+  assert.equal(task.preparation.packages[0].agent, 'Claude Code (group/worker[1m], high)');
+  const swapped = await emit(f, { action: 'task-update', preparation: withAgent('Codex'), preparationReason: '换基础 Agent' });
+  assert.equal(swapped.result.accepted, false, JSON.stringify(swapped.result));
+  assert.match(swapped.result.message, /仍在 dispatched/);
+  await emit(f, { action: 'packages', packages: [{ packageId: 'W1', status: 'delivered', deliveredRef: 'v1' }] });
+  const delivered = await emit(f, { action: 'task-update', preparation: withAgent('Claude Code (group/worker[1m], low)'), preparationReason: '已交付后再调备注' });
+  assert.equal(delivered.result.accepted, false, JSON.stringify(delivered.result));
+  assert.equal(delivered.result.reason, 'PREPARATION');
+  assert.match(delivered.result.message, /仍在 delivered/);
 });
 
 // R2 中 6：简单任务只放行审查/只读诊断包，实施 worker 需显式升级为复杂绑定。
@@ -1352,4 +1408,38 @@ test('R2 准备资料路径按 realpath 限制，.local/任意后缀/项目外/j
     // 没有创建 junction 的权限时如实跳过该子项，不把未测写成通过。
     assert.match(String(error.code || error.message), /EPERM|EACCES|privilege|权限/i);
   }
+});
+
+// U2：未开工与 plan 模式放行系统临时目录中的普通写入；项目、状态目录和链接逃逸仍拒绝。
+test('未开工与 plan 模式放行系统临时目录写入，链接逃逸和项目路径仍拒绝', async t => {
+  const f = await fixture();
+  const scratch = await temporary('tmp-');
+  const target = path.join(scratch, 'notes', 'scratch.md');
+  for (const tool of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit']) {
+    assert.deepEqual(await pre(f, tool, { file_path: target, content: 'x' }), {}, tool);
+  }
+  // NotebookEdit 使用 notebook_path 而非 file_path，同样按真实目标识别。
+  assert.deepEqual(await pre(f, 'NotebookEdit', { notebook_path: target, content: 'x' }), {});
+  for (const [label, file] of [
+    ['项目内', path.join(f.project, 'README.md')],
+    ['状态目录', path.join(f.directory, 'note.md')],
+    ['父级夹具', path.join(f.area, 'outside.md')],
+  ]) {
+    const denied = await pre(f, 'Write', { file_path: file, content: 'x' });
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `${label}: ${JSON.stringify(denied)}`);
+  }
+  // 临时目录里的 junction 指向项目：字面路径在 tmp 内，真实目标逃出，必须拒绝。
+  try { await symlink(f.project, path.join(scratch, 'link'), process.platform === 'win32' ? 'junction' : 'dir'); }
+  catch { t.skip('当前平台/账户无法创建目录链接'); return; }
+  const escaped = await pre(f, 'Write', { file_path: path.join(scratch, 'link', 'README.md'), content: 'x' });
+  assert.equal(escaped.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(escaped));
+
+  // plan 模式同样放行临时目录；显式出现在 allowedPaths 里的业务文件仍按计划模式拒绝。
+  await w2Prepare(f);
+  const planned = await emit(f, { action: 'task-start', goal: '只交付计划', route: 'lead-direct', permissions: { mode: 'plan', allowedPaths: ['src/hooks.mjs'] } });
+  assert.equal(planned.result.accepted, true, JSON.stringify(planned.result));
+  assert.deepEqual(await pre(f, 'Write', { file_path: target, content: 'x' }), {});
+  const business = await pre(f, 'Write', { file_path: path.join(f.project, 'src', 'hooks.mjs'), content: 'x' });
+  assert.equal(business.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(business));
+  assert.match(business.hookSpecificOutput.permissionDecisionReason, /系统临时目录/);
 });
