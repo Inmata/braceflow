@@ -53,3 +53,4 @@ related:
 - 不合并 `src/install.mjs`、`src/runner.mjs` 已有的转义写法，也不建立通用命令框架。
 - 不自动发现或接管 `Roaming\Cindy` 等 Codex 配置目录，也不修改 Cindy 的 `config.toml`；附加目录必须由用户显式传入。多个 Codex 配置位置共用同一个 `current`，升级需逐位置重新安装，不在安装器内自动批量升级。
 - 预检只核对能力，不调用模型。安装副本完整性、宿主 hook 信任和后台复盘的模型调用细节不在本 spec 范围内。
+- `task show` 增加 `reviewWaived` 展示与对应帮助文案变化不改变安装、接入、命令生成和参数传输语义。
