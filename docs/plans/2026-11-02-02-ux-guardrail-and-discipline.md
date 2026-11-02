@@ -117,6 +117,10 @@
 | `W2` | 第 1 批 | `Claude Code` | `group/worker` | `high` | `codeg:claude_code` |
 | `R1` | `W1` 交付后 | `Codex` | `group/reviewer` | `high` | `codeg:codex` |
 | `R2` | `W2` 交付后 | `Codex` | `group/reviewer` | `high` | `codeg:codex` |
+| `W3` | 增派（W1 交付后） | `Claude Code` | `group/worker[1m]` | `high` | `codeg:claude_code` |
+| `R3` | `W3` 交付后 | `Codex` | `group/reviewer` | `high` | `codeg:codex` |
+
+增派说明：用户开工时要求“增派 worker / reviewer 沿用这个配置”并授权“发现问题自行增派解决”。`W3` 负责 `bin/workflow.mjs` 的 `task show` 输出 `reviewWaived`（W1 范围外遗漏），以及 `docs/usage.md` 中与新规则矛盾的旧表述（`plan` 只放行准备资料、项目外目标一律不放行、`task-update` 必须完整 `preparation`、仅 `docs/plans/plan.md` 放行），配套 `test/channels.test.mjs` 断言与受影响 `.spec`；`R3` 只读审查 `W3`。
 
 注：本轮选用 Codeg 委派（`codeg:claude_code` / `codeg:codex`），`delegate_to_agent` 接口按 `agent_type` 调用对应客户端本机配置的模型与推理档位；因重装安排在本轮全部完成之后，当前运行中的旧 0.8.1 hook 对 `codeg:` 仍按全串字符核对 `agent`，故结构化 `prepare.packages[].agent` 登记基础名 `Claude Code` / `Codex`，完整 `model` 与 `effort` 以本表为准。
 
@@ -154,3 +158,5 @@
 
 - 2026-11-02：完成第一步需求澄清（D1–D4 用户裁决）与第二步技术方案确认；写入本实施计划草案。
 - 2026-11-02：用户逐包指定 `W1`（`Claude Code | group/worker[1m] | high | codeg:claude_code`）、`W2`（`Claude Code | group/worker | high | codeg:claude_code`）、`R1`（`Codex | group/reviewer | high | codeg:codex`）、`R2`（`Codex | group/reviewer | high | codeg:codex`）；回写计划并登记完整 `prepare` 记录，等待用户明确下达“开工”指令。
+- 2026-11-02：用户下达“开工”，并要求一直跑到集成无问题后提交推送。`W2` 经 `R2` 两轮 `FIX` 返修后 `PASS`（`9d3a3b4`），已并入实施分支（`dca4033`）；`W1` 交付 `3a4f7f2`，派 `R1` 审查；按授权增派 `W3`/`R3`。
+- 2026-11-02：`W1` 经 `R1` 一轮 `FIX` 返修（点段路径拒绝、临时目录例外收窄到写工具、预声明 `reviewWaiver` 与 `diagnostic` 互斥）后 `PASS`（`f087446`）；`W3`（`task show` 输出 `reviewWaived`、`docs/usage.md` 旧表述同步）经 `R3` `PASS`（`77be932`），已并入实施分支（`eed8052`）。集成后统一运行一次 `npm run verify`：`test`、`demo` 通过，`check` 仅报本机未跟踪的 `docs/WORKFLOW-ALIGNMENT.md` 指向已改名计划的 7 处失效链接；按增量 `sources` 更新对齐文档后定向复跑 `check` 通过。U1–U7 状态与证据见 `task-end` 验收记录；真实宿主 `SessionStart(source=compact)` 注入待重装后在新会话人工确认。
