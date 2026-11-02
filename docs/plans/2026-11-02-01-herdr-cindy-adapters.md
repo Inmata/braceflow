@@ -129,22 +129,32 @@ Claude Code 原生 `<task-notification>` 不在本轮改动范围（已有内置
 
 ### 4.1 开工前提
 
-开工须先由用户确定逐包 Agent/model/effort 与 D1。用户 2026-11-02 原话：“Worker 一律是 group/worker high；reviewer 一律是 gpt6.1terra high；先只允许orca派工吧；开工”。
+开工须先由用户确定逐包 Agent/model/effort 与 D1。用户 2026-11-02 原话：“Worker 一律是 group/worker high；reviewer 一律是 gpt6.1terra high；先只允许orca派工吧；开工”。实施中用户改为：“重启 r3 所有r都换成 model reviwer effort high”；其后又改为：“改用 --model "group/worker[1m]"”（自 W2 起生效，在途 W1、W3b 不重启）。
 
 ### 4.2 逐包 Agent、model、effort（已确认）
 
-启动时通过原生参数固定，不沿用 CLI 现有默认：Claude 为 `herdr agent start <名> --kind claude --pane <id> -- --model group/worker --effort high`，Codex 为 `--kind codex ... -- -m gpt-6.1-terra -c model_reasoning_effort="high"`（模型 ID 取本机 `~/.codex/config.toml` 的写法）。
+启动时通过原生参数固定，不沿用 CLI 现有默认：Claude 为 `herdr agent start <名> --kind claude --pane <id> -- --model "group/worker[1m]" --effort high`（W1、W3、W3b 启动时漏写 `[1m]`，按 `group/worker` 运行），Codex 为 `--kind codex ... -- -m group/reviewer -c model_reasoning_effort="high"`（模型 ID 取本机 `~/.codex/config.toml` 的写法）。
 
 | 包 | 次序 | Agent | model | effort | 实际调用通道 |
 | --- | --- | --- | --- | --- | --- |
 | W1 | 第 1 批 | Claude Code | `group/worker` | high | `herdr:claude` |
 | W3 | 第 1 批 | Claude Code | `group/worker` | high | `herdr:claude` |
-| R3 | W3 交付后 | Codex | `gpt-6.1-terra` | high | `herdr:codex` |
-| R1 | W1 交付后 | Codex | `gpt-6.1-terra` | high | `herdr:codex` |
-| W2 | W1 交付后 | Claude Code | `group/worker` | high | `herdr:claude` |
-| R2 | W2 交付后 | Codex | `gpt-6.1-terra` | high | `herdr:codex` |
+| R3 | W3 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
+| R1 | W1 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
+| W2 | W1 交付后 | Claude Code | `group/worker[1m]` | high | `herdr:claude` |
+| R2 | W2 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
+| W3b | R3 后返修（替代 W3） | Claude Code | `group/worker` | high | `herdr:claude` |
+| R3b | W3b 交付后 | Codex | `group/reviewer` | high | `herdr:codex` |
+| W4 | R1/R2/R3b 均 PASS 后 | Claude Code | `group/worker[1m]` | high | `herdr:claude` |
+| W5 | W4 verify 失败后返修 | Claude Code | `group/worker[1m]` | high | `herdr:claude` |
+
+W3b 范围同 W3：默认位置按规范化后的默认 `~/.codex` 配置路径识别，不再“第一个安装的位置即权威”；补“先装附加目录、后装默认目录”的测试；同步 `docs/usage.md`、`.spec/install-onboard/spec.md` 的权威记录描述。W3b 首轮交付后范围补入 `src/onboard.mjs`、`test/onboard.test.mjs`：onboard 安装检查须同时认默认记录与附加位置，只有附加位置时不得报“没有任何宿主安装”。
 
 W2 范围随 D1 收窄：Orca 派工核对（`create_worker`、`create_workers` 逐项、`send_to_worker`）、Session task 拒绝提示、Cindy 提问工具与宿主消息。
+
+W4 为集成文档同步（原计划由 Lead 自做，用户 2026-11-02 纠正“lead只是派发和最后集成”后改为 Worker 包，Agent 按“所有worker都沿用”）：同步 `.spec/task-protocol/spec.md`、`docs/acceptance.md`、`docs/plans/README.md`，运行 `npm run verify` 并如实回报结果；只改文档，代码问题只回报不修。Lead 只做合并、最终验收与收尾。
+
+W5 修 W4 全量验证发现的问题：`docs/adapters/cindy.md`、`docs/adapters/herdr.md` 中指向 `CLAUDE.md` 与 `docs/plans` 的发布断链；`examples/demo.mjs` 无参数 uninstall 与 W3b 附加位置语义不符；`.spec/learning-knowledge/spec.md` 的 spec check 漂移。修后重跑 `npm run verify`。
 
 ### 4.4 工作区
 
@@ -154,8 +164,8 @@ W2 范围随 D1 收窄：Orca 派工核对（`create_worker`、`create_workers` 
 
 Herdr 子 Agent 结束不会唤醒主会话，主会话必须**阻塞等待**，不轮询：
 
-- 派发用前台 `herdr agent prompt <名> "<任务>" --wait --timeout 600000`，不放后台，不用 `sleep`/`agent get` 循环；
-- 单次工具调用上限 10 分钟。到时未结束，只续调一次前台 `herdr agent wait <名> --timeout 600000`，不重发任务；
+- 派发用 `herdr agent prompt <名> "<任务>" --wait`，不带 `--timeout`，以 Claude Code 后台命令运行：Herdr 侧无限期等待，命令在 Agent 停下时退出，宿主自动通知主会话；不用 `sleep`/`agent get` 循环。前台单次调用受 Claude Code 10 分钟上限约束，不再采用；
+- 等待返回后先 `agent read` 或读取约定的回报文件，再决定；不重发任务；
 - 返回 `blocked`：读 `agent read` 后把审批或提问原样交用户，结束本回合；
 - 并行的两个包按“先等先交付概率高的那个，返回后再等另一个”的顺序依次阻塞等待。
 
@@ -192,4 +202,8 @@ Herdr 子 Agent 结束不会唤醒主会话，主会话必须**阻塞等待**，
 - 2026-11-02（误开工记录）：用户已逐包指定 Agent 与通道（第 4 节）；Lead 错将该选择及 `prepare.ready` 当成开工授权，执行 `task-start` 并派出 W1、W3（pane `w2:p7`、`w2:p8`）。这不构成用户批准。用户明确纠正后，Lead 已向两个会话发送中断与停止指令，取消两包，将任务权限收缩为仅可编辑本计划；W1 已明确确认停止，W3 停止指令返回后其 Agent 与 pane 已不可查询。已有代码保留，未继续实施或提交。下一步只按三阶段核对计划，不自动恢复派工。
 - 2026-11-02：计划由 `plan.md` 改名为本文件；撤销原 A1，新增待决 D1；第 4 节补开工前提、逐包 model/effort 与阻塞等待规则，准备记录改为未就绪。误开工遗留改动（未运行测试、未审查）：`src/adapters/herdr.mjs`（新增）、`src/hooks.mjs`、`src/protocol.mjs`、`test/adapters.test.mjs`、`test/channels.test.mjs`、`test/hooks.test.mjs`（W1），`src/install.mjs`（W3）。Lead 建议用 `git stash push -m "误开工遗留" -- <上述路径>` 暂存，从 `c9c57eb` 干净开工；待用户决定。
 - 2026-11-02：用户确认 Worker 一律 Claude Code `group/worker` high、Reviewer 一律 Codex `gpt-6.1-terra` high、D1 只允许 Orca 派工，并明确“开工”。遗留代码未获处置决定，按 4.4 改在独立 worktree 实施，遗留改动原样保留。
+- 2026-11-02（实施中）：W3 交付提交 `7ceac7e`（install 定向 23/23 通过）。首个 R3 以 `gpt-6.1-terra` 运行并写出 FIX 结论后，用户要求重启 R3、所有 Reviewer 改用 `group/reviewer` high；旧结论改名保留为 `review-R3-terra-superseded.md`，不计为正式审查。W1 因上下文反复溢出（自动压缩连续 3 次失效）未完成测试与文档，改为清空会话后按续作说明继续。等待方式改为后台无超时等待（见 4.3）。
+- 2026-11-02（实施中）：R3（`group/reviewer`）判 W3 PASS；Lead 核对 `src/install.mjs:240` 确认空状态下首个安装位置被登记为权威（旧 R3 第 1 条），R3 漏判。用户选择开返修包 W3b（替代 W3）与复审 R3b，Agent/model 同原角色。
+- 2026-11-02（实施中）：R1（`group/reviewer`）判 W1 PASS。W2 的 `[1m]` 准备更新此前因引用尚未登记的 W3b/R3b 被拒，改为先只更新 W2，W3b/R3b 待 W3b 终态后补登；W2 随后登记派发。W3b 首轮交付 install 26/26 通过，但 Lead 复跑 `test/onboard.test.mjs` 9 条失败：onboard 只读默认记录，测试与只有附加位置的用户都会被误报未安装。W3b 范围补入 onboard，由同一 Worker 续作。
 - 2026-11-02：补充公开 GitHub 对照并收紧早期推断：Cindy 账号目录注册未知、Session task 不保证与 Lead 同 Agent、Cindy Codex code mode 的嵌套 MCP hook 可观测性仍待验证。实现须保守处理无法核实身份的入口。
+- 2026-11-02（集成完成）：W3b 补入 onboard 后交付 `640b155`，R3b 判 PASS（install 26/26、onboard 20/20、adapters+hooks 64/64）；W2 交付 `fc044cb`，R2 判 PASS；W4 同步 spec、验收文档与计划索引并提交 `5642aa6`；W5 修复发布文档链接、`examples/demo.mjs` 卸载 `--user-dir` 与 `.spec/learning-knowledge/spec.md` 边界说明并提交 `736c311`，全量 `npm run verify` 通过（tests 453 / pass 450 / fail 0 / skipped 3），`spec check` 0 finding。真实软件实测项 M1–M4 交用户人工待验。
