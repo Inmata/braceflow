@@ -1011,6 +1011,20 @@ test('F17 部分成功 run 重放返回原状态，不再消费材料', async ()
   assert.equal((await readItems(f.directory, await projectFor(f.directory, f.project), 'runs')).at(-1).status, 'partial');
 });
 
+test('F17 提示词要求细化走 create，revise 仅限明确反例', async () => {
+  const f = await fixture(); await start(f); await observe(f, 1); await finish(f);
+  await setLearningEnabled(f.directory, f.project, true);
+  let promptText = '';
+  const defaults = fakeOptions();
+  const result = await reviewOnce(f.directory, f.project, fakeOptions({
+    nowRequested: true,
+    runner: async (config, prompt) => { promptText = prompt; return defaults.runner(config, prompt); },
+  }));
+  assert.equal(result.status, 'completed');
+  assert.match(promptText, /细化、补充应 create 独立知识/);
+  assert.match(promptText, /revise 只用于旧结论被明确反例推翻/);
+});
+
 test('P02 对齐读取失败单独降级，不阻断新回合保存', async () => {
   const f = await fixture(); await start(f);
   await mutate(f.directory, async state => {
