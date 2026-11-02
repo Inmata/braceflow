@@ -420,6 +420,11 @@ function validateBatch(task, items) {
     if (item.diagnostic !== undefined) {
       const parsed = diagnosticInput(item.diagnostic);
       diagnostics.set(item, parsed);
+      // 诊断包不进独立审查门禁，也就不该同时携带准备阶段的审查豁免；
+      // 否则可以先按诊断包登记、再标 waived，把预声明豁免挪给一个从未送审的实现包。
+      if (preparedReviewWaiver(mergedTask, next)) {
+        fail('PREPARATION', `工作包 ${item.packageId} 已在准备记录中预声明 reviewWaiver，不能登记为只读诊断包：诊断包不经过独立审查，豁免没有意义`);
+      }
       if (previous) {
         if (!previous.diagnostic || JSON.stringify(previous.diagnostic) !== JSON.stringify(parsed)) fail('PACKAGE', 'diagnostic 只能在首次创建包时声明，不能事后补挂或修改');
       } else {
@@ -703,8 +708,11 @@ export function gateReport(state, task, finalRef, root, spec) {
   const passTargets = passTargetsOf(task);
   const diagnostic = [];
   const reviewWaived = [];
+  // 复杂分工任务里 waived 不是隐藏审查缺项的出口：仍核对实际审查事实，只有有效预声明豁免才免列。
+  // 无准备快照的历史任务保持原行为，waived 包照旧跳过审查核对。
+  const complex = complexDelegated(task);
   // 曾有 PASS 的 worker 包即使历史记录里被标成 canceled、或当前 verdict 后来改成 FIX，也不能因此退出审查；未审取消照旧放行。
-  for (const worker of packages.filter(item => item.role === 'worker' && item.status !== 'waived' && !item.supersededBy)) {
+  for (const worker of packages.filter(item => item.role === 'worker' && !item.supersededBy && (item.status !== 'waived' || complex))) {
     if (worker.status === 'canceled' && !chainHas(task, worker, passTargets)) continue;
     if (worker.diagnostic) {
       // 只读诊断免审只按事先声明放行；交付结论必须写在 note 里，可定位但插件不验证内容真实性。
@@ -715,7 +723,7 @@ export function gateReport(state, task, finalRef, root, spec) {
     const passed = packages.some(item => item.role === 'reviewer' && item.reviews === worker.packageId && item.verdict === 'PASS' && !!item.reviewedRef && item.reviewedRef === worker.deliveredRef);
     if (passed) continue;
     // 复杂分工任务只认准备阶段经用户同意的逐包豁免；一旦已有实际审查结论，豁免不再生效。
-    if (complexDelegated(task) && preparedReviewWaiver(task, worker) && !wasReviewed(task, worker)) {
+    if (complex && preparedReviewWaiver(task, worker) && !wasReviewed(task, worker)) {
       reviewWaived.push(worker.packageId);
       continue;
     }

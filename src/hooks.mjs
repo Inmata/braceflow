@@ -170,6 +170,8 @@ function isComposedSignal(event) {
 // PreToolUse 的类型集合只描述“能否在动作发生前判断”，不依赖某个产品的自然语言。
 // 写入工具按宿主实测名称收列；命令工具只有确认是本插件直接 signal 时才读取状态。
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'apply_patch', 'write_file', 'delete_file']);
+// 系统临时目录例外只认宿主按路径写入的四个工具；补丁文本与外部命令的写入语义不足以判定真实目标，不放宽。
+const TEMP_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const DELEGATION_TOOLS = new Set(['Agent', 'Task', 'collaborationspawn_agent', 'spawn_agent', ...CODEG_DELEGATION_TOOLS, ...CINDY_ORCA_DELEGATION_TOOLS]);
 const COMMAND_TOOLS = new Set(['Bash', 'exec_command', 'PowerShell', 'powershell', 'pwsh']);
 const READ_ONLY_SUBAGENTS = new Set(['Explore', 'Plan']);
@@ -236,12 +238,20 @@ function isSystemTempTarget(realRoot, realStateDir, realTmp, target) {
   }
   return false;
 }
-function planModeTargetAllowed(resolved, stateDir, tempDir, rawPath) {
+// path.resolve 会把空段、`.` 与 `..` 折叠掉；计划目录放行必须先按原始字面段拒绝，
+// 否则 `docs/plans/a/../x.md` 归一化后会被当成合规计划。绝对路径同样逐段核对，盘符/根锚点不是相对段。
+function literalPathDetour(value) {
+  const segments = value.replaceAll('\\', '/').split('/');
+  const relative = segments[0] === '' ? segments.slice(1) : segments;
+  return relative.some(segment => !segment || segment === '.' || segment === '..');
+}
+function planModeTargetAllowed(resolved, stateDir, tempDir, rawPath, allowTemp) {
   if (!rawPath || typeof rawPath !== 'string') return false;
   let realRoot;
   try { realRoot = realpathSync(resolved.worktree); } catch { return false; }
   const literal = path.resolve(resolved.cwd || resolved.worktree, rawPath);
-  if (isPreparationTarget(realRoot, literal)) return true;
+  if (!literalPathDetour(rawPath) && isPreparationTarget(realRoot, literal)) return true;
+  if (!allowTemp) return false;
   let realStateDir = null;
   let realTmp;
   try {
@@ -483,7 +493,7 @@ function taskModeDenial(task, name, event, resolved, stateDir, tempDir, external
   if (mode === 'read-only') return '任务权限为 read-only：不能修改文件；只做读取、检索和结论交付，确需写入先由 Lead 用 task-update 取得用户授权。';
   const targets = toolTargets(event);
   if (!targets.length) return '任务权限为 plan：无法识别这次写入目标；计划模式只允许维护准备资料。';
-  const blocked = targets.filter(target => !planModeTargetAllowed(resolved, stateDir, tempDir, target));
+  const blocked = targets.filter(target => !planModeTargetAllowed(resolved, stateDir, tempDir, target, TEMP_WRITE_TOOLS.has(name)));
   return blocked.length ? `任务权限为 plan：不能修改业务文件（${blocked.join('、')}）；计划模式只允许维护准备资料和系统临时目录。` : null;
 }
 // PreToolUse 只做三类可判定的事：未开工时的业务写入、实施委派、本插件 task-start/packages 命令。
@@ -640,7 +650,7 @@ async function preToolUse(directory, event, options, agent) {
     }
     const targets = toolTargets(event);
     if (!targets.length) return preToolUseDeny(taskMessage('无法识别这次写入的目标文件'));
-    const blocked = targets.filter(target => !planModeTargetAllowed(resolved, directory, options.tempDir, target));
+    const blocked = targets.filter(target => !planModeTargetAllowed(resolved, directory, options.tempDir, target, TEMP_WRITE_TOOLS.has(name)));
     if (!blocked.length) return {};
     if (preparation && gaps.length) return preToolUseDeny(preparationGapText(gaps) + '。' + taskMessage(`业务写入被拦下：${blocked.join('、')}`));
     return preToolUseDeny(taskMessage(`业务写入被拦下：${blocked.join('、')}`));

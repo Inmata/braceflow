@@ -1363,7 +1363,7 @@ test('W3 复杂 lead-direct 也要过需求验证与验收矩阵；简单 lead-d
 });
 
 // U4：复杂 delegated 的逐包审查豁免只能来自准备快照的 reviewWaiver。
-async function reviewWaiverFixture({ waiver, reviewer = false } = {}) {
+async function reviewWaiverFixture({ waiver, reviewer = false, dispatch = true } = {}) {
   const f = await fixture();
   const plan = 'docs/plans/review-waiver.md';
   await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
@@ -1387,6 +1387,7 @@ async function reviewWaiverFixture({ waiver, reviewer = false } = {}) {
   assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
   const started = await emit(f, { action: 'task-start', goal: '复杂任务审查豁免', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
   assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  if (!dispatch) return f;
   const dispatched = declared.map(item => ({ packageId: item.packageId, role: item.role, status: 'dispatched', agent: item.agent, channel: item.channel, scope: item.scope }));
   const result = await emit(f, { action: 'packages', packages: dispatched });
   assert.equal(result.result.accepted, true, JSON.stringify(result.result));
@@ -1441,6 +1442,39 @@ test('U4 已有实际审查结论后预声明豁免失效；无准备的历史�
     waivers: [{ step: 'review', reason: '旧任务没有准备快照，保留兼容' }],
   });
   assert.equal(accepted.result.accepted, true, JSON.stringify(accepted.result));
+});
+
+test('U4 预声明 reviewWaiver 的包不能登记为只读诊断包', async () => {
+  const f = await reviewWaiverFixture({ waiver: reviewWaiver, dispatch: false });
+  const registered = await packages(f, [{
+    packageId: 'w1', role: 'worker', status: 'dispatched', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs',
+    diagnostic: { purpose: '只读核对实现', scope: ['src/x.mjs'], reason: '先诊断再实施' },
+  }]);
+  assert.equal(registered.result.accepted, false, JSON.stringify(registered.result));
+  assert.equal(registered.result.reason, 'PREPARATION');
+  assert.match(registered.result.message, /reviewWaiver/);
+});
+
+test('U4 复杂任务 waived 的包仍核对审查事实：送审后预声明豁免失效', async () => {
+  const f = await reviewWaiverFixture({ waiver: reviewWaiver, reviewer: true });
+  // 先合法 waived，再让 reviewer 实际送审：已有 FIX 结论，预声明豁免不能继续抵扣。
+  const waived = await packages(f, [{ packageId: 'w1', status: 'waived' }]);
+  assert.equal(waived.result.accepted, true, JSON.stringify(waived.result));
+  const fix = await packages(f, [{ packageId: 'r1', status: 'consumed', reviews: 'w1', reviewedRef: 'v1', verdict: 'FIX' }]);
+  assert.equal(fix.result.accepted, true, JSON.stringify(fix.result));
+  const ended = await emit(f, { action: 'task-end', finalRef: 'v1', validation: waiverValidation });
+  assert.equal(ended.result.accepted, false, JSON.stringify(ended.result));
+  assert.equal(ended.result.reason, 'GATE');
+  assert.ok(ended.result.missing.includes('review:w1'), JSON.stringify(ended.result));
+});
+
+test('U4 waived 的有效预声明豁免仍进入 reviewWaived 审计输出', async () => {
+  const f = await reviewWaiverFixture({ waiver: reviewWaiver });
+  const waived = await packages(f, [{ packageId: 'w1', status: 'waived' }]);
+  assert.equal(waived.result.accepted, true, JSON.stringify(waived.result));
+  const ended = await emit(f, { action: 'task-end', finalRef: 'v1', validation: waiverValidation });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  assert.deepEqual(ended.result.reviewWaived, ['w1']);
 });
 
 test('W3 验收矩阵不能用 waiver 抵扣：类别、精确 ID 和 validation 都拒绝，人工待验可如实结束', async () => {

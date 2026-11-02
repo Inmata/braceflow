@@ -1420,6 +1420,15 @@ test('未开工与 plan 模式放行系统临时目录写入，链接逃逸和�
   }
   // NotebookEdit 使用 notebook_path 而非 file_path，同样按真实目标识别。
   assert.deepEqual(await pre(f, 'NotebookEdit', { notebook_path: target, content: 'x' }), {});
+  // 系统临时目录例外只对按路径写入的四个工具生效：补丁文本与外部写工具不放宽。
+  for (const [tool, input] of [
+    ['apply_patch', { command: `*** Begin Patch\n*** Add File: ${target}\n+x\n*** End Patch` }],
+    ['write_file', { path: target, content: 'x' }],
+    ['delete_file', { path: target }],
+  ]) {
+    const denied = await pre(f, tool, input);
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `${tool}: ${JSON.stringify(denied)}`);
+  }
   for (const [label, file] of [
     ['项目内', path.join(f.project, 'README.md')],
     ['状态目录', path.join(f.directory, 'note.md')],
@@ -1439,7 +1448,47 @@ test('未开工与 plan 模式放行系统临时目录写入，链接逃逸和�
   const planned = await emit(f, { action: 'task-start', goal: '只交付计划', route: 'lead-direct', permissions: { mode: 'plan', allowedPaths: ['src/hooks.mjs'] } });
   assert.equal(planned.result.accepted, true, JSON.stringify(planned.result));
   assert.deepEqual(await pre(f, 'Write', { file_path: target, content: 'x' }), {});
+  // plan 模式的临时目录例外同样只对四个按路径写入的工具生效。
+  for (const [tool, input] of [
+    ['apply_patch', { command: `*** Begin Patch\n*** Add File: ${target}\n+x\n*** End Patch` }],
+    ['write_file', { path: target, content: 'x' }],
+    ['delete_file', { path: target }],
+  ]) {
+    const denied = await pre(f, tool, input);
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `plan ${tool}: ${JSON.stringify(denied)}`);
+  }
   const business = await pre(f, 'Write', { file_path: path.join(f.project, 'src', 'hooks.mjs'), content: 'x' });
   assert.equal(business.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(business));
   assert.match(business.hookSpecificOutput.permissionDecisionReason, /系统临时目录/);
+});
+
+// U1：计划目录放行前按原始字面段拒绝空段、`.` 与 `..`，归一化后的合规落点不能顶替原始越界路径。
+test('U1 计划路径按原始字面段拒绝空段、点段与父级段，绝对与相对路径一致', async () => {
+  const f = await fixture();
+  const planDir = path.join(f.project, 'docs', 'plans');
+  await mkdir(planDir, { recursive: true });
+  await writeFile(path.join(planDir, 'plan.md'), '# 计划\n');
+  assert.deepEqual(await pre(f, 'Write', { file_path: path.join(planDir, 'plan.md'), content: 'x' }), {});
+  // 绝对路径：归一化后都会落在 docs/plans/plan.md，但原始段已经改变了落点。
+  for (const raw of [`${planDir}/./plan.md`, `${planDir}/a/../plan.md`, `${planDir}//plan.md`]) {
+    const denied = await pre(f, 'Write', { file_path: raw, content: 'x' });
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `${raw}: ${JSON.stringify(denied)}`);
+  }
+  // 相对路径同样按项目根下的原始段检查。
+  for (const raw of ['docs/plans/./plan.md', 'docs/plans/a/../plan.md', 'docs/plans//plan.md']) {
+    const denied = await pre(f, 'Write', { file_path: raw, content: 'x' });
+    assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', `${raw}: ${JSON.stringify(denied)}`);
+  }
+  // apply_patch 的补丁路径与 Write 共用同一检查：合规计划照旧放行，带点段/父级段的路径拒绝。
+  assert.deepEqual(await pre(f, 'apply_patch', { command: '*** Begin Patch\n*** Update File: docs/plans/plan.md\n@@\n-x\n+y\n*** End Patch' }), {});
+  const patched = await pre(f, 'apply_patch', { command: '*** Begin Patch\n*** Update File: docs/plans/a/../plan.md\n@@\n-x\n+y\n*** End Patch' });
+  assert.equal(patched.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(patched));
+
+  // plan 模式下的活动任务走同一判定，不因任务已开工而放行。
+  await w2Prepare(f);
+  const planned = await emit(f, { action: 'task-start', goal: '只交付计划', route: 'lead-direct', permissions: { mode: 'plan', allowedPaths: ['src/hooks.mjs'] } });
+  assert.equal(planned.result.accepted, true, JSON.stringify(planned.result));
+  assert.deepEqual(await pre(f, 'Write', { file_path: 'docs/plans/plan.md', content: 'x' }), {});
+  const planDenied = await pre(f, 'Write', { file_path: 'docs/plans/./plan.md', content: 'x' });
+  assert.equal(planDenied.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(planDenied));
 });

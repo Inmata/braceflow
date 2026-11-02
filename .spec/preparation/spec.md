@@ -19,7 +19,7 @@ related:
 - 复杂任务的 `task-start` 必须绑定无缺项的准备记录，并把 `size`、来源摘要、需求、负责包和逐包选择固定到 `task.preparation`；简单任务只要求非空理由，`operation-only` 保持轻量路径。准备不齐时仍可继续讨论、调研和写计划。
 - 已开工任务更新准备时按包 ID 和需求 ID 合并：只更新进度时漏传某条需求或包，不删除已确认内容；包顺序、依赖顺序、需求顺序和验收句子顺序不构成实际变化。目标或权限变化仍须在同一 `task-update` 提供完整准备、理由和匹配的 `preparationTarget`。合并后按最终快照核对所有需求的负责 worker 包和包依赖，保留需求指向被移除包时拒绝并点名；同批迁移到现存 worker 包则接受。需求内容实际变化时只失效对应 ID 的旧 `validation.acceptance` 声明，未变化条目的证据、进度和原顺序保留。增量入参未提供的顶层字段和同 ID 条目内未重传的子字段由既有记录补齐；完整记录用于缺项校验，交给快照合并的仍是本次实际提到的条目，避免未提到旧条目被误算为本次重传。
 - Agent 核对使用基础 Agent 词根：`agentBaseWords` 剥离括号说明（`(...)`/`（...）`）与 `--model`/`-m`/`--effort` 等运行参数，`sameBaseAgent` 对剥离后的词序做全等比较；准备记录中的 `(group/worker[1m], high)` 与 `claude_code` 等同一基础 Agent 不因模型/effort 备注被误判。仅基础 Agent 相同时才允许微调 `agent` 备注。
-- 复杂 `delegated` 的逐包审查豁免只能随准备记录声明：`reviewWaiver` 仅允许 worker 包，必须同时给出非空 `reason` 与 `consent`；声明进入准备快照，准备阶段或 `task-update` 仅在包尚无审查历史且不是只读诊断包时允许补挂或修改，已有实际审查结论时拒绝并令旧声明失效。
+- 复杂 `delegated` 的逐包审查豁免只能随准备记录声明：`reviewWaiver` 仅允许 worker 包，必须同时给出非空 `reason` 与 `consent`；声明进入准备快照，准备阶段或 `task-update` 仅在包尚无审查历史且不是只读诊断包时允许补挂或修改，已有实际审查结论时拒绝并令旧声明失效；准备快照已预声明 `reviewWaiver` 的包不能再登记为只读诊断包。
 - 复杂 `lead-direct` 与 `delegated` 的 `task-end` 按准备记录逐条核对交付声明 `validation.acceptance`：缺条目、未知 ID 或状态字段不完整时列入缺项。验收状态为 `verified`、`manual-pending`、`blocked`、`deferred`：`verified` 要有最终证据；`manual-pending` 要有负责人和可操作步骤；`blocked` 要有原因和下一步；`deferred` 要有原因和用户同意依据。
 - 交付声明绑定 `validation.ref`（必须等于最终交付版本）；版本变化后旧证据不自动沿用，需重新提交。回执汇总 `verified`/`manual-pending`/`blocked`/`deferred` 数量和剩余项，明确 `allVerified`，不把阶段交付说成全部通过。
 - 适用验收矩阵时，`validation` 与 `acceptance:<id>`/`acceptance-unknown:<id>` 缺项不能用 waiver（类别或精确条目）抵扣；只能补齐，或用 `manual-pending`/`blocked`/`deferred` 如实阶段结束。旧任务没有矩阵时保留原 waiver 兼容。
