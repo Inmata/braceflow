@@ -5,7 +5,7 @@ import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { digest, readState } from '../src/store.mjs';
 import { getContext } from '../src/context.mjs';
 import { agentBaseWords, normalizePreparation, preparationMissing, preparationSnapshot, preparationSnapshotSignature, preparationSummary, resolvePlanPath, sameBaseAgent } from '../src/preparation.mjs';
-import { cli, emit, entry, event, fixture } from './helpers.mjs';
+import { cli, consult, emit, entry, event, fixture } from './helpers.mjs';
 
 const PLAN_PATH = 'docs/plans/preparation-demo.md';
 const PLAN_TEXT = `# 示例计划
@@ -62,6 +62,7 @@ function build(f, args) {
   return cli(['signal', 'prepare', '--state-dir', f.directory, '--root', f.project, '--session', f.sessionId, '--turn', f.turnId, ...args]);
 }
 async function accept(f, args) {
+  await consult(f);
   const run = build(f, args);
   assert.equal(run.status, 0, run.stdout + run.stderr);
   const command = `node "${entry}" signal prepare --session ${f.sessionId} --turn ${f.turnId} --id ${args[args.indexOf('--id') + 1]}`;

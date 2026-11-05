@@ -5,7 +5,7 @@ import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { readState } from '../src/store.mjs';
 import { taskKey } from '../src/protocol.mjs';
-import { cli, emit, entry, event, fixture, gitFixture, identity, legacyEmit } from './helpers.mjs';
+import { cli, consult, emit, entry, event, fixture, gitFixture, identity, legacyEmit } from './helpers.mjs';
 
 // 显式旧的账本夹具：这些用例只验证通道/返修规则，不验证准备强制。
 const legacyDelegated = (f, extra = {}) => legacyEmit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
@@ -246,6 +246,7 @@ async function reviewWaivedFixture({ waiver } = {}) {
   await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
   await writeFile(path.join(f.project, plan), '# 审查豁免\n\nA01\n');
   const declared = [{ packageId: 'w1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', delivers: '完整行为', dependsOn: [], ...(waiver ? { reviewWaiver: waiver } : {}) }];
+  await consult(f);
   const prepared = await emit(f, {
     action: 'prepare',
     preparation: {

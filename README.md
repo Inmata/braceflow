@@ -8,6 +8,8 @@ workflow 是一套通用的 AI 项目协作工作流，帮助用户问清需求�
 
 **Lead、Worker、Reviewer 是职责，角色不绑定客户端或模型。** Claude Code 可以担任 Lead，也可以担任 Worker 或 Reviewer；Codex、OpenCode、Pi 等同样按当前授权和实际能力分工。具体安排由用户已确认的角色、可用工具和任务需要决定。
 
+Claude Code 安装还会写入两个只读子代理：`workflow-explorer`（已知位置的小读取由 Lead 直接做；跨文件调查与长日志分析交调查者；失败后只定向核查，重试不超过一次）和 `workflow-advisor`（重要决策前的第二意见）。它们不写文件、不派工、不占工作包，也不替代 Worker 或 Reviewer；顾问按需调用，Lead 判断需要或用户点名时再咨询，咨询记录只证明问过。详见[决策升级提醒](docs/design/protocol.md#决策升级提醒)。
+
 ## 角色与接入支持
 
 角色方法共用同一套[公共方法](docs/workflow.md)和[角色指引](docs/roles/lead.md)。同一种智能体也可以用不同的独立会话分别实施和审查。
@@ -64,7 +66,7 @@ node bin/workflow.mjs doctor --agent codex
 
 **已有安装如何升级：** 先结束活动任务，再在源码仓库执行 `git pull --ff-only`，随后对每个已安装的宿主重新运行上面的 `install` 和 `doctor`。两宿主共用 `current`，同时使用时要一起升级，避免入口已切到新版而另一个宿主仍登记旧版。项目绑定保留，无需重新执行 `project onboard`。当前会话会提示指引版本变化，升级后应打开新会话读取新版入口。
 
-GitHub 最新正式发布为 [v0.8.1](https://github.com/Inmata/workflow/releases/tag/v0.8.1)。当前源码 main 是 **0.9.0-dev.0 预发行**：Herdr/Cindy 真机验收 M1–M4 尚未完成，不要把它当作稳定版。`install` 复制的是当前工作树，main 可能包含该标签之后的改动；比较实际安装时，除版本号还要核对发布摘要。
+GitHub 最新正式发布为 [v0.8.1](https://github.com/Inmata/workflow/releases/tag/v0.8.1)。当前源码 main 是 **0.10.0**：Herdr TUI 已真机验证，Herdr GUI 与 Cindy（M2–M4）延期、未做真机验收，使用这些宿主前请自行验证。`install` 复制的是当前工作树，main 可能包含该标签之后的改动；比较实际安装时，除版本号还要核对发布摘要。
 
 ### 第 2 步：让项目接入
 
@@ -255,6 +257,38 @@ node bin/workflow.mjs project onboard --root "D:/你的项目"
 - 准备流程三步、保存格式和跨会话接续：[准备流程](docs/references/preparation.md)。
 - 各宿主与可选管理软件的适配：[Codex](docs/adapters/codex.md)、[Claude Code](docs/adapters/claude.md)、[Codeg（可选）](docs/adapters/codeg.md)。
 - 教学案例：[独立并行](examples/parallel-change/README.md)、[依赖返修](examples/dependency-and-repair/README.md)、[例行及小任务](examples/routine/README.md)、[准备与接续](examples/preparation-and-resume/README.md)。
+- 真实宿主评测：`npm run eval -- --suite smoke|protocol|model|herdr` 在隔离配置与临时状态目录中驱动真实宿主；套件、退出码与费用边界见[使用说明](docs/usage.md)，实际结果与未覆盖边界见[验收说明](docs/acceptance.md)。
+
+### 启用决策提醒（可选）
+
+路径规则和 jev 都是可选项。模板 `workflow-gate.example.json` 随发布副本分发：源码仓库在根目录，安装后在发布副本根目录。复制到项目根并改名为 `workflow-gate.json`：
+
+```powershell
+Copy-Item "<模板所在目录>/workflow-gate.example.json" "<项目根>/workflow-gate.json"
+```
+
+完整、可直接修改的例子：
+
+```json
+{
+  "schemaVersion": 1,
+  "pathRules": {
+    "security": ["src/auth/**", "src/**/permissions.*", "hooks/**"],
+    "migration": ["migrations/**", "src/**/schema.*"]
+  },
+  "jev": {
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:3425/v1/systemone",
+    "model": "typesafe/jev-latest"
+  }
+}
+```
+
+- `pathRules.security` / `pathRules.migration` 是项目相对路径的 glob 数组；某一类缺省按空数组，`pathRules` 缺失、类型不对或含未知分类时路径规则不生效并带回错误。空规则等于关闭。路径规则只核对复杂写入任务的 `task-update` 业务路径增量和受支持写入工具的实际写入，合规 `docs/plans/*.md` 增量不触发。
+- 路径规则的实际写入只核对 `Write`、`Edit`、`MultiEdit`、`NotebookEdit`、`apply_patch`、`write_file`、`delete_file` 从工具参数或补丁文本识别的目标；普通 shell 工具（`Bash`/`exec_command`/`PowerShell`/`pwsh`）的命令、重定向和脚本写文件不经过路径规则。命中时只提醒，不拦截：实际写入命中且本任务已有咨询记录时不提醒；`task-update` 扩大业务路径命中规则且本任务没有时间不早于最近一次已保存变化的咨询记录时，在回执附提醒。同一会话同一键（`<taskId>:security|migration`）只提醒一次。
+- `jev.enabled` 缺省为 `false`；开启时 `endpoint` 必须是 `http`/`https` 地址，`model` 必须是非空字符串。配置不合法只让 jev 不生效，不影响路径规则。密钥只从环境变量 `TYPESAFE_API_KEY` 读取，且只发给本机回环地址。`jev` 只参与 `prepare`、`task-update`、`packages` 三个信号，不检查实际文件写入：命中且没有对应咨询记录时只提醒。`prepare` 以本会话在本份准备之前的记录为抑制条件（`taskId` 为空或属于当前会话任务），若会话已有上一份准备，只看不早于上一份准备的 `preparedAt` 的记录，首次准备不设该时间下限；`task-update` 以本任务、时间不早于最近一次已保存变化的记录为抑制条件；`packages` 以本任务已有任一咨询记录为抑制条件。提醒键为 `<taskId 或 prepare>:jev`，同一会话只提醒一次。
+- 直接改项目根的 `workflow-gate.json`，下一次信号或写入生效，不需要重装；删除文件或清空规则即关闭路径规则，`jev.enabled: false` 即关闭 jev。
+- 字段表、各字段缺省行为和完整操作说明见[使用说明](docs/usage.md#决策升级提醒与可选-jev)。路径规则的真机交付仍未验证；jev 只有本地假服务测试和一次本机网关样本；`effort` 实际下发与同步调用状态锁的影响也未验证。
 
 ## 开发与验证
 
@@ -269,13 +303,21 @@ npm run verify
 
 ## 当前状态与限制
 
-当前源码版本 0.9.0-dev.0（预发行）。这是开发批次，**不是稳定版**：Herdr/Cindy 的真机验收 M1–M4 仍未完成，安装前请按 [验收说明第 13.3 节](docs/acceptance.md#133-人工验收待用户执行)核对。稳定版仍为 v0.8.1。功能包含协作规则、CLI、两种宿主的 hooks 适配、持久材料、分级知识、配置与可选后台复盘，以及分流、工作包账本、完成门禁、角色声明和 spec 漂移检查；真实宿主验收记录见 [0.3.0 验收](docs/acceptance.md#6-030-真实宿主验收)。安装器用内容摘要区分副本。仓库源码另提供 `npm run verify` 组合验证入口，`scripts/` 不随安装副本发布。
+当前源码版本 0.10.0。Herdr TUI（M1）已真机验证；Herdr GUI 与 Cindy（M2–M4）按用户决定延期，未做真机验收，另有部分人工验收项仍待验，见 [验收说明第 13.3 节](docs/acceptance.md#133-人工验收待用户执行)。功能包含协作规则、CLI、两种宿主的 hooks 适配、持久材料、分级知识、配置与可选后台复盘，以及分流、工作包账本、完成门禁、角色声明和 spec 漂移检查；真实宿主验收记录见 [0.3.0 验收](docs/acceptance.md#6-030-真实宿主验收)。安装器用内容摘要区分副本。仓库源码另提供 `npm run verify` 组合验证入口，`scripts/` 不随安装副本发布。
+
+0.10.0 的变化（相对 0.8.1，含 0.9.0-dev.0 批次）：
+
+- 决策顾问与 jev 门禁、Trajectory：顾问按需咨询，路径规则与 jev 命中只提醒；hook 决定写入离线 Trajectory。
+- context 评测：新增对比框架、成本对账（含子代理与重试，可比性只看主会话模型）和 E10–E15 场景；答案判定取最后一个 `result`。
+- 子代理：定义改为所有权账本；首回合送达分流规则，跨文件追因与长日志先派 `workflow-explorer`。
+- 真机验收：Herdr GUI 与 Cindy（M2–M4）延期；评测分流方案的质量与成本结论为“无明确差异”，不能归因于分流句。
 
 0.9.0-dev.0 的变化：
 
-- Herdr TUI/GUI 与 Cindy 适配：委派命令按工作包核对，`hc` 子会话汇报不被当作用户回合，Cindy Orca 派工受控、Session task 受控派工被拒；安装器支持 Codex 附加配置目录。真机验收 M1–M4 待完成。
+- Herdr TUI/GUI 与 Cindy 适配：委派命令按工作包核对，`hc` 子会话汇报不被当作用户回合，Cindy Orca 派工受控、Session task 受控派工被拒；安装器支持 Codex 附加配置目录。真机验收 M1 已完成，M2–M4 延期。
 - 计划阶段与审查防呆：未开工和 `plan` 模式放行合规 `docs/plans/*.md` 与系统临时目录；`task-update` 支持计划路径免重审、增量准备合并与同基础 Agent 调参；复杂 `delegated` 任务禁止临时豁免独立审查，只认准备阶段预声明的 `reviewWaiver`。
 - 文档与压缩恢复：补齐 Reviewer 四条审查准则和 Herdr 实操防呆，压缩后重新注入 Lead 核心纪律。
+- 分层与决策升级（W1–W4）：Claude Code 安装会写入两个只读子代理 `workflow-explorer` / `workflow-advisor`，Lead 主会话可用较轻模型，Worker/Reviewer 分工不变。顾问按需调用，咨询记录只证明问过；`prepare`、`task-update`、`packages`、`task-end` 都不再要求先咨询。项目根 `workflow-gate.json` 的 `security` / `migration` 路径规则在受支持写入工具的实际写入和范围扩张时只提醒，可选 jev 只参与准备、更新和记账信号且默认关闭，命中同样只提醒；每个键同一会话只提醒一次，2 秒超时按未命中处理。路径规则的真机交付、`effort` 实际下发和同步调用状态锁的影响仍未验证；jev 只有本地假服务和一次本机网关样本。
 
 0.8.1 的变化：
 
@@ -284,17 +326,17 @@ npm run verify
 - 提取范围固定到任务：`task-start` 记录本任务起点，`task-end` 固定 transcript 前缀的大小、SHA-256 与消息边界；登记后继续追加不会进入旧作业，替换、截断、起点不可确认或旧作业缺少范围时跳过，不回退读取会话全文。学习被禁止的任务也推进边界；重放 `task-end` 只查询原任务已有作业，不为当前新任务提前登记。
 - 同时修正的边界：对齐读取失败或超出检查上限时给出“不完整”提示并保留可读部分的进度；项目停用可重试且不覆盖用户手改的 AGENTS。
 
-升级后重装宿主即可；两个宿主共用 `current`，安装命令只更新所选宿主的注册。AGENTS 管理区未变，不需要重新接入。以上行为由本仓测试与合成 smoke 覆盖，发布说明不把它们当作真实宿主验收；真实回调、模型调用和超大仓库下的 4 秒 Git 预检预算表现仍需另行验收。
+升级后重装宿主即可；两个宿主共用 `current`，安装命令只更新所选宿主的注册。AGENTS 管理区未变，不需要重新接入。以上行为由本仓测试与合成 smoke 覆盖，发布说明不把它们当作真实宿主验收；真实回调、模型调用和超大仓库下的 8 秒 Git 预检预算表现仍需另行验收。
 
 0.8.0 的变化：
 
 - 新任务显式分流：`task-start` 和完整 payload 都必须声明 `route`（`operation-only` / `lead-direct` / `delegated`）；新任务漏填或值非法返回 `ROUTE`，不建立任务。已存在任务续接可省略；旧版本留下、记录中没有 `route` 的历史任务照常续接，可在续接时补声明一次，声明后不可改。任务门禁对历史无 `route` 任务照常做 spec 检查；复杂 `lead-direct` 还要按准备需求核对 validation 与验收矩阵。
-- spec 检查锁外预检：`task-end` 与 Stop 在状态锁外按当前 worktree 和 `finalRef`（缺省 HEAD）检查 spec，整次检查按开始时刻的绝对截止时间给 Git 调用共用 4 秒预算：同步的文件快照读取不能强制中断，但耗时同样消耗截止时间、减少后续 Git 剩余时长，4 秒不保证预检或 Hook 总时长；锁内最终 ref 复核另有独立预算。慢 Git 不再占用其他会话需要的状态锁；预检把提交 OID、受管文件摘要、spec 清单和索引快照绑定成 `binding`，锁内只重解析一次 ref 并比对快照，不重跑 status/log/rev-list。提交、工作区、索引或会话/任务快照变化后，旧报告按 `spec-check:stale` 作废，且不可豁免，只能重试；Stop 在无法确认时明确提示“spec 检查无法确认”，不报“门禁无缺项”。
+- spec 检查锁外预检：`task-end` 与 Stop 在状态锁外按当前 worktree 和 `finalRef`（缺省 HEAD）检查 spec，整次检查按开始时刻的绝对截止时间给 Git 调用共用 8 秒预算：同步的文件快照读取不能强制中断，但耗时同样消耗截止时间、减少后续 Git 剩余时长，8 秒不保证预检或 Hook 总时长；锁内最终 ref 复核另有独立预算。慢 Git 不再占用其他会话需要的状态锁；预检把提交 OID、受管文件摘要、spec 清单和索引快照绑定成 `binding`，锁内只重解析一次 ref 并比对快照，不重跑 status/log/rev-list。提交、工作区、索引或会话/任务快照变化后，旧报告按 `spec-check:stale` 作废，且不可豁免，只能重试；Stop 在无法确认时明确提示“spec 检查无法确认”，不报“门禁无缺项”。
 - 接入预检顺序与 PowerShell 参数：核心接入检查未通过时，`project onboard` 不读取也不执行个人或项目配置指定的执行器。生成给用户和代理的命令改用 PowerShell 单引号字面量；含空格、单引号、`$`、反引号、分号或 `$(...)` 的路径与参数按原值传递，不再被展开执行。PowerShell 5.1 无法原样传递的双引号和空参数改用 `workflow-arg64:` 标记，并只在生成命令带 `--workflow-arg64-transport` 开关时还原。
 - 维护验证入口：新增 `npm run verify`，按 `package.json` 的 `check`、`test`、`demo` 顺序组合执行选中的检查，保留逐项原始输出与 `summary.json`/`summary.md` 摘要；任一必需检查失败或未完成时整体退出码非零，demo 固定标为合成 smoke。
 - 同时修正的边界：对齐检查遇到权限、占用等读取失败时进入 `errors` 并把索引标为过期/不完整，不再当成文件已删除；`task-end` 拒绝时的整体回滚由生产 Hook 的事务边界保证，直接调用协议函数的新调用方需要自己提供同等边界。
 
-升级后重装宿主即可；两个宿主共用 `current`，安装命令只更新所选宿主的注册。AGENTS 管理区未变，不需要重新接入。以上行为由本仓测试与合成 smoke 覆盖，发布说明不把它们当作真实宿主验收；真实回调、模型调用和超大仓库下的 4 秒 Git 预检预算表现仍需另行验收。
+升级后重装宿主即可；两个宿主共用 `current`，安装命令只更新所选宿主的注册。AGENTS 管理区未变，不需要重新接入。以上行为由本仓测试与合成 smoke 覆盖，发布说明不把它们当作真实宿主验收；真实回调、模型调用和超大仓库下的 8 秒 Git 预检预算表现仍需另行验收。
 
 0.7.0 的变化：
 

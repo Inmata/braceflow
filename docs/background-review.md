@@ -144,9 +144,11 @@ node bin/workflow.mjs learning status --root "D:/项目"
 
 材料、反馈和提取作业可用 `learning status --root "D:/项目" --session <sessionId> --task <taskId>` 按会话/任务过滤；不传时是项目范围。指定会话时只统计带同一 `sessionId` 的记录，同任务其他会话不混入；缺少 `sessionId` 的记录单列在 `unattributed.taskLevel/unknown`，不计入会话结果。`limits` 与 `capture.todayStarted` 按项目实际累计并标注 `project`。`knowledge select` 只是查询，不算 `adopted`。
 
-task-end 被接受后，已启用学习的项目会登记一次幂等的候选提取作业。它使用宿主 transcript 中用户与助手的短文本，剔除工具输出；只接受绝对路径普通文件，拒绝相对路径、符号链接和真实路径不一致；Claude 消息必须逐条带当前 `sessionId`，Codex 必须有匹配的 `session_meta`。读取失败、格式错误、身份不足、超时或无效输出只影响该作业（`skipped`/`failed`/`timeout`），不阻塞任务结束，也不会直接产生正式知识。同一任务结束重放、Stop 或普通 Hook 不会重复登记。自动候选引用已有 `knowledgeId` 时，只有明确纠正或已验证失败才与人工采集一样登记反例；候选仍会唤醒同知识或同条件的 `waiting` 材料，引用不存在的知识则会被拒绝。完成、跳过与用量在 `capture` 中单独展示。
+task-end 被接受后，已启用学习的项目会登记一次幂等的候选提取作业。它使用宿主 transcript 中用户与助手的短文本，剔除工具输出，并附带有界的任务级事实 `taskFacts`（目标、路线、最终提交、验证引用与证据、验收项、工作包、变更摘要；总计约 4,000 字符，不含 diff 或工具输出）。提示词要求优先找“修完又返工”“不该接受就合并”“验证太薄”，并把做对的做法保留为 success 的 Done right 正面例子。候选证据可引用 `transcript:<用户消息编号>`、`task:<当前taskId>` 或 `validation:<当前validation.ref>`；偏好与纠正要求 `explicit=true` 且至少一条 transcript 用户消息证据，成功与失败要求 `verified=true` 且至少一条 transcript 或 validation 证据，只引用 `task:` 不算验证。`explicit=true` 只用于用户直接说出的偏好或纠正。它只接受绝对路径普通文件，拒绝相对路径、符号链接和真实路径不一致；Claude 消息必须逐条带当前 `sessionId`，Codex 必须有匹配的 `session_meta`。读取失败、格式错误、身份不足、超时或无效输出只影响该作业（`skipped`/`failed`/`timeout`），不阻塞任务结束，也不会直接产生正式知识。同一任务结束重放、Stop 或普通 Hook 不会重复登记。自动候选引用已有 `knowledgeId` 时，只有明确纠正或已验证失败才与人工采集一样登记反例；候选仍会唤醒同知识或同条件的 `waiting` 材料，引用不存在的知识则会被拒绝。完成、跳过与用量在 `capture` 中单独展示。
 
 确认通知：`learning acknowledge --root "D:/项目"`。
+
+窗口摘要：`learning digest --root "D:/项目" --days 7`。默认 7 天、可设 1–90 天，只读，不调用模型、不写状态、不记录 `shown`。输出窗口起止与天数，窗口内材料 `pending/waiting/processed`、复盘 `completed/partial/failed/timeout` 与被拒/未处置数、知识 create/revise 与 stable 总数及当前常驻规则 `id/title/seen/dates/lastSeen`、同一 `incidentId` 出现至少两次的重复材料、当前 `disputed` 知识/即时反例/待处理冲突运行、提取作业状态与候选数，以及 `shown/adopted` 显式反馈计数；这些反馈数字不代表采纳或成功。
 
 每次运行的完整记录在 `<状态根>/projects/<projectId>/runs/<运行ID>.json`，包含启动时的配置、提案和结果。
 

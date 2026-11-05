@@ -15,5 +15,10 @@
 | `preparation-and-delivery.md` | [2026-11-01-01-preparation-and-delivery.md](2026-11-01-01-preparation-and-delivery.md) |
 | `plan.md` | [2026-11-02-01-herdr-cindy-adapters.md](2026-11-02-01-herdr-cindy-adapters.md) |
 | （新建） | [2026-11-02-02-ux-guardrail-and-discipline.md](2026-11-02-02-ux-guardrail-and-discipline.md) |
+| （新建） | [2026-11-03-01-decision-advisor.md](2026-11-03-01-decision-advisor.md) |
+| （新建） | [2026-11-03-02-learning-loop-and-digest.md](2026-11-03-02-learning-loop-and-digest.md) |
+| （新建） | [2026-11-03-02-herdr-learning-acceptance.md](2026-11-03-02-herdr-learning-acceptance.md) |
+| （新建） | [2026-11-03-03-evaluation-harness.md](2026-11-03-03-evaluation-harness.md) |
+| （新建） | [2026-11-05-01-lead-context-and-trajectory.md](2026-11-05-01-lead-context-and-trajectory.md) |
 
 已有任务或准备记录可能保存了旧路径；本次重命名不会自动迁移这些记录。继续使用时，请根据实际任务核对计划来源与关联路径，必要时重新绑定。准备记录的使用方式见[准备与接续](../references/preparation.md)。

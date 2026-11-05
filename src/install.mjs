@@ -6,9 +6,9 @@ import { PRODUCT_ROOT } from './entry.mjs';
 import { CLAUDE_EVENTS, EVENTS, HOSTS as HOST_NAMES } from './hooks.mjs';
 
 export const RELEASE_PATHS = [
-  'bin', 'src', 'hooks', '.codex-plugin', 'docs/workflow.md', 'docs/alignment.md', 'docs/roles',
+  'bin', 'src', 'hooks', 'agents', '.codex-plugin', 'docs/workflow.md', 'docs/alignment.md', 'docs/roles',
   'docs/references', 'docs/adapters', 'docs/usage.md', 'docs/design/protocol.md', 'docs/learning.md', 'docs/background-review.md', 'docs/acceptance.md',
-  'examples', 'package.json', 'plugin.json', 'README.md', 'README.en.md',
+  'examples', 'package.json', 'plugin.json', 'workflow-gate.example.json', 'README.md', 'README.en.md',
 ];
 async function inventory(root, relative = '', selected = RELEASE_PATHS) {
   const files = [];
@@ -29,6 +29,161 @@ export async function verifyRelease(record) {
     const actual = await inventory(record.releaseRoot, '', names);
     return JSON.stringify(actual) === JSON.stringify(record.files);
   } catch { return false; }
+}
+// 子代理定义是用户级文件，不能按 hooks 的“自有 handler”方式整体重写。账本按名字记录
+// managed/user/deleted 和最后写入的 hash：只有 managed 且内容仍等于最后写入的文件随发布更新；
+// 用户改过或事先存在的同名文件归用户，删除后不补回。
+const AGENT_PATH = /^agents\/([^/\\]+\.md)$/;
+const AGENT_STATUSES = new Set(['managed', 'user', 'deleted']);
+const agentFilesFor = files => files.flatMap(file => {
+  const match = AGENT_PATH.exec(file.path);
+  return match ? [{ name: match[1], hash: file.hash }] : [];
+});
+const agentFileName = name => typeof name === 'string' && name.endsWith('.md') && !name.includes('/') && !name.includes('\\');
+const installedAgentFiles = record => Array.isArray(record?.agentFiles)
+  ? record.agentFiles.filter(item => item && agentFileName(item.name) && typeof item.hash === 'string')
+  : [];
+const previousAgentFiles = record => installedAgentFiles({ agentFiles: record?.previousAgentFiles });
+// 旧记录没有账本：agentFiles 与 previousAgentFiles 都是本插件写过的内容，按 managed 迁移。
+// 升级中断留下的旧记录 agentFiles 是未写成功的新内容，文件若仍等于 previousAgentFiles 就以旧 hash 记账。
+async function legacyAgentLedger(record) {
+  const entries = new Map();
+  const previous = new Map(previousAgentFiles(record).map(file => [file.name, file.hash]));
+  for (const file of installedAgentFiles(record)) {
+    let hash = file.hash;
+    const alternate = previous.get(file.name);
+    if (alternate && alternate !== hash && record.configFile) {
+      const current = await inspectAgentTarget(agentTarget(record.configFile, file.name));
+      if (current.state === 'file' && current.hash === alternate) hash = alternate;
+    }
+    entries.set(file.name, { name: file.name, status: 'managed', hash });
+  }
+  for (const file of previousAgentFiles(record)) {
+    if (!entries.has(file.name)) entries.set(file.name, { name: file.name, status: 'managed', hash: file.hash });
+  }
+  return [...entries.values()];
+}
+// 卸载记录的账本已清除；旧版卸载记录里的 agentFiles 也不能在重装时重新认领文件。
+async function agentLedger(record) {
+  if (!record || record.status === 'uninstalled') return [];
+  const source = Array.isArray(record.agentLedger) ? record.agentLedger : await legacyAgentLedger(record);
+  const entries = new Map();
+  for (const item of source) {
+    if (!item || !agentFileName(item.name) || !AGENT_STATUSES.has(item.status)) continue;
+    entries.set(item.name, { name: item.name, status: item.status, hash: typeof item.hash === 'string' ? item.hash : null });
+  }
+  return [...entries.values()];
+}
+const agentTarget = (configFile, name) => path.join(path.dirname(configFile), 'agents', name);
+async function inspectAgentTarget(target) {
+  const info = await lstat(target).catch(() => null);
+  if (!info) return { state: 'missing', target };
+  if (!info.isFile()) return { state: 'other', target };
+  const text = await readText(target);
+  if (text === null) return { state: 'missing', target };
+  return { state: 'file', target, hash: digest(text) };
+}
+// 只计算本次每个名字的去向和需要写入的文件，不读发布正文；写入在事务确认阶段完成。
+async function agentPlan(configFile, ledger, release) {
+  const entries = new Map(ledger.map(item => [item.name, { ...item }]));
+  const published = new Map(release.map(item => [item.name, item.hash]));
+  const writes = [], notes = [];
+  for (const item of release) {
+    const target = agentTarget(configFile, item.name);
+    const current = await inspectAgentTarget(target);
+    const existing = entries.get(item.name);
+    const fileHash = current.state === 'file' ? current.hash : null;
+    if (!existing) {
+      if (current.state === 'missing') {
+        writes.push(item.name);
+        entries.set(item.name, { name: item.name, status: 'managed', hash: item.hash });
+      } else if (fileHash === item.hash) {
+        entries.set(item.name, { name: item.name, status: 'managed', hash: item.hash });
+      } else {
+        entries.set(item.name, { name: item.name, status: 'user', hash: null });
+        notes.push(`未安装默认定义：${item.name}`);
+      }
+      continue;
+    }
+    if (current.state === 'missing') {
+      if (existing.status !== 'deleted') notes.push(`子代理定义 ${item.name} 已删除，不再补回`);
+      entries.set(item.name, { name: item.name, status: 'deleted', hash: existing.hash });
+      continue;
+    }
+    if (existing.status === 'deleted') {
+      entries.set(item.name, { name: item.name, status: 'user', hash: existing.hash });
+      notes.push(`子代理定义 ${item.name} 已重新出现，按用户文件保留`);
+      continue;
+    }
+    if (existing.status === 'user') continue;
+    // managed：内容等于本次发布时直接认作自有（也覆盖写到一半后重试）；否则必须是上次写入内容才能更新。
+    if (fileHash === item.hash) {
+      entries.set(item.name, { name: item.name, status: 'managed', hash: item.hash });
+      continue;
+    }
+    if (current.state !== 'file' || fileHash !== existing.hash) {
+      entries.set(item.name, { name: item.name, status: 'user', hash: existing.hash });
+      notes.push(`子代理定义 ${item.name} 与上次写入不同，保留为用户的文件`);
+      continue;
+    }
+    writes.push(item.name);
+    entries.set(item.name, { name: item.name, status: 'managed', hash: item.hash });
+    notes.push(`已更新子代理默认定义：${item.name}`);
+  }
+  // 账本里已不再发布的名字不再更新：缺失记删除，被改、非普通文件或重新出现都归用户，判定与 doctor 一致。
+  for (const [name, item] of entries) {
+    if (published.has(name)) continue;
+    const current = await inspectAgentTarget(agentTarget(configFile, name));
+    if (current.state === 'missing') entries.set(name, { ...item, status: 'deleted' });
+    else if (item.status === 'deleted' || (item.status === 'managed' && (current.state !== 'file' || current.hash !== item.hash))) entries.set(name, { ...item, status: 'user' });
+  }
+  return { ledger: [...entries.values()], writes, notes };
+}
+async function syncAgentFiles(configFile, releaseRoot, release, ledger) {
+  const plan = await agentPlan(configFile, ledger, release);
+  for (const name of plan.writes) {
+    await atomicWrite(agentTarget(configFile, name), await readFile(path.join(releaseRoot, 'agents', name), 'utf8'));
+  }
+  return plan;
+}
+const agentReceipt = plan => ({ entries: plan.ledger.map(({ name, status }) => ({ name, status })), notes: plan.notes });
+async function agentRemovalPlan(configFile, ledger) {
+  const remove = [], kept = [];
+  for (const item of ledger) {
+    const target = agentTarget(configFile, item.name);
+    const current = await inspectAgentTarget(target);
+    if (current.state === 'missing') continue;
+    if (item.status === 'managed' && current.state === 'file' && current.hash === item.hash) {
+      remove.push({ name: item.name, path: target, hash: item.hash });
+    } else {
+      kept.push({ name: item.name, status: item.status === 'managed' || item.status === 'deleted' ? 'user' : item.status });
+    }
+  }
+  return { remove, kept };
+}
+// 撤销意图落盘后用户可能又改文件；移除前再次核对内容，变化时保留不失败。
+async function removeOwnedAgentFiles(files) {
+  for (const file of files) {
+    const current = await inspectAgentTarget(file.path);
+    if (current.state !== 'file' || current.hash !== file.hash) continue;
+    await unlink(file.path);
+  }
+}
+async function agentDoctor(record) {
+  if (!record?.configFile) return [];
+  const release = new Map(agentFilesFor(record.files || []).map(item => [item.name, item.hash]));
+  const list = [];
+  for (const item of await agentLedger(record)) {
+    const current = await inspectAgentTarget(agentTarget(record.configFile, item.name));
+    // 与 agentPlan 同口径：文件缺失一律记删除；managed 内容等于账本或本次发布都算未改动，
+    // 只有非普通文件或两种内容都不符才归用户；deleted 重新出现归用户。
+    let status = item.status;
+    if (current.state === 'missing') status = 'deleted';
+    else if (item.status === 'managed' && (current.state !== 'file' || (current.hash !== item.hash && current.hash !== release.get(item.name)))) status = 'user';
+    else if (item.status === 'deleted') status = 'user';
+    list.push({ name: item.name, status, differsFromRelease: current.state === 'file' && release.has(item.name) && current.hash !== release.get(item.name) });
+  }
+  return list;
 }
 const psQuote = text => `'${text.replaceAll("'", "''")}'`;
 const shQuote = text => `'${text.replaceAll("'", `'"'"'`)}'`;
@@ -319,10 +474,18 @@ async function finishPrepared(directory, state, save, record, agent) {
   const entry = await checkEntry();
   if (textHash(await readText(record.configFile)) !== record.afterHash) fail('CONFLICT', '安装确认前 hooks 配置已变化；保留事务');
   if (entry.state !== 'verified') await pointCurrent(directory, record.releaseRoot);
+  let agents = null;
+  if (agent === 'claude') {
+    const plan = await syncAgentFiles(record.configFile, record.releaseRoot, agentFilesFor(record.files || []), await agentLedger(record));
+    record.agentLedger = plan.ledger;
+    delete record.agentFiles;
+    delete record.previousAgentFiles;
+    agents = agentReceipt(plan);
+  }
   record.status = 'installed';
   registerInstall(state, agent, record);
   await save();
-  return { status: 'installed', agent, version: record.version, releaseRoot: record.releaseRoot, currentRoot: record.currentRoot, configFile: record.configFile, changeId: record.changeId, requiresTrust: '请用实际宿主支持的 /hooks 审核当前定义；新会话验证，不自动修改信任记录' };
+  return { status: 'installed', agent, version: record.version, releaseRoot: record.releaseRoot, currentRoot: record.currentRoot, configFile: record.configFile, changeId: record.changeId, ...(agents ? { agents } : {}), requiresTrust: '请用实际宿主支持的 /hooks 审核当前定义；新会话验证，不自动修改信任记录' };
 }
 export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, agent = 'codex' } = {}) {
   const host = hostFor(agent);
@@ -354,7 +517,6 @@ export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, a
     const entry = await inspectCurrent(directory, active);
     if (entry.state === 'conflict') return currentConflict(entry);
     if (sameSnapshot) {
-      if (entry.state === 'verified') return { status: 'already-installed', agent, version: active.version, releaseRoot: active.releaseRoot, currentRoot: active.currentRoot, configFile, requiresTrust: 'unknown' };
       if (entry.state === 'own-other') {
         // 入口仍属于本状态根，但指向另一个已登记的有效快照（可能是另一个 Codex 配置目录或宿主）：不改指。
         const owner = await otherHostSnapshot(directory, state, agent, entry.target, active);
@@ -364,8 +526,21 @@ export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, a
           reason: '另一个已安装宿主或 Codex 配置目录正在使用 current；保留现场待统一升级',
         };
       }
+      const plan = agent === 'claude' ? await syncAgentFiles(configFile, active.releaseRoot, agentFilesFor(active.files || files), await agentLedger(active)) : null;
+      let agents = null;
+      if (plan) {
+        active.agentLedger = plan.ledger;
+        delete active.agentFiles;
+        delete active.previousAgentFiles;
+        agents = agentReceipt(plan);
+      }
+      const common = { agent, version: active.version, releaseRoot: active.releaseRoot, configFile, requiresTrust: 'unknown', ...(agents ? { agents } : {}) };
+      if (entry.state === 'verified') {
+        if (!plan?.writes.length) return { status: 'already-installed', ...common, currentRoot: active.currentRoot };
+        return { status: 'repaired', ...common, currentRoot: active.currentRoot };
+      }
       await pointCurrent(directory, active.releaseRoot);
-      return { status: 'repaired', agent, version: active.version, releaseRoot: active.releaseRoot, currentRoot: currentRoot(directory), configFile, previousTarget: entry.target ?? null, requiresTrust: 'unknown' };
+      return { status: 'repaired', ...common, currentRoot: currentRoot(directory), previousTarget: entry.target ?? null };
     }
     const activeTasks = Object.values(state.tasks).filter(task => task.lifecycle === 'active').map(task => task.taskId);
     const activeTransactions = Object.values(state.transactions).filter(tx => tx.status === 'prepared').map(tx => tx.transactionId);
@@ -393,7 +568,7 @@ export async function install(directory, { userDir, sourceRoot = PRODUCT_ROOT, a
     const after = addHandlers(stripped.config, handlers, stripped.slots);
     const changeId = id('install');
     const target = handlers[host.events[0]];
-    const record = { status: 'prepared', agent, events: host.events, changeId, version: packageInfo.version, releaseHash, releaseRoot, currentRoot: link, files, configFile, command: target.command, args: target.args ?? null, handlers, beforeHash: textHash(current.text), afterHash: digest(after), previousCurrentTarget: entry.target ?? null, registeredAt: new Date().toISOString(), previousOwned: active ? { command: active.command, args: active.args ?? null, handlers: active.handlers, events: active.events || host.events } : null };
+    const record = { status: 'prepared', agent, events: host.events, changeId, version: packageInfo.version, releaseHash, releaseRoot, currentRoot: link, files, configFile, command: target.command, args: target.args ?? null, handlers, beforeHash: textHash(current.text), afterHash: digest(after), previousCurrentTarget: entry.target ?? null, ...(agent === 'claude' ? { agentLedger: await agentLedger(active) } : {}), registeredAt: new Date().toISOString(), previousOwned: active ? { command: active.command, args: active.args ?? null, handlers: active.handlers, events: active.events || host.events } : null };
     // Only owned definitions and fingerprints are backed up, never unrelated configuration or credentials.
     await writeJSON(path.join(directory, 'installation-changes', `${changeId}.json`), record);
     registerInstall(state, agent, record);
@@ -415,22 +590,33 @@ export async function uninstall(directory, { agent = 'codex', userDir } = {}) {
     if (!record || record.status === 'uninstalled') return withExtras({ status: 'not-installed' });
     if (record.status === 'prepared') await finishPrepared(directory, state, save, record, agent);
     if (record.status !== 'installed') fail('RECOVERY', '安装事务尚未确认，需要先核对注册差异');
-    const finish = () => {
+    const agentPlan = await agentRemovalPlan(record.configFile, await agentLedger(record));
+    const finish = removed => {
       record.status = 'uninstalled';
       record.uninstalledAt = new Date().toISOString();
       delete record.uninstallIntent;
+      // 账本随卸载清除；重装按全新状态判断，不沿用旧记录认领文件。
+      delete record.agentLedger;
+      delete record.agentFiles;
+      delete record.previousAgentFiles;
       // 只同步权威记录；附加位置留在 extra 中供 doctor 追溯，不能覆盖默认目录记录。
       if (samePrimary(state, agent, record)) {
         state.installs[agent] = record;
         if (agent === 'codex') state.install = record;
       }
-      return withExtras({ status: 'uninstalled', releaseRetained: record.releaseRoot, reason: '发布副本和追溯记录保留，可通过系统回收站清理' });
+      return withExtras({
+        status: 'uninstalled', releaseRetained: record.releaseRoot, reason: '发布副本和追溯记录保留，可通过系统回收站清理',
+        ...(agent === 'claude' ? { agents: { removed, kept: agentPlan.kept } } : {}),
+      });
     };
     // 撤销意图先落盘：配置移除成功后若最终状态保存失败，重试可按前后指纹识别已完成并收敛。
     const intent = record.uninstallIntent;
     if (intent?.configFile && samePath(intent.configFile, record.configFile)) {
       const hash = textHash(await readText(record.configFile));
-      if (hash === intent.afterHash) return finish();
+      if (hash === intent.afterHash) {
+        await removeOwnedAgentFiles(intent.agentFiles || []);
+        return finish((intent.agentFiles || []).map(file => file.name));
+      }
       if (hash !== intent.beforeHash) fail('CONFLICT', '卸载重试时配置不匹配撤销前后指纹；保留用户配置与事务');
       // 指纹仍是撤销前内容：上次尚未移除 hooks，按正常流程重新计算后继续。
     }
@@ -439,10 +625,11 @@ export async function uninstall(directory, { agent = 'codex', userDir } = {}) {
     if (stripped.conflicts.length) return { status: 'conflict', conflicts: stripped.conflicts, reason: '自有定义被用户修改；保留整个配置待核对' };
     if (await readText(record.configFile) !== current.text) fail('CONFLICT', '撤销期间用户修改了配置');
     const after = JSON.stringify(stripped.config, null, 2) + '\n';
-    record.uninstallIntent = { configFile: record.configFile, beforeHash: textHash(current.text), afterHash: digest(after), events: record.events || host.events };
+    record.uninstallIntent = { configFile: record.configFile, beforeHash: textHash(current.text), afterHash: digest(after), events: record.events || host.events, agentFiles: agentPlan.remove };
     await save();
     await atomicWrite(record.configFile, after);
-    return finish();
+    await removeOwnedAgentFiles(agentPlan.remove);
+    return finish(agentPlan.remove.map(file => file.name));
   });
 }
 // 只读核对 Codex 的 Default 模式提问开关；不写用户配置。只认 [features] 段内的布尔赋值，其余写法报告 unknown。
@@ -504,6 +691,7 @@ export async function doctor(directory, root, { agent = 'codex', userDir } = {})
     execution: actual.length ? { status: 'callback-observed-host-unverified', events: actual } : 'unknown',
     integrity: record ? await releaseIntegrity(directory, record) : 'not-installed',
     version: record?.version || null,
+    ...(agent === 'claude' ? { agents: record ? await agentDoctor(record) : [] } : {}),
     ...(agent === 'codex' ? { questionInDefaultMode: await codexQuestionFeature(userDir || (record?.configFile ? path.dirname(record.configFile) : undefined)) } : {}),
     ...(configFile ? {} : { locations: await Promise.all(registered.map(item => locationReport(directory, agent, item))) }),
     activeTasks: Object.values(state.tasks).filter(task => task.lifecycle === 'active').map(task => task.taskId),

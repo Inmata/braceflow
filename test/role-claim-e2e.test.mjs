@@ -5,7 +5,7 @@ import path from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { sessionKey, taskKey } from '../src/protocol.mjs';
 import { mutate, readState } from '../src/store.mjs';
-import { cli, emit, entry, event, fixture } from './helpers.mjs';
+import { cli, consult, emit, entry, event, fixture } from './helpers.mjs';
 
 const planPath = 'docs/plans/r2-role-claim.md';
 function build(f, action, args, session = f) {
@@ -46,6 +46,8 @@ test('R2 真实 CLI role-claim 按 --task 绑定；两个活动任务的同名 W
   };
   const lead2 = { sessionId: 'lead-2', turnId: 'lead-2-turn' };
   await event({ ...f, ...lead2 }, 'UserPromptSubmit');
+  await consult(f);
+  await consult({ ...f, ...lead2 });
   assert.equal((await emit(f, { action: 'prepare', preparation })).result.accepted, true);
   assert.equal((await emit({ ...f, ...lead2 }, { action: 'prepare', preparation })).result.accepted, true);
   assert.equal((await emit(f, { action: 'task-start', goal: '任务一', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/a.mjs'] } })).result.accepted, true);

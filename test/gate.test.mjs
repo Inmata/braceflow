@@ -10,7 +10,7 @@ import { acceptSignal, gateReport, openTurn, stop, taskKey } from '../src/protoc
 import { codexQuestionFeature, doctor } from '../src/install.mjs';
 import { attachWorktree } from '../src/projects.mjs';
 import { checkSpecs, precheckSpecs, verifySpecBinding } from '../src/spec.mjs';
-import { cli, emit, event, fixture, git, gitFixture, identity, legacyEmit, start, temporary } from './helpers.mjs';
+import { cli, consult, emit, event, fixture, git, gitFixture, identity, legacyEmit, start, temporary } from './helpers.mjs';
 
 // 显式旧的账本夹具：这些用例只验证分流/门禁机械行为，不验证准备强制。
 const legacyDelegated = (f, extra = {}) => legacyEmit(f, { action: 'task-start', goal: '分工任务', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['README.md'] }, ...extra });
@@ -558,6 +558,9 @@ test('压缩后 compact SessionStart 上下文含紧凑账本且不含结果正�
   // U5：压缩恢复也必须重新给出三条核心纪律，避免压缩后跳过确认与审查。
   assert.match(context.instruction, /核心纪律/);
   assert.match(context.instruction, /三步确认/);
+  // U5-2：确认选择不等于开工授权，开工确认必须单独一问且不得预设。
+  assert.match(context.instruction, /好的、可以、继续、按这个做.*确认选择.*不是开工授权/);
+  assert.match(context.instruction, /开工确认必须单独一问.*不得预设/);
   assert.match(context.instruction, /Worker 已给出通过/);
   assert.match(context.instruction, /复杂 delegated.*独立审查/);
 });
@@ -569,6 +572,9 @@ test('U5 Lead 入口携带核心纪律，Worker 角色入口不加载', async ()
   assert.equal(context.role, 'lead');
   assert.match(context.instruction, /核心纪律/);
   assert.match(context.instruction, /三步确认/);
+  // U5-2：入口上下文要显式区分“确认选择”与“开工授权”。
+  assert.match(context.instruction, /好的、可以、继续、按这个做.*确认选择.*不是开工授权/);
+  assert.match(context.instruction, /开工确认必须单独一问.*不得预设/);
   assert.match(context.instruction, /Worker 已给出通过/);
   assert.match(context.instruction, /复杂 delegated.*独立审查/);
 
@@ -581,6 +587,18 @@ test('U5 Lead 入口携带核心纪律，Worker 角色入口不加载', async ()
   const workerContext = JSON.parse(workerEntry.hookSpecificOutput.additionalContext.slice('workflow 入口：'.length));
   assert.equal(workerContext.role, 'worker');
   assert.ok(!workerContext.instruction.includes('核心纪律'));
+});
+
+test('U6-2 Reviewer 指引要求命名/排版等非阻断观察逐条记入工程规范，仍不作阻断项', async () => {
+  const guide = await readFile(new URL('../docs/roles/reviewer.md', import.meta.url), 'utf8');
+  // 首审 R1 完全没有列出命名瑕疵：非阻断不等于可以忽略，必须逐条记录。
+  assert.match(guide, /命名、排版、可读性等非阻断观察/);
+  assert.match(guide, /必须逐条记入.*边界\/备注/);
+  assert.match(guide, /不得完全不提/);
+  assert.match(guide, /命名\/排版\/可读性观察也须逐条列出/);
+  // 保留原边界：命名、排版偏好不作阻断项，也不扩大审查范围。
+  assert.match(guide, /命名、排版偏好和范围外重构不作阻断项/);
+  assert.match(guide, /不因个人风格偏好扩大审查范围/);
 });
 
 test('task show 只读返回账本与门禁缺项', async () => {
@@ -1208,6 +1226,7 @@ async function acceptanceFixture(requirements) {
     pending: [],
     source: { path: plan },
   };
+  await consult(f);
   const prepared = await emit(f, { action: 'prepare', preparation });
   assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
   const started = await emit(f, { action: 'task-start', goal: '整项需求交付', route: 'delegated', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
@@ -1220,6 +1239,7 @@ async function acceptanceFixture(requirements) {
     ],
   });
   assert.equal(readyPackages.result.accepted, true, JSON.stringify(readyPackages.result));
+  await consult(f, { taskId: f.taskId });
   return f;
 }
 const acceptanceRequirements = () => [
@@ -1233,6 +1253,7 @@ async function leadDirectAcceptanceFixture() {
   const plan = 'docs/plans/lead-direct-acceptance.md';
   await mkdir(path.join(f.project, 'docs', 'plans'), { recursive: true });
   await writeFile(path.join(f.project, plan), '# lead-direct 验收计划\n\nA01\n');
+  await consult(f);
   const prepared = await emit(f, {
     action: 'prepare',
     preparation: {
@@ -1251,6 +1272,7 @@ async function leadDirectAcceptanceFixture() {
   assert.equal(prepared.result.accepted, true, JSON.stringify(prepared.result));
   const started = await emit(f, { action: 'task-start', goal: 'Lead 自己交付整项需求', route: 'lead-direct', permissions: { mode: 'write', allowedPaths: ['src/x.mjs'] } });
   assert.equal(started.result.accepted, true, JSON.stringify(started.result));
+  await consult(f, { taskId: f.taskId });
   return f;
 }
 
@@ -1370,6 +1392,7 @@ async function reviewWaiverFixture({ waiver, reviewer = false, dispatch = true }
   await writeFile(path.join(f.project, plan), '# 审查豁免\n\nA01\n');
   const declared = [{ packageId: 'w1', role: 'worker', agent: 'Claude Code', channel: 'builtin:agent', scope: 'src/x.mjs', delivers: '完整行为', dependsOn: [], ...(waiver ? { reviewWaiver: waiver } : {}) }];
   if (reviewer) declared.push({ packageId: 'r1', role: 'reviewer', agent: 'Codex', channel: 'codeg:codex', scope: '审查 w1', delivers: '审查结论', dependsOn: ['w1'] });
+  await consult(f);
   const prepared = await emit(f, {
     action: 'prepare',
     preparation: {

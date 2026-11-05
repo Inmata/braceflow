@@ -21,7 +21,7 @@ Claude Code 事件没有 `turn_id`，用宿主 `prompt_id` 关联一次用户输
 | --- | --- |
 | SessionStart | 注入 Lead 入口上下文；`source=compact` 时保留既有任务与预算，并重新注入“先确认再开工、不替跑已过单测、不擅自豁免独立审查”三条核心纪律 |
 | UserPromptSubmit | 开新回合（新票据），注入 Lead 入口上下文 |
-| PreToolUse | 读取父会话的准备/任务状态：未开工时拦业务写入、实施委派和本插件 `task-start`/`packages` 命令；只读、`docs/plans/` 下全部合规 Markdown、系统临时目录内无链接逃逸的路径、`prepare` 放行；活动任务按声明的 read-only/plan 权限再核对；worker 实施与 reviewer 审查委派都须带 `workflow-package:<包ID>` 关联到 dispatched 包，并按 Agent/Task schema 核对 `subagent_type`、通道、任务和可解析角色；仅不带包标记的 `Explore`/`Plan` 免包关联，带标记时也必须按包核对，diagnostic 包也只能派给它们；角色会话按 `roleTaskId`+`packageId` 核对 |
+| PreToolUse | 读取父会话的准备/任务状态：未开工时拦业务写入、实施委派和本插件 `task-start`/`packages` 命令；只读、`docs/plans/` 下全部合规 Markdown、系统临时目录内无链接逃逸的路径、`prepare` 放行；活动任务按声明的 read-only/plan 权限再核对；worker 实施与 reviewer 审查委派都须带 `workflow-package:<包ID>` 关联到 dispatched 包，并按 Agent/Task schema 核对 `subagent_type`、通道、任务和可解析角色；不带包标记的只读子代理免包关联：内置 `Explore`/`Plan`，以及定义文件 `tools` 全为只读工具的自定义子代理（如 `workflow-explorer`）；带标记时也必须按包核对，diagnostic 包也只能派给这些只读子代理；角色会话按 `roleTaskId`+`packageId` 核对 |
 | PostToolUse | 只在命令是直接调用本插件 `signal` 时读取 stdout 中的信号并返回回执 |
 | Stop | 回合结束核对：有在途包时挡一次要求继续等待或说明暂停；无在途包而任务未 task-end 时挡一次列出缺项；不要求经验处置或追加复盘轮次 |
 | StopFailure | 按中断保存：撤销票据、保留任务待办，不自动续跑 |

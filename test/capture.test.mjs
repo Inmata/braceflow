@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { appendFile, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises';
-import { readExtractionJobs, runExtractionJobs } from '../src/capture.mjs';
+import { readExtractionJobs, registerExtraction, runExtractionJobs } from '../src/capture.mjs';
 import { capture, feedback, putItem, readEntries, readItems, renderEntry, selectKnowledge } from '../src/learning.mjs';
 import { setLearningConfig, setLearningEnabled, projectFor } from '../src/learning-config.mjs';
 import { learningStatus, reviewOnce } from '../src/review.mjs';
@@ -624,4 +624,108 @@ test('F18 会话过滤只计精确归属，任务级/未知归属单列，额度
   const both = await learningStatus(f.directory, f.project, new Date(), { taskId: 'task-1', sessionId: 'session-1' });
   assert.equal(both.materials.total, 1);
   assert.equal(both.capture.total, 1);
+});
+
+test('R02 提取作业携带结构化任务事实，字段有界且不含 diff 或工具输出', async () => {
+  const f = await fixture();
+  await setLearningEnabled(f.directory, f.project, true);
+  const project = await projectFor(f.directory, f.project);
+  const transcript = await writeTranscript(f, [transcriptLine(f.sessionId, 'user', '用户描述了返工原因')]);
+  const task = {
+    taskId: 'task-facts-shape', goal: '修复登录', route: 'delegated', finalRef: 'abc1234',
+    validation: {
+      ref: 'v1', evidence: ['npm test'],
+      acceptance: [{ id: 'R01', status: 'verified', evidence: ['测试通过'], owner: 'lead', next: '合并', reason: '通过', consent: '用户确认' }],
+    },
+    packages: { W1: { packageId: 'W1', role: 'worker', status: 'delivered', attempts: 1, verdict: 'PASS', reviewedRef: 'r1', supersedes: 'W0', supersededBy: 'W2' } },
+    changes: [{ summary: '调整范围', reason: '用户纠正', packages: ['W1'], at: '2026-11-03T00:00:00.000Z' }],
+    permissions: { learning: true },
+  };
+  const result = await registerExtraction(f.directory, project, { task, session: { sessionId: f.sessionId, turnId: f.turnId }, transcriptPath: transcript });
+  assert.equal(result.status, 'registered', JSON.stringify(result));
+  const [job] = await jobsOf(f);
+  const facts = job.taskFacts;
+  assert.equal(facts.taskId, 'task-facts-shape');
+  assert.equal(facts.goal, '修复登录');
+  assert.equal(facts.route, 'delegated');
+  assert.equal(facts.finalRef, 'abc1234');
+  assert.deepEqual(Object.keys(facts.validation).sort(), ['acceptance', 'evidence', 'ref']);
+  assert.deepEqual(Object.keys(facts.validation.acceptance[0]).sort(), ['consent', 'evidence', 'id', 'next', 'owner', 'reason', 'status']);
+  assert.deepEqual(Object.keys(facts.packages[0]).sort(), ['attempts', 'id', 'reviewedRef', 'role', 'status', 'supersededBy', 'supersedes', 'verdict']);
+  assert.deepEqual(Object.keys(facts.changes[0]).sort(), ['packages', 'reason', 'summary']);
+  assert.equal('diff' in facts, false);
+  assert.equal('output' in facts, false);
+});
+
+test('R02 taskFacts 超过 4000 字符时裁剪列表，不超过单项上限', async () => {
+  const f = await fixture();
+  await setLearningEnabled(f.directory, f.project, true);
+  const project = await projectFor(f.directory, f.project);
+  const transcript = await writeTranscript(f, [transcriptLine(f.sessionId, 'user', '用户描述了返工原因')]);
+  const many = Array.from({ length: 30 }, (_, index) => index);
+  const task = {
+    taskId: 'task-facts-bound', goal: '目标'.repeat(400), route: 'delegated', finalRef: 'abc1234',
+    validation: {
+      ref: 'v1', evidence: many.map(index => `evidence-${index}-` + '证'.repeat(700)),
+      acceptance: many.map(index => ({ id: 'R' + index, status: 'verified', evidence: ['ok-' + index], owner: 'lead', next: 'next', reason: 'reason', consent: 'consent' })),
+    },
+    packages: Object.fromEntries(many.map(index => ['P' + index, { packageId: 'P' + index, role: 'worker', status: 'delivered', attempts: index, verdict: 'PASS', reviewedRef: 'ref-' + index, supersedes: null, supersededBy: null }])),
+    changes: many.map(index => ({ summary: 'change-' + index, reason: 'reason-' + index, packages: ['P' + index], at: '2026-11-03T00:00:00.000Z' })),
+    permissions: { learning: true },
+  };
+  const result = await registerExtraction(f.directory, project, { task, session: { sessionId: f.sessionId, turnId: f.turnId }, transcriptPath: transcript });
+  assert.equal(result.status, 'registered', JSON.stringify(result));
+  const [job] = await jobsOf(f);
+  const facts = job.taskFacts;
+  assert.ok(JSON.stringify(facts).length <= 4000, JSON.stringify(facts).length);
+  assert.equal(facts.goal.length, 600);
+  assert.ok(facts.validation.evidence.length <= 20);
+  assert.ok(facts.validation.acceptance.length <= 20);
+  assert.ok(facts.packages.length <= 20);
+  assert.ok(facts.changes.length <= 20);
+});
+
+test('R02 提取提示携带 taskFacts；task:/validation: 证据按当前任务与验证严格校验', async () => {
+  const f = await fixture();
+  await start(f);
+  await setLearningEnabled(f.directory, f.project, true);
+  const transcript = await writeTranscript(f, [
+    transcriptLine(f.sessionId, 'user', '不要一直等五分钟，先检查日志再说'),
+    transcriptLine(f.sessionId, 'assistant', '我检查了日志，问题在端口占用'),
+  ]);
+  const ended = await taskEnd(f, transcript, 'signal-evidence', {
+    ...await identity(f), taskId: f.taskId, signalId: 'signal-evidence', action: 'task-end',
+    validation: { ref: 'v1', evidence: ['npm test'] },
+  });
+  assert.equal(ended.result.accepted, true, JSON.stringify(ended.result));
+  const candidate = (extra) => ({
+    summary: '候选结论', conditions: '提取测试', paths: [], explicit: false, verified: false, ...extra,
+  });
+  const candidates = [
+    candidate({ kind: 'success', evidence: ['task:' + f.taskId], verified: true }),
+    candidate({ kind: 'success', evidence: ['transcript:1'], verified: true }),
+    candidate({ kind: 'success', evidence: ['validation:v1'], verified: true }),
+    candidate({ kind: 'success', evidence: ['validation:v2'], verified: true }),
+    candidate({ kind: 'preference', evidence: ['task:' + f.taskId], explicit: true }),
+    candidate({ kind: 'preference', evidence: ['transcript:1'], explicit: true }),
+    candidate({ kind: 'correction', evidence: ['transcript:1'], explicit: false }),
+    candidate({ kind: 'failure', evidence: ['transcript:1'], verified: false }),
+  ];
+  let promptText = '';
+  const result = await extract(f, async (config, prompt) => {
+    promptText = prompt;
+    return { status: 'completed', answer: { candidates } };
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(result.candidates, 3);
+  assert.equal(result.rejected, 5);
+  const data = promptData(promptText);
+  assert.equal(data.taskFacts.taskId, f.taskId);
+  assert.equal(data.taskFacts.validation.ref, 'v1');
+  assert.match(promptText, /修完又返工/);
+  assert.match(promptText, /不该接受就合并/);
+  assert.match(promptText, /验证太薄/);
+  assert.match(promptText, /Done right/);
+  assert.match(promptText, /explicit=true 只用于用户/);
+  assert.equal((await inboxOf(f)).length, 3);
 });

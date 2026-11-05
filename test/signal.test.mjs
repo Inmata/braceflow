@@ -6,7 +6,7 @@ import { digest, mutate, readState } from '../src/store.mjs';
 import { buildSignal } from '../src/signal.mjs';
 import { sessionKey, taskKey } from '../src/protocol.mjs';
 import { resolveProject } from '../src/projects.mjs';
-import { cli, emit, entry, event, fixture, gitFixture, legacyEmit, start as baseStart } from './helpers.mjs';
+import { cli, consult, emit, entry, event, fixture, gitFixture, legacyEmit, start as baseStart } from './helpers.mjs';
 
 // 本文件的 packages/task-update/validation 用例主要验证 CLI→Post 传输与账本。
 // 普通 start 是真实简单任务；只有明确验证旧任务兼容的用例调用 legacyStart，不再删改已建立的准备快照。
@@ -93,6 +93,7 @@ test('空白状态真实 CLI prepare→delegated task-start→packages 全链经
   };
   const file = path.join(f.area, 'preparation.json');
   await writeFile(file, JSON.stringify({ preparation }));
+  await consult(f);
   // 三步都只通过真实 CLI 生成 payload、再由真实 PostToolUse 接受；不调用 legacyEmit，也不直接注入状态。
   const prepared = await accept(f, 'prepare', ['--id', 'prep-cli', '--input', file]);
   assert.equal(prepared.receipt.accepted, true, JSON.stringify(prepared.receipt));
@@ -512,6 +513,29 @@ test('同会话后续回合入口只给短指引；SessionStart 恢复完整入�
   const resumed = parse(await event({ ...f, turnId: 'turn-2' }, 'SessionStart', { source: 'compact' }));
   assert.ok(resumed.signal.examples.length);
   assert.doesNotMatch(resumed.instruction, /入口与本会话上一回合相同/);
+});
+test('R1 首回合入口最前注入分流规则，同会话后续回合不重复；新增 233 字符', async () => {
+  const f = await fixture();
+  const parse = output => JSON.parse(output.hookSpecificOutput.additionalContext.replace(/^[\s\S]*?workflow 入口：/, ''));
+  const session = { sessionId: 'routing-session' };
+  const first = parse(await event({ ...f, ...session, turnId: 'routing-turn-1' }, 'UserPromptSubmit'));
+  const rule = '宿主有 Agent 工具时，跨文件追因且单次 grep 答不了、或需读取几百行以上长日志（含单个文件）才能回答的任务，必须先派 workflow-explorer 取结论、证据位置和未确认项，不要自己逐文件读取；没有 Agent 工具时自行读取；已知位置的小段读取或单次 grep 能答的直接做；探索者不可用或子代理失败时只定向核查、其余自行读取，重试不超过一次；咨询 workflow-advisor 前需大量读取时，有 Agent 工具则先派探索者备证据摘要。';
+  assert.ok(first.instruction.startsWith(`${rule} `), '分流规则应是完整指令的第一句');
+  // 无子代理工具的宿主（如 Codex）不能收到硬派遣指令，规则以 Agent 工具为前提。
+  assert.ok(rule.startsWith('宿主有 Agent 工具时，'));
+  assert.match(rule, /没有 Agent 工具时自行读取/);
+  // 长日志（含单个文件）归入派探索者；直接做只限小段读取或单次 grep。
+  assert.match(rule, /长日志（含单个文件）/);
+  assert.match(rule, /小段读取或单次 grep 能答的直接做/);
+  assert.doesNotMatch(rule, /单文件或单次 grep 能答的直接做/);
+  // 探索者定义被删除时不能只定向核查，须保留其余自行读取的完整调查路径。
+  assert.match(rule, /探索者不可用或子代理失败时只定向核查、其余自行读取/);
+  // 规则正文 232 字，入口以空格分隔后新增 233 字符；改动文案时同步更新这两个数字。
+  assert.equal(rule.length, 232);
+  assert.equal(first.instruction.length - first.instruction.replace(`${rule} `, '').length, 233);
+  const second = parse(await event({ ...f, ...session, turnId: 'routing-turn-2' }, 'UserPromptSubmit'));
+  assert.match(second.instruction, /入口与本会话上一回合相同/);
+  assert.equal(second.instruction.includes(rule), false);
 });
 test('Stop 与显式 save 后未再改状态不重复落盘；中间 save 后继续改状态仍二次落盘；未注册目录零匹配返回 null', async () => {
   const f = await fixture();

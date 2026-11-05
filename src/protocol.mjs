@@ -6,6 +6,7 @@ import { mergePreparationSnapshot, normalizePreparation, preparationConsistencyG
 import { isCodegChannel, codegWaitInstruction } from './adapters/codeg.mjs';
 import { isHcChannel, isHerdrChannel, hcWaitInstruction, herdrWaitInstruction } from './adapters/herdr.mjs';
 import { cindyWaitInstruction, isCindyChannel } from './adapters/cindy.mjs';
+import { consultationMatches, gateApplies, lastChangeAt, pathRuleHits, unremindedHits } from './advisor-gate.mjs';
 
 export const PHASES = ['unknown', 'operation-only', 'executing', 'waiting-user', 'delivering'];
 export const ROUTES = ['operation-only', 'lead-direct', 'delegated'];
@@ -52,6 +53,10 @@ export function openTurn(state, project, sessionId, turnId, { compact = false, e
     ...(session?.captureBoundary ? { captureBoundary: session.captureBoundary } : {}),
     // 准备记录跨回合保留：讨论、调研和写计划的回合不重建业务任务，也不能丢掉已整理的准备资料。
     ...(session?.preparation ? { preparation: session.preparation } : {}),
+    // jev 不可用的提示按会话只给一次，跨回合保留标记。
+    ...(session?.jevNotice ? { jevNotice: session.jevNotice } : {}),
+    // 决策升级提醒的键跨回合保留：同一会话同一键只提醒一次。
+    ...(session?.reminded ? { reminded: session.reminded } : {}),
     // role-claim 声明的子角色跨回合保留；未声明的会话按 Lead 处理。
     ...(session?.role ? { role: session.role, packageId: session.packageId || null, roleTaskId: session.roleTaskId || null } : {}),
   };
@@ -467,6 +472,18 @@ function preparationPackageGaps(task, item, previous) {
     return [{ field: `package:${item.packageId}:${key}`, message: `工作包 ${item.packageId} 的${labels[key]}与准备记录不一致（准备记录：${declared[key]}；本次：${actual[key] || '未填'}）` }];
   });
 }
+// 决策升级只提醒不阻断：命中路径规则或 jev 且没有对应咨询记录时提示一次。
+// 键为 `<taskId 或 prepare>:<分类>`，与会话 jevNotice 一样只写会话字段，不升级状态版本、不改信号结果。
+function reminderText(session, { keys, text, corrupt = [] }) {
+  const fresh = session ? keys.filter(key => !session.reminded?.[key]) : [];
+  if (!fresh.length) return null;
+  session.reminded ||= {};
+  for (const key of fresh) session.reminded[key] ||= new Date().toISOString();
+  const unreadable = corrupt.length
+    ? `咨询记录无法解析（${corrupt.join('、')}），无法确认是否已咨询；`
+    : '';
+  return `${unreadable}${text}。本次只提醒，不拦截；需要第二意见时调用 workflow-advisor，记录会写入会话咨询记录。`;
+}
 // 账本只在派发、消费结果、审查结论三个节点记录；批量 upsert，未给出的字段保持原值。
 export function upsertPackages(task, items, change = null) {
   if (!Array.isArray(items) || !items.length || items.length > 50) fail('PACKAGE', 'packages 需为 1-50 项数组');
@@ -849,7 +866,8 @@ function mergePreparationInput(base, incoming, removeIds, { includeUnmentioned =
 }
 // task-update：同任务显式改 goal 与 permissions。沿用同一身份/修订/回执与失败回滚；
 // 只改本机任务声明，不碰 route/channels/账本，也不改宿主全局配置。调用方须已有用户授权，插件只记录声明。
-function updateTask(payload, task, session, root) {
+function updateTask(payload, task, session, root, { consultations = [], consultationsCorrupt = [], pathRules = { rules: [], error: null }, jev = null } = {}) {
+  const priorChangeAt = lastChangeAt(task);
   const misplaced = ['mode', 'allowedPaths'].filter(field => Object.hasOwn(payload, field));
   if (misplaced.length) fail('PERMISSION', `${misplaced.join('、')} 应放进 permissions；task-update 格式为 {goal?, permissions:{mode?, allowedPaths?}, allowedPathsMode?}`);
   const unsupported = Object.keys(payload).filter(field => !TASK_UPDATE_FIELDS.has(field));
@@ -1042,6 +1060,25 @@ function updateTask(payload, task, session, root) {
       invalidatedAcceptance,
     };
   }
+  // 路径规则与 jev 只提醒：命中且没有对应咨询记录时提示一次，不改变本次更新。
+  // 已保存变化之前的记录不再算“对应”，与旧门禁的时间口径保持一致；提醒键负责后续去重。
+  const reminders = [];
+  if (gateApplies(task, nextMode)) {
+    const pending = unremindedHits(pathRuleHits(addedBusiness, pathRules.rules), session.reminded, task.taskId);
+    const consulted = consultationMatches(consultations, { taskId: task.taskId, since: priorChangeAt });
+    if (pending.keys.length && !consulted) {
+      const reminder = reminderText(session, {
+        keys: pending.keys,
+        text: `项目路径规则命中重要变化：${pending.text}`,
+        corrupt: consultationsCorrupt,
+      });
+      if (reminder) reminders.push(reminder);
+    }
+    if (jev?.hit && !consulted) {
+      const reminder = reminderText(session, { keys: [`${task.taskId}:jev`], text: jev.detail, corrupt: consultationsCorrupt });
+      if (reminder) reminders.push(reminder);
+    }
+  }
   if (goal !== undefined) task.goal = goal;
   if (hasPermissions) task.permissions = { ...task.permissions, ...(mode !== undefined ? { mode } : {}), ...(paths !== undefined ? { allowedPaths: nextPaths } : {}) };
   const change = {};
@@ -1060,6 +1097,7 @@ function updateTask(payload, task, session, root) {
     permissions: { ...task.permissions, allowedPaths: [...task.permissions.allowedPaths] },
     change,
     hostPermissionMode: session.permissionMode,
+    ...(reminders.length ? { reminders } : {}),
     note: '已更新本机任务声明；实际写入仍受宿主当前只读/计划权限约束，插件只记录声明，不自动证明用户授权真实存在',
   };
 }
@@ -1081,7 +1119,7 @@ function bindTaskPreparation(task, record, simpleReason) {
 // options.root 只接受入口用 resolveProject 核对过的当前 worktree；payload 里的路径不参与检查根选择。
 // 本函数就地修改 state，且可能在门禁拒绝前已写入部分字段（例如 task.validation）。协议函数不自行回滚；
 // 调用方必须提供事务边界：生产 Hook 在调用前克隆，捕获错误后整体恢复再返回拒绝回执。
-export function acceptSignal(state, payload, { root, spec } = {}) {
+export function acceptSignal(state, payload, { root, spec, consultations = [], consultationsCorrupt = [], sessionConsultations = [], sessionConsultationsCorrupt = [], pathRules = { rules: [], error: null }, jev = null } = {}) {
   identifier(payload?.signalId, 'signalId');
   const initial = currentIdentity(state, payload, { replay: true, requireTask: false });
   const receipt = initial.session.receipts[payload.signalId];
@@ -1125,9 +1163,19 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
     const unsupported = Object.keys(payload).filter(field => !PREPARE_FIELDS.has(field));
     if (unsupported.length) fail('PREPARATION', `prepare 只接受 preparation 字段；不支持 ${unsupported.join('、')}`);
     if (payload.preparation === undefined) fail('PREPARATION', 'prepare 信号需要 preparation 对象');
-    session.preparation = normalizePreparation(payload.preparation, { root: root || project.root });
+    const prepared = normalizePreparation(payload.preparation, { root: root || project.root });
+    // prepare 还没有任务身份：只认本会话在本次准备之前的记录，且不能拿其他任务的咨询充数。
+    const eligible = sessionConsultations.filter(record => record.taskId === null || record.taskId === session.taskId);
+    const reminders = [];
+    if (jev?.hit) {
+      const reminder = consultationMatches(eligible, { since: session.preparation?.preparedAt || null })
+        ? null
+        : reminderText(session, { keys: ['prepare:jev'], text: jev.detail, corrupt: sessionConsultationsCorrupt });
+      if (reminder) reminders.push(reminder);
+    }
+    session.preparation = prepared;
     const preparation = preparationSummary(session.preparation);
-    extra = { preparation, ready: preparation.ready, missing: preparation.missing };
+    extra = { preparation, ready: preparation.ready, missing: preparation.missing, ...(reminders.length ? { reminders } : {}) };
   } else if (payload.action === 'task-start') {
     if (payload.route !== undefined && !ROUTES.includes(payload.route)) fail('ROUTE', '未知任务分流');
     if (session.taskId && session.taskId !== payload.taskId) {
@@ -1242,8 +1290,15 @@ export function acceptSignal(state, payload, { root, spec } = {}) {
       // 中途变更追加记录，不覆盖历史。
       if (change) (task.changes ||= []).push(change);
       if (repairLimit.length) extra = { repairLimit: true, repairLimitPackages: repairLimit };
+      // jev 命中只提醒一次：本任务已有任一咨询记录即视为对应记录，不再提示。
+      if (jev?.hit && gateApplies(task) && !consultationMatches(consultations, { taskId: task.taskId })) {
+        const reminder = reminderText(session, { keys: [`${task.taskId}:jev`], text: jev.detail, corrupt: consultationsCorrupt });
+        if (reminder) extra = { ...extra, reminders: [reminder] };
+      }
     } else if (payload.action === 'task-update') {
-      extra = updateTask(payload, task, session, root || project.root);
+      extra = updateTask(payload, task, session, root || project.root, { consultations, consultationsCorrupt, pathRules, jev });
+      // 规则配置损坏不阻断既有更新，但必须让 Lead 看见“路径规则这段没生效”。
+      if (pathRules.error) extra = { ...extra, pathRulesError: pathRules.error };
     } else if (payload.action === 'task-end') {
       if (payload.validation !== undefined) task.validation = validationInput(payload.validation);
       if (payload.finalRef !== undefined) identifier(payload.finalRef, 'finalRef');

@@ -98,6 +98,43 @@ test('验证、事件独立性与日期共同决定成熟度，展示次数不�
   assert.equal(maturityFor([one], 'method', 'disputed'), 'unverified');
   assert.equal(maturityFor([one, { ...one, incidentId: 'two', kind: 'method' }, { ...one, incidentId: 'three', kind: 'method', createdAt: '2026-10-22T10:00:00Z' }], 'method', 'active'), 'verified');
 });
+test('R03 召回摘要从 evidence 派生 Seen/incidents/dates/lastSeen，脏证据不阻断', async () => {
+  const f = await fixture();
+  const folder = path.join(f.project, '.workflow', 'knowledge');
+  await mkdir(folder, { recursive: true });
+  const value = {
+    schemaVersion: 1, id: 'K-recurrence', status: 'active', type: 'method', maturity: 'stable', importance: 'normal',
+    title: '登录复发经验', summary: '登录超时再次出现时的处理', conditions: '登录接口',
+    evidence: [
+      { incidentId: 'incident-a', kind: 'success', verified: true, createdAt: '2026-10-01T10:00:00Z' },
+      { incidentId: 'incident-a', kind: 'success', verified: true, createdAt: '2026-10-01T12:00:00Z' },
+      { incidentId: 'incident-b', kind: 'success', verified: true, createdAt: '2026-10-02T10:00:00Z' },
+      'dirty', null, { incidentId: 7, createdAt: '不是日期' },
+    ],
+    createdAt: '2026-10-01T00:00:00.000Z',
+  };
+  await writeFile(path.join(folder, 'K-recurrence.md'), renderEntry(value));
+  const result = await selectKnowledge(f.directory, f.project, { text: '登录超时', paths: [] });
+  assert.equal(result.selected.length, 1);
+  assert.deepEqual({
+    seen: result.selected[0].seen, incidents: result.selected[0].incidents,
+    dates: result.selected[0].dates, lastSeen: result.selected[0].lastSeen,
+  }, { seen: 2, incidents: 2, dates: 2, lastSeen: '2026-10-02' });
+});
+test('R03 复发字段计入召回预算：加字段后超限的条目被排除且不超预算', async () => {
+  const f = await fixture();
+  await putKnowledge(f, 'K-budget', '预算边界经验', '预算边界经验'.repeat(40));
+  const first = await selectKnowledge(f.directory, f.project, { text: '预算边界', paths: [] });
+  assert.equal(first.selected.length, 1);
+  const full = JSON.stringify(first.selected[0]).length;
+  assert.ok(full - 1 >= 200);
+  await setLearningConfig(f.directory, f.project, { retrievalChars: full - 1 });
+  const limited = await selectKnowledge(f.directory, f.project, { text: '预算边界', paths: [] });
+  assert.equal(limited.selected.length, 0);
+  assert.equal(limited.chars, 0);
+  assert.equal(limited.excluded.length, 1);
+  assert.match(limited.excluded[0].reason, /召回预算不足/);
+});
 test('明确反例立即停止召回；只读业务期间不写知识；未相关经验不会因重要性被强塞', async () => {
   const f = await fixture(); await start(f); await observe(f, 1); await finish(f);
   await setLearningEnabled(f.directory, f.project, true);
@@ -1023,6 +1060,10 @@ test('F17 提示词要求细化走 create，revise 仅限明确反例', async ()
   assert.equal(result.status, 'completed');
   assert.match(promptText, /细化、补充应 create 独立知识/);
   assert.match(promptText, /revise 只用于旧结论被明确反例推翻/);
+  assert.match(promptText, /修完又返工/);
+  assert.match(promptText, /不该合/);
+  assert.match(promptText, /验证太薄/);
+  assert.match(promptText, /Done right/);
 });
 
 test('P02 对齐读取失败单独降级，不阻断新回合保存', async () => {

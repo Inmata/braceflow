@@ -229,7 +229,8 @@ export async function readEntries(project) {
   return entries;
 }
 // 召回路径逐条解析：坏条目跳过并留下诊断，其余有效条目继续参与检索。
-async function indexedEntries(directory, project) {
+// readOnly 供只读报告复用同一索引，不落 knowledge-index.json 缓存。
+async function indexedEntries(directory, project, options = {}) {
   const folder = path.join(project.knowledgeRoot, '.workflow', 'knowledge');
   let names;
   try { names = await readdir(folder); }
@@ -279,7 +280,7 @@ async function indexedEntries(directory, project) {
   }
   // 只有全部文件都成功读出内容时才固化索引：读取/权限/占用故障会随签名外的环境变化恢复，
   // 缓存它会让 size/mtimeMs 不变的同一文件永久跳过；目录扫描故障也只在本次实时重算。
-  if (!scanSkipped.length && !readSkipped.length) {
+  if (!scanSkipped.length && !readSkipped.length && options.readOnly !== true) {
     // 索引缓存写入失败不影响本次召回；签名包含坏文件，修复后自然重新解析。
     await writeJSON(cacheFile, { schemaVersion: 3, signature, entries, skipped: parseSkipped }).catch(() => {});
   }
@@ -296,6 +297,58 @@ export function maturityFor(evidence, type, status) {
   const incidents = new Set(supporting.map(e => e.incidentId));
   const dates = new Set(supporting.map(e => e.createdAt.slice(0, 10)));
   return incidents.size >= 3 && dates.size >= 2 ? 'stable' : 'verified';
+}
+// \u590d\u53d1\u9762\u53ea\u4ece\u5df2\u6709 evidence \u6d3e\u751f\uff0c\u4e0d\u6539\u77e5\u8bc6 schema\uff0c\u4e5f\u4e0d\u53c2\u4e0e\u6210\u719f\u5ea6\u8ba1\u7b97\u3002
+function recurrenceFor(entry) {
+  const incidents = new Set(), dates = new Set();
+  let lastSeen = null;
+  for (const item of Array.isArray(entry.evidence) ? entry.evidence : []) {
+    if (!item || typeof item !== 'object') continue;
+    if (typeof item.incidentId === 'string' && item.incidentId) incidents.add(item.incidentId);
+    if (typeof item.createdAt !== 'string') continue;
+    const day = item.createdAt.slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) continue;
+    dates.add(day);
+    if (!lastSeen || day > lastSeen) lastSeen = day;
+  }
+  return { seen: dates.size, incidents: incidents.size, dates: dates.size, lastSeen };
+}
+export const STANDING_LIMIT = 3;
+export const STANDING_CHARS = 1200;
+const IMPORTANCE_RANK = { normal: 0, important: 1, critical: 2 };
+const MATURITY_RANK = { unverified: 0, verified: 1, stable: 2 };
+// \u5e38\u9a7b\u89c4\u5219\u53ea\u5728\u5b66\u4e60\u542f\u7528\u65f6\u8bfb\u53d6\uff1b\u7248\u672c\u8303\u56f4\u6761\u76ee\u4e0d\u5c5e\u4e8e\u5168\u5c40\u89c4\u5219\uff0c\u548c\u8def\u5f84\u8303\u56f4\u4e00\u6837\u6392\u9664\u3002
+export async function selectStandingKnowledge(directory, root, options = {}) {
+  const project = options.project || await projectFor(directory, root);
+  if (project.learning?.enabled !== true) return null;
+  let index;
+  try { index = await indexedEntries(directory, project, { readOnly: options.readOnly === true }); }
+  catch (error) { return { selected: [], total: 0, version: null, chars: 0, skippedTotal: 0, unavailable: { kind: 'io', code: error.code || 'IO' } }; }
+  const eligible = index.entries.filter(entry => entry.status === 'active'
+    && !entry.scope?.paths?.length
+    && !entry.scope?.version
+    && (entry.maturity === 'stable' || entry.importance === 'critical')
+    && !project.learning?.quarantine?.[entry.path]
+    && !project.learning?.disputes?.[entry.id])
+    .sort((a, b) => (IMPORTANCE_RANK[b.importance] ?? 0) - (IMPORTANCE_RANK[a.importance] ?? 0)
+      || (MATURITY_RANK[b.maturity] ?? 0) - (MATURITY_RANK[a.maturity] ?? 0)
+      || a.title.localeCompare(b.title));
+  const selected = [];
+  const excluded = new Set(options.excludeIds || []);
+  let used = 0;
+  for (const entry of eligible) {
+    if (excluded.has(entry.id)) continue;
+    const summary = {
+      id: entry.id, title: entry.title, summary: entry.summary, conditions: entry.conditions,
+      maturity: entry.maturity, importance: entry.importance, path: entry.path, ...recurrenceFor(entry),
+    };
+    const size = JSON.stringify(summary).length;
+    if (selected.length >= STANDING_LIMIT || used + size > STANDING_CHARS) continue;
+    selected.push(summary);
+    used += size;
+  }
+  const version = digest(JSON.stringify([eligible.map(entry => [entry.id, entry.fingerprint]), index.skipped.map(item => [item.path, item.code]), project.learning?.disputes || {}, project.learning?.quarantine || {}]));
+  return { selected, total: eligible.length, version, chars: used, skippedTotal: index.skipped.length };
 }
 const tokens = text => [...new Set((text.toLowerCase().match(/[a-z0-9_-]{2,}|[\u3400-\u9fff]{2,}/g) || []).flatMap(w => /[\u3400-\u9fff]/.test(w) ? Array.from({ length: w.length - 1 }, (_, i) => w.slice(i, i + 2)) : [w]))];
 export async function selectKnowledge(directory, root, query = {}, options = {}) {
@@ -331,7 +384,7 @@ export async function selectKnowledge(directory, root, query = {}, options = {})
   ranked.sort((a, b) => b.score - a.score || a.e.id.localeCompare(b.e.id));
   let used = 0;
   for (const { e, reason, score } of ranked) {
-    const summary = { id: e.id, title: e.title, summary: e.summary, conditions: e.conditions, maturity: e.maturity, importance: e.importance, path: e.path };
+    const summary = { id: e.id, title: e.title, summary: e.summary, conditions: e.conditions, maturity: e.maturity, importance: e.importance, path: e.path, ...recurrenceFor(e) };
     const size = JSON.stringify(summary).length;
     const why = reason || (selected.length >= config.retrievalLimit || used + size > config.retrievalChars ? '召回预算不足' : null);
     if (why) allExcluded.push({ id: e.id, reason: why, critical: e.importance === 'critical' && !reason });

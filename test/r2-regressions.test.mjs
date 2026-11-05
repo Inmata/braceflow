@@ -6,7 +6,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { handleHook } from '../src/hooks.mjs';
 import { sessionKey, taskKey } from '../src/protocol.mjs';
 import { mutate, readState } from '../src/store.mjs';
-import { emit, entry, event, fixture } from './helpers.mjs';
+import { consult, emit, entry, event, fixture } from './helpers.mjs';
 
 const planPath = 'docs/plans/r2-regressions.md';
 async function prepare(f, packages, requirements = null) {
@@ -25,6 +25,7 @@ async function prepare(f, packages, requirements = null) {
     pending: [],
     source: { path: planPath },
   };
+  await consult(f);
   const saved = await emit(f, { action: 'prepare', preparation });
   assert.equal(saved.result.accepted, true, JSON.stringify(saved.result));
   return preparation;

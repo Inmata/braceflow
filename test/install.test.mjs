@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { doctor, HOSTS, install, uninstall, RELEASE_PATHS } from '../src/install.mjs';
-import { mutate, readState } from '../src/store.mjs';
+import { digest, mutate, readState } from '../src/store.mjs';
 import { createPending } from '../src/knowledge.mjs';
 import { emit, fixture, identity, root, start, temporary as makeTemporary } from './helpers.mjs';
 
@@ -418,6 +418,281 @@ test('V14 Claude 安装写入 settings.json 的 hooks 段，保留其他插件�
   assert.equal(restored.hooks.PostToolUse, undefined);
   assert.equal(restored.hooks.PreToolUse, undefined);
   assert.deepEqual(restored.env, existing.env);
+});
+test('V14 Claude 安装把子代理定义写入用户级 agents，升级更新，卸载只移除自有定义', async () => {
+  const area = await temporary('install-agents-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentDir = path.join(userDir, 'agents');
+  assert.equal((await install(directory, { userDir, agent: 'claude' })).status, 'installed');
+  const explorer = await readFile(path.join(agentDir, 'workflow-explorer.md'), 'utf8');
+  const advisor = await readFile(path.join(agentDir, 'workflow-advisor.md'), 'utf8');
+  assert.match(explorer, /^model: \S+/m);
+  assert.match(explorer, /^effort: \S+/m);
+  assert.match(explorer, /^tools: Read, Grep, Glob$/m);
+  assert.match(advisor, /^model: \S+/m);
+  assert.match(advisor, /^effort: \S+/m);
+  // 顾问的读取由探索者承担，但定义仍保留只读工具，不能靠删除 tools 继承全部工具。
+  assert.match(advisor, /^tools: Read, Grep, Glob$/m);
+  await writeFile(path.join(agentDir, 'user-own.md'), '用户自己的定义');
+  const source = path.join(area, 'source');
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(source, item), { recursive: true });
+  await fs.appendFile(path.join(source, 'agents', 'workflow-explorer.md'), '\n升级标记\n');
+  assert.equal((await install(directory, { userDir, agent: 'claude', sourceRoot: source })).status, 'installed');
+  assert.match(await readFile(path.join(agentDir, 'workflow-explorer.md'), 'utf8'), /升级标记/);
+  assert.equal((await uninstall(directory, { userDir, agent: 'claude' })).status, 'uninstalled');
+  await assert.rejects(readFile(path.join(agentDir, 'workflow-explorer.md')), { code: 'ENOENT' });
+  await assert.rejects(readFile(path.join(agentDir, 'workflow-advisor.md')), { code: 'ENOENT' });
+  assert.equal(await readFile(path.join(agentDir, 'user-own.md'), 'utf8'), '用户自己的定义');
+});
+test('V14 Claude 同名第三方与手改定义归用户，升级卸载不报冲突', async () => {
+  const area = await temporary('install-agents-conflict-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentDir = path.join(userDir, 'agents');
+  const settings = path.join(userDir, 'settings.json');
+  const userFile = path.join(agentDir, 'workflow-explorer.md');
+  const advisorFile = path.join(agentDir, 'workflow-advisor.md');
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(userFile, '用户自己的定义');
+  await writeFile(settings, JSON.stringify({ env: { KEEP: 'yes' } }));
+  const installed = await install(directory, { userDir, agent: 'claude' });
+  assert.equal(installed.status, 'installed');
+  assert.equal(await readFile(userFile, 'utf8'), '用户自己的定义');
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')).env, { KEEP: 'yes' });
+  assert.match(await readFile(advisorFile, 'utf8'), /name: workflow-advisor/);
+  const entries = Object.fromEntries(installed.agents.entries.map(item => [item.name, item.status]));
+  assert.equal(entries['workflow-explorer.md'], 'user');
+  assert.equal(entries['workflow-advisor.md'], 'managed');
+  assert.ok(installed.agents.notes.some(note => note.includes('未安装默认定义')));
+  const listed = await doctor(directory, undefined, { agent: 'claude' });
+  const explorerDoctor = listed.agents.find(item => item.name === 'workflow-explorer.md');
+  const advisorDoctor = listed.agents.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(explorerDoctor.status, 'user');
+  assert.equal(explorerDoctor.differsFromRelease, true);
+  assert.equal(advisorDoctor.status, 'managed');
+  assert.equal(advisorDoctor.differsFromRelease, false);
+  // 手改已安装定义后升级：内容保留、归用户，hooks 配置照常更新且不报冲突。
+  await writeFile(advisorFile, '用户改写');
+  const source = path.join(area, 'source');
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(source, item), { recursive: true });
+  await fs.appendFile(path.join(source, 'agents', 'workflow-advisor.md'), '\n发布更新\n');
+  const upgrade = await install(directory, { userDir, agent: 'claude', sourceRoot: source });
+  assert.equal(upgrade.status, 'installed');
+  assert.equal(await readFile(userFile, 'utf8'), '用户自己的定义');
+  assert.equal(await readFile(advisorFile, 'utf8'), '用户改写');
+  const upgradedEntries = Object.fromEntries(upgrade.agents.entries.map(item => [item.name, item.status]));
+  assert.deepEqual(upgradedEntries, { 'workflow-advisor.md': 'user', 'workflow-explorer.md': 'user' });
+  // 卸载保留两个用户文件并在回执列出，不失败。
+  const removed = await uninstall(directory, { userDir, agent: 'claude' });
+  assert.equal(removed.status, 'uninstalled');
+  assert.deepEqual(removed.agents.removed, []);
+  assert.deepEqual(removed.agents.kept.map(item => item.name).sort(), ['workflow-advisor.md', 'workflow-explorer.md']);
+  assert.equal(await readFile(userFile, 'utf8'), '用户自己的定义');
+  assert.equal(await readFile(advisorFile, 'utf8'), '用户改写');
+  assert.equal((await doctor(directory, undefined, { agent: 'claude' })).registration, 'not-installed');
+});
+test('V14 Claude 删除的子代理定义不被补回，手动复制后按用户文件保留', async () => {
+  const area = await temporary('install-agents-repair-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentFile = path.join(userDir, 'agents', 'workflow-advisor.md');
+  await install(directory, { userDir, agent: 'claude' });
+  await fs.unlink(agentFile);
+  assert.equal((await install(directory, { userDir, agent: 'claude' })).status, 'already-installed');
+  await assert.rejects(readFile(agentFile), { code: 'ENOENT' });
+  const deleted = (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(deleted.status, 'deleted');
+  assert.equal((await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'workflow-advisor.md').status, 'deleted');
+  // 再次安装仍不补回。
+  assert.equal((await install(directory, { userDir, agent: 'claude' })).status, 'already-installed');
+  await assert.rejects(readFile(agentFile), { code: 'ENOENT' });
+  // 用户手动从当前发布副本复制后转 user，安装不再改写，卸载保留。
+  await fs.copyFile(path.join(directory, 'current', 'agents', 'workflow-advisor.md'), agentFile);
+  assert.equal((await install(directory, { userDir, agent: 'claude' })).status, 'already-installed');
+  const restored = (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(restored.status, 'user');
+  assert.equal((await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'workflow-advisor.md').status, 'user');
+  const removed = await uninstall(directory, { userDir, agent: 'claude' });
+  assert.equal(removed.status, 'uninstalled');
+  assert.ok(removed.agents.kept.some(item => item.name === 'workflow-advisor.md'));
+  assert.match(await readFile(agentFile, 'utf8'), /name: workflow-advisor/);
+});
+test('V14 Claude 预置的发布同内容定义按 managed 接管，旧记录迁移后随发布更新', async () => {
+  const area = await temporary('install-agents-legacy-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentDir = path.join(userDir, 'agents');
+  const advisorFile = path.join(agentDir, 'workflow-advisor.md');
+  const explorerFile = path.join(agentDir, 'workflow-explorer.md');
+  await mkdir(agentDir, { recursive: true });
+  await fs.copyFile(path.join(root, 'agents', 'workflow-advisor.md'), advisorFile);
+  const installed = await install(directory, { userDir, agent: 'claude' });
+  assert.equal(installed.status, 'installed');
+  const entries = Object.fromEntries(installed.agents.entries.map(item => [item.name, item.status]));
+  assert.deepEqual(entries, { 'workflow-advisor.md': 'managed', 'workflow-explorer.md': 'managed' });
+  assert.ok(!installed.agents.notes.some(note => note.includes('未安装默认定义')));
+  // 旧版记录只有 agentFiles/previousAgentFiles：迁移成 managed，并在升级时继续跟随发布。
+  await mutate(directory, async state => {
+    const record = state.installs.claude;
+    const agentFiles = record.files.filter(file => file.path.startsWith('agents/')).map(file => ({ name: path.posix.basename(file.path), hash: file.hash }));
+    record.agentFiles = agentFiles;
+    record.previousAgentFiles = agentFiles;
+    delete record.agentLedger;
+  });
+  const source = path.join(area, 'source');
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(source, item), { recursive: true });
+  await fs.appendFile(path.join(source, 'agents', 'workflow-advisor.md'), '\n迁移升级标记\n');
+  assert.equal((await install(directory, { userDir, agent: 'claude', sourceRoot: source })).status, 'installed');
+  assert.match(await readFile(advisorFile, 'utf8'), /迁移升级标记/);
+  assert.match(await readFile(explorerFile, 'utf8'), /name: workflow-explorer/);
+  const upgraded = (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(upgraded.status, 'managed');
+  // 升级中断：agentFiles 记的是未写成的新内容，文件仍是 previousAgentFiles 的内容；重试按旧 hash 认作自有并写入新发布。
+  const before = await readFile(advisorFile, 'utf8');
+  const beforeExplorer = await readFile(explorerFile, 'utf8');
+  await mutate(directory, async state => {
+    const record = state.installs.claude;
+    record.agentFiles = [
+      { name: 'workflow-advisor.md', hash: '未写成的新内容' },
+      { name: 'workflow-explorer.md', hash: '未写成的新内容' },
+    ];
+    record.previousAgentFiles = [
+      { name: 'workflow-advisor.md', hash: digest(before) },
+      { name: 'workflow-explorer.md', hash: digest(beforeExplorer) },
+    ];
+    delete record.agentLedger;
+  });
+  const source2 = path.join(area, 'source-2');
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(source2, item), { recursive: true });
+  await fs.appendFile(path.join(source2, 'agents', 'workflow-advisor.md'), '\n中断恢复标记\n');
+  assert.equal((await install(directory, { userDir, agent: 'claude', sourceRoot: source2 })).status, 'installed');
+  assert.match(await readFile(advisorFile, 'utf8'), /中断恢复标记/);
+  const recovered = (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(recovered.status, 'managed');
+});
+test('V14 子代理中断重试：发布内容已写入而账本未更新时仍认作 managed', async t => {
+  const area = await temporary('install-agents-retry-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentFile = path.join(userDir, 'agents', 'workflow-advisor.md');
+  await install(directory, { userDir, agent: 'claude' });
+  const source = path.join(area, 'source');
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(source, item), { recursive: true });
+  await fs.appendFile(path.join(source, 'agents', 'workflow-advisor.md'), '\n中断重试标记\n');
+  let writes = 0;
+  await failedRename(t, (_, to) => to === path.join(directory, 'state.json') && ++writes === 2, async () => {
+    await assert.rejects(install(directory, { userDir, agent: 'claude', sourceRoot: source }), { code: 'STATE_WRITE_FAILED' });
+  });
+  // 文件已是本次发布内容，但状态仍停在 prepared，账本 hash 还是上一次安装值。
+  assert.match(await readFile(agentFile, 'utf8'), /中断重试标记/);
+  const prepared = (await readState(directory)).installs.claude;
+  assert.equal(prepared.status, 'prepared');
+  const previousHash = prepared.agentLedger.find(item => item.name === 'workflow-advisor.md').hash;
+  const releaseHash = digest(await readFile(path.join(source, 'agents', 'workflow-advisor.md')));
+  assert.notEqual(previousHash, releaseHash);
+  // 直接 doctor：内容等于发布即 managed，且只读不写账本。
+  const before = await readState(directory);
+  const listed = await doctor(directory, undefined, { agent: 'claude' });
+  assert.equal(listed.agents.find(item => item.name === 'workflow-advisor.md').status, 'managed');
+  const after = await readState(directory);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md').hash, previousHash);
+  // 重试完成后账本跟到本次发布，不转成 user。
+  const retried = await install(directory, { userDir, agent: 'claude', sourceRoot: source });
+  assert.equal(retried.status, 'installed');
+  const ledger = (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(ledger.status, 'managed');
+  assert.equal(ledger.hash, releaseHash);
+});
+test('V14 doctor 直接判定手改或非普通文件的 managed 定义，不写账本', async () => {
+  const area = await temporary('install-agents-doctor-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentFile = path.join(userDir, 'agents', 'workflow-advisor.md');
+  await install(directory, { userDir, agent: 'claude' });
+  const ledgerEntry = async () => (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  // 手改后不重装，doctor 直接报 user；账本保持 managed 且修订号不变。
+  await writeFile(agentFile, '用户手改');
+  const before = await readState(directory);
+  const modified = (await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(modified.status, 'user');
+  assert.equal(modified.differsFromRelease, true);
+  const after = await readState(directory);
+  assert.equal(after.revision, before.revision);
+  assert.equal((await ledgerEntry()).status, 'managed');
+  // managed 项变成非普通文件时同样报 user。
+  await fs.rename(agentFile, path.join(area, 'advisor-file.md'));
+  await mkdir(agentFile);
+  const other = (await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(other.status, 'user');
+  assert.equal(other.differsFromRelease, false);
+  // 文件内容等于发布而账本 hash 过期（中断重试）时仍报 managed。
+  await fs.rename(agentFile, path.join(area, 'advisor-directory'));
+  await fs.copyFile(path.join(root, 'agents', 'workflow-advisor.md'), agentFile);
+  await mutate(directory, async state => {
+    state.installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md').hash = '过期的账本内容';
+  });
+  const recovered = (await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'workflow-advisor.md');
+  assert.equal(recovered.status, 'managed');
+  assert.equal(recovered.differsFromRelease, false);
+});
+test('V14 doctor 对账本为 user 的定义在文件缺失时判 deleted', async () => {
+  const area = await temporary('install-agents-doctor-user-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const agentFile = path.join(userDir, 'agents', 'workflow-advisor.md');
+  const entry = async () => (await readState(directory)).installs.claude.agentLedger.find(item => item.name === 'workflow-advisor.md');
+  await install(directory, { userDir, agent: 'claude' });
+  // 手改后重装转 user，再删除文件：安装计划与 doctor 同口径记 deleted。
+  await writeFile(agentFile, '用户手改');
+  await install(directory, { userDir, agent: 'claude' });
+  assert.equal((await entry()).status, 'user');
+  await fs.rename(agentFile, path.join(area, 'advisor-file.md'));
+  assert.equal((await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'workflow-advisor.md').status, 'deleted');
+  // 安装同样不补回，账本转 deleted。
+  await install(directory, { userDir, agent: 'claude' });
+  assert.equal((await entry()).status, 'deleted');
+  await assert.rejects(readFile(agentFile), { code: 'ENOENT' });
+});
+test('V14 退役定义按状态对账：managed 被改或 deleted 重新出现都归用户', async () => {
+  const area = await temporary('install-agents-retired-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.claude');
+  const source = path.join(area, 'source');
+  const release = path.join(area, 'release');
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(source, item), { recursive: true });
+  await writeFile(path.join(source, 'agents', 'legacy-agent.md'), '---\nname: legacy-agent\ntools: Read\n---\n');
+  await writeFile(path.join(source, 'agents', 'legacy-gone.md'), '---\nname: legacy-gone\ntools: Read\n---\n');
+  await install(directory, { userDir, agent: 'claude', sourceRoot: source });
+  const target = name => path.join(userDir, 'agents', name);
+  const entry = async name => (await readState(directory)).installs.claude.agentLedger.find(item => item.name === name);
+  for (const name of ['legacy-agent.md', 'legacy-gone.md']) assert.equal((await entry(name)).status, 'managed', name);
+  // 下一版发布不再包含这两个定义：文件仍在时保持 managed。
+  for (const item of RELEASE_PATHS) await fs.cp(path.join(root, item), path.join(release, item), { recursive: true });
+  await install(directory, { userDir, agent: 'claude', sourceRoot: release });
+  assert.equal((await entry('legacy-agent.md')).status, 'managed');
+  assert.equal((await entry('legacy-gone.md')).status, 'managed');
+  // 退役 managed 被改：安装与 doctor 都归用户。
+  await writeFile(target('legacy-agent.md'), '用户手改退役定义');
+  await install(directory, { userDir, agent: 'claude', sourceRoot: release });
+  assert.equal((await entry('legacy-agent.md')).status, 'user');
+  assert.equal((await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'legacy-agent.md').status, 'user');
+  // 退役定义被删记 deleted，重新出现按用户文件保留。
+  await fs.rename(target('legacy-gone.md'), path.join(area, 'legacy-gone.md'));
+  await install(directory, { userDir, agent: 'claude', sourceRoot: release });
+  assert.equal((await entry('legacy-gone.md')).status, 'deleted');
+  await fs.copyFile(path.join(area, 'legacy-gone.md'), target('legacy-gone.md'));
+  await install(directory, { userDir, agent: 'claude', sourceRoot: release });
+  assert.equal((await entry('legacy-gone.md')).status, 'user');
+  assert.equal((await doctor(directory, undefined, { agent: 'claude' })).agents.find(item => item.name === 'legacy-gone.md').status, 'user');
+});
+test('V14 Codex 安装不写用户 agents 目录', async () => {
+  const area = await temporary('install-agents-codex-');
+  const directory = path.join(area, 'state');
+  const userDir = path.join(area, '.codex');
+  assert.equal((await install(directory, { userDir })).status, 'installed');
+  await assert.rejects(fs.lstat(path.join(userDir, 'agents')), { code: 'ENOENT' });
 });
 
 test('V14 current 断链/错链只做最小修复，完好重复安装不改配置', async () => {

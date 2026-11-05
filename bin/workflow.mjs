@@ -8,7 +8,7 @@ import { handleHook, HOSTS as AGENTS } from '../src/hooks.mjs';
 import { acceptanceSummary, gateReport, taskKey, unchangedPlans } from '../src/protocol.mjs';
 import { cliPath, transportArguments } from '../src/entry.mjs';
 
-const allowed = new Set(['state-dir', 'user-dir', 'root', 'project', 'role', 'session', 'input', 'base64', 'agent', 'owner', 'coexistence-mode', 'transaction', 'pending', 'max-files', 'skip-learning', 'enable-learning', 'help']);
+const allowed = new Set(['state-dir', 'user-dir', 'root', 'project', 'role', 'session', 'input', 'base64', 'agent', 'owner', 'coexistence-mode', 'transaction', 'pending', 'max-files', 'skip-learning', 'enable-learning', 'help', 'days']);
 // 重复给出的证据字段收集为数组；其他参数重复仍视为错误。
 const repeatable = new Set(['evidence']);
 function argumentsFor(argv) {
@@ -57,11 +57,14 @@ const help = {
     'knowledge select|explain --query <任务描述> [--path <当前路径>] [--root <项目>]',
     'learning config get|set [--global] [--input <JSON文件>] [--root <项目>]',
     'learning enable|disable|status|migrate|acknowledge [--root <项目>]', 'learning doctor [--global] [--root <项目>]（不调用模型）',
+    'learning digest [--days 1-90] [--root <项目>]（只读窗口摘要，不调用模型）',
     'learning review [--now] [--root <项目>]（真实模型调用）',
     'learning recover --run <运行ID> [--root <项目>]（不调用模型）',
     'learning resolve --run <运行ID> --keep|--discard [--root <项目>]（内容冲突时保留或作废旧提案）',
     'learning schedule preview|install|remove [--root <项目>]',
     'pending list [--project <目录>]', 'pending inspect --pending <id> [--project <目录>]', 'pending create --input <JSON文件>',
+    'trajectory --session <会话ID> [--root <项目>] [--user-dir <宿主配置目录>]（离线生成该会话的工具调用轨迹，合并本机决定记录；不进入模型上下文）',
+    'trajectory hooks [--root <项目>] [--user-dir <宿主配置目录>]（只读列出用户级、项目级与本机设置的 hook 来源、事件、匹配范围与覆盖程度）',
     'hook --agent codex|claude（stdin 为宿主事件）',
   ],
   note: 'signal 只输出，需当前宿主 PostToolUse 接受；未知状态、提问和中断不发补偿。对齐 sources 只刷新列出的已确认来源，不传时保持旧行为。不会自动提交或发布。',
@@ -123,7 +126,7 @@ async function main() {
   const { options, commands } = argumentsFor(transportArguments(process.argv.slice(2)));
   const [command, action, subaction] = commands;
   if (options.help || !command) return help;
-  const positional = (command === 'project' && action === 'align') || (command === 'learning' && ['config', 'schedule'].includes(action)) ? 3 : ['project', 'knowledge', 'pending', 'learning', 'task', 'spec', 'signal'].includes(command) ? 2 : 1;
+  const positional = (command === 'project' && action === 'align') || (command === 'learning' && ['config', 'schedule'].includes(action)) ? 3 : ['project', 'knowledge', 'pending', 'learning', 'task', 'spec', 'signal', 'trajectory'].includes(command) ? 2 : 1;
   if (commands.length > positional) fail('ARGUMENT', '命令后存在多余的位置参数');
   const agent = options.agent || 'codex';
   if (!AGENTS.includes(agent)) fail('AGENT', `未知宿主 ${agent}；支持 ${AGENTS.join('/')}`);
@@ -138,6 +141,15 @@ async function main() {
   if (command === 'uninstall') return (await import('../src/install.mjs')).uninstall(directory, { agent, userDir: options['user-dir'] });
   if (command === 'doctor') return (await import('../src/install.mjs')).doctor(directory, options.project, { agent, userDir: options['user-dir'] });
   if (command === 'context') return getContext(directory, root, options.role || 'lead', options.session);
+  // 只读离线生成：读取宿主 transcript、子代理目录与本机决定记录，不写业务状态、不进入模型上下文。
+  if (command === 'trajectory') {
+    const { buildTrajectory, hookInventory } = await import('../src/trajectory.mjs');
+    if (action === 'hooks') return hookInventory({ root, configDir: options['user-dir'] });
+    if (action) fail('COMMAND', '未知 trajectory 子命令；支持 hooks 或 --session');
+    if (!options.session) fail('ARGUMENT', 'trajectory 需要 --session <会话ID>');
+    if (!/^[A-Za-z0-9._-]{1,128}$/.test(options.session)) fail('ARGUMENT', '--session 不是有效的会话 ID');
+    return buildTrajectory({ stateDir: directory, configDir: options['user-dir'], sessionId: options.session, root });
+  }
   if (command === 'task' && action === 'show') {
     if (!options.task) fail('ARGUMENT', 'task show 需要 --task');
     return showTask(await readState(directory), root, options.task);
@@ -202,6 +214,7 @@ async function main() {
     if (action === 'disable') return setLearningEnabled(directory, root, false);
     const { acknowledgeNotices, learningStatus, recoverReview, resolveReview, reviewOnce } = await import('../src/review.mjs');
     if (action === 'status') return learningStatus(directory, root, new Date(), { sessionId: options.session, taskId: options.task });
+    if (action === 'digest') return (await import('../src/digest.mjs')).learningDigest(directory, root, { days: options.days === undefined ? undefined : Number(options.days), now: new Date() });
     if (action === 'migrate') return migrateCandidates(directory, root);
     if (action === 'acknowledge') return acknowledgeNotices(directory, root);
     if (action === 'review') return reviewOnce(directory, root, { nowRequested: options.now });

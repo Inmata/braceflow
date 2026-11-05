@@ -1,6 +1,6 @@
 {
   "name": "personal-workflow",
-  "version": "0.9.0-dev.0",
+  "version": "0.10.0",
   "description": "跨智能体项目协作、持久经验采集与受限后台知识维护",
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,8 @@
     "test": "node --test test/*.test.mjs",
     "check": "node scripts/check-package.mjs",
     "demo": "node examples/demo.mjs",
+    "eval": "node scripts/eval/run.mjs",
     "verify": "node scripts/verify.mjs"
   },
-  "files": ["bin", "src", "hooks", ".codex-plugin", "docs/workflow.md", "docs/alignment.md", "docs/roles", "docs/references", "docs/adapters", "docs/usage.md", "docs/design/protocol.md", "docs/learning.md", "docs/background-review.md", "docs/acceptance.md", "examples", "package.json", "plugin.json", "README.md", "README.en.md"]
+  "files": ["bin", "src", "hooks", "agents", ".codex-plugin", "docs/workflow.md", "docs/alignment.md", "docs/roles", "docs/references", "docs/adapters", "docs/usage.md", "docs/design/protocol.md", "docs/learning.md", "docs/background-review.md", "docs/acceptance.md", "examples", "package.json", "plugin.json", "workflow-gate.example.json", "README.md", "README.en.md"]
 }

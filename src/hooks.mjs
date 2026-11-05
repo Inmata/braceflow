@@ -13,6 +13,11 @@ import { agentBaseWords, preparationMissing, resolvePlanPath, sameBaseAgent } fr
 import { CODEG_DELEGATION_STATUS_TOOLS, CODEG_DELEGATION_TERMINAL, CODEG_DELEGATION_TOOLS, CODEG_QUESTION_TOOLS, delegationTasks } from './adapters/codeg.mjs';
 import { HOST_MESSAGE_PREFIXES, commandDelegation as resolveCommandDelegation, mentionsHerdrDelegation, recognizeHostMessage } from './adapters/herdr.mjs';
 import { CINDY_HOST_MESSAGE_PREFIXES, CINDY_ORCA_DELEGATION_TOOLS, CINDY_QUESTION_TOOLS, cindyToolDelegation } from './adapters/cindy.mjs';
+import { isAdvisorSubagent, recordConsultation } from './consult.mjs';
+import { isReadOnlySubagent } from './subagents.mjs';
+import { consultationMatches, gateApplies, pathRuleHits, readGateConfig, readSessionConsultations, readTaskConsultations, unremindedHits } from './advisor-gate.mjs';
+import { checkJev, jevFailureNotice } from './jev.mjs';
+import { recordDecision } from './trajectory.mjs';
 
 export const EVENTS = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop', 'Interrupt', 'SessionEnd', 'PreCompact', 'PostCompact'];
 // Claude Code 没有 Interrupt 事件；StopFailure 承担中断保存语义，其余同名事件语义与 Codex 对齐。
@@ -174,17 +179,20 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'appl
 const TEMP_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 const DELEGATION_TOOLS = new Set(['Agent', 'Task', 'collaborationspawn_agent', 'spawn_agent', ...CODEG_DELEGATION_TOOLS, ...CINDY_ORCA_DELEGATION_TOOLS]);
 const COMMAND_TOOLS = new Set(['Bash', 'exec_command', 'PowerShell', 'powershell', 'pwsh']);
-const READ_ONLY_SUBAGENTS = new Set(['Explore', 'Plan']);
-function preToolUseDeny(message) {
-  return {
+// 规则编号只进本机决定记录，随返回值一起传递，但不出现在宿主输出里；判定结果保持原样。
+const preToolUseAllow = (rule, reason = null) => ({ output: {}, decision: { rule, decision: 'allow', reason } });
+const preToolUseAllowWith = (rule, output, reason = null) => ({ output, decision: { rule, decision: 'allow', reason: reason ?? output.systemMessage ?? null } });
+const preToolUseDeny = (rule, message) => ({
+  output: {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
       permissionDecision: 'deny',
       permissionDecisionReason: message,
     },
     systemMessage: message,
-  };
-}
+  },
+  decision: { rule, decision: 'deny', reason: message },
+});
 // apply_patch 的路径写在补丁文本里；只取明确的文件指令，不解析自然语言补丁内容。
 function patchPaths(text) {
   if (typeof text !== 'string') return [];
@@ -365,7 +373,8 @@ function packageDelegationDenial(task, pkg) {
 }
 // 委派必须有可核验的工作包关联：已登记、dispatched、worker/reviewer、依赖已终态、入口通道与 Agent 一致。
 // 审查派工同样是合法委派；只有 role-claimed reviewer 会话自身不能写或再委派。
-function delegationDenial(task, pkg, name, input) {
+const subagentSearch = resolved => ({ cwd: resolved.cwd, worktree: resolved.worktree });
+async function delegationDenial(task, pkg, name, input, search) {
   const shared = packageDelegationDenial(task, pkg);
   if (shared) return shared;
   if (!pkg.channel) return `工作包 ${pkg.packageId} 未记录实际调用通道；先按准备记录补齐 channel 再派发`;
@@ -378,10 +387,10 @@ function delegationDenial(task, pkg, name, input) {
   if (schemaDenial) return schemaDenial;
   const requested = requestedDelegationAgent(name, input);
   // 只读诊断包只能用宿主能明确识别的只读子代理；不能拿 general-purpose/Codeg 委派借免审声明取得写入能力。
-  // 诊断包按“实际子代理只读”派发，准备记录里的 Agent 是声明选择，不再要求它与 Explore/Plan 字面相等。
+  // 只读按定义文件的 tools 判断，准备记录里的 Agent 是声明选择，不再要求它与 Explore/Plan 字面相等。
   if (pkg.diagnostic) {
-    const readOnlyNative = (name === 'Agent' || name === 'Task') && READ_ONLY_SUBAGENTS.has(requested);
-    if (!readOnlyNative) return `工作包 ${pkg.packageId} 是只读诊断包：只能用明确只读的 Explore/Plan 子代理派发，不能使用 ${name}（${requested || '未指定'}）；诊断包不提供写入授权`;
+    const readOnlyNative = (name === 'Agent' || name === 'Task') && await isReadOnlySubagent(requested, search);
+    if (!readOnlyNative) return `工作包 ${pkg.packageId} 是只读诊断包：只能用 Explore/Plan 或定义文件 tools 全为只读工具的自定义子代理派发，不能使用 ${name}（${requested || '未指定'}）；诊断包不提供写入授权`;
     return null;
   }
   const channelTail = String(pkg.channel).split(':').slice(1).join(':');
@@ -477,17 +486,17 @@ function preparationGapText(gaps) {
 }
 // 任务声明的只读/计划权限是实际写入的上限；宿主模式仍是更高优先级的约束，这里只补任务声明这一层。
 // 计划模式只继续允许准备资料维护和系统临时目录写入，不把计划任务变成业务写入授权。
-function taskModeDenial(task, name, event, resolved, stateDir, tempDir, externalDelegate = false) {
+async function taskModeDenial(task, name, event, resolved, stateDir, tempDir, externalDelegate = false) {
   const mode = task?.permissions?.mode;
   if (mode !== 'read-only' && mode !== 'plan') return null;
   if (externalDelegate) {
     return `任务权限为 ${mode}：不能通过 herdr/hc 命令或 Cindy 委派入口派实施包或启动实施子代理；先由 Lead 用 task-update 取得用户授权并改为可写。`;
   }
   if (DELEGATION_TOOLS.has(name)) {
-    // 只读委派按宿主声明的子代理类型判断；不是按名字猜诊断身份。Codex/Codeg 没有可信只读类型时仍拒绝。
+    // 只读委派按定义文件的工具能力判断，不按名字猜诊断身份。Codex/Codeg 没有可信只读类型时仍拒绝。
     const type = requestedDelegationAgent(name, hostTool(event).input);
-    if ((name === 'Agent' || name === 'Task') && READ_ONLY_SUBAGENTS.has(type)) return null;
-    return `任务权限为 ${mode}：不能派实施包或启动实施子代理；只读 Explore/Plan 子代理除外，先由 Lead 用 task-update 取得用户授权并改为可写。`;
+    if ((name === 'Agent' || name === 'Task') && await isReadOnlySubagent(type, subagentSearch(resolved))) return null;
+    return `任务权限为 ${mode}：不能派实施包或启动实施子代理；Explore/Plan 或定义文件 tools 全为只读工具的自定义子代理除外，先由 Lead 用 task-update 取得用户授权并改为可写。`;
   }
   if (!WRITE_TOOLS.has(name)) return null;
   if (mode === 'read-only') return '任务权限为 read-only：不能修改文件；只做读取、检索和结论交付，确需写入先由 Lead 用 task-update 取得用户授权。';
@@ -495,6 +504,64 @@ function taskModeDenial(task, name, event, resolved, stateDir, tempDir, external
   if (!targets.length) return '任务权限为 plan：无法识别这次写入目标；计划模式只允许维护准备资料。';
   const blocked = targets.filter(target => !planModeTargetAllowed(resolved, stateDir, tempDir, target, TEMP_WRITE_TOOLS.has(name)));
   return blocked.length ? `任务权限为 plan：不能修改业务文件（${blocked.join('、')}）；计划模式只允许维护准备资料和系统临时目录。` : null;
+}
+// 路径规则只核对实际写入，不校验 task-start 的初始 allowedPaths。
+// 配置缺失或为空即不生效；命中且没有对应咨询记录时只提醒，不拦截，每个键只提醒一次。
+async function pathRuleGate(directory, state, project, task, session, event, name, resolved) {
+  if (!task || !gateApplies(task) || !WRITE_TOOLS.has(name)) return null;
+  const targets = toolTargets(event);
+  if (!targets.length) return null;
+  const config = await readGateConfig(project.knowledgeRoot);
+  if (config.error) return { note: config.error };
+  if (!config.rules.length) return null;
+  const relative = targets
+    .map(target => path.relative(resolved.worktree, path.resolve(resolved.cwd || resolved.worktree, target)).replaceAll('\\', '/'))
+    .filter(item => item && item !== '..' && !item.startsWith('../') && !path.isAbsolute(item));
+  const pending = unremindedHits(pathRuleHits(relative, config.rules), session?.reminded, task.taskId);
+  if (!pending.keys.length) return null;
+  const { records, corrupt } = await readTaskConsultations(directory, state, task);
+  if (consultationMatches(records, { taskId: task.taskId })) return null;
+  const unreadable = corrupt.length ? `咨询记录无法解析（${corrupt.join('、')}），无法确认是否已咨询；` : '';
+  return {
+    keys: pending.keys,
+    note: `${unreadable}项目路径规则命中重要变化：${pending.text}。本次只提醒，不拦截；需要第二意见时调用 workflow-advisor，记录会写入会话咨询记录。`,
+  };
+}
+// 提醒键像 jevNotice 一样只写会话字段：同一会话同一键只提醒一次，不改变信号结果。
+async function rememberReminderKeys(directory, projectId, sessionId, keys) {
+  if (!keys?.length) return;
+  try {
+    await mutate(directory, async state => {
+      const session = state.sessions[sessionKey(projectId, sessionId)];
+      if (!session) return;
+      session.reminded ||= {};
+      for (const key of keys) session.reminded[key] ||= new Date().toISOString();
+    });
+  } catch { /* 提醒键写入失败不阻断本次写入 */ }
+}
+// jev 只判断 Lead 写出来的说明：复杂准备、复杂写入任务的 task-update 与 packages 参与。
+// 宿主只读/计划模式是实际权限上限；prepare 还要看会话当前活动任务声明的只读/计划权限与 operation-only 分流。
+// task-update 必须按更新后的模式判断：read-only/plan 改为 write 时仍要送判，write 改为只读/计划时不送判。
+// 这些场景不发网络请求。配置损坏、网关不可达、超时或响应不符都按未命中处理，只在首次给一次提示。
+const isBlockedMode = mode => mode === 'read-only' || mode === 'plan';
+function jevApplies(payload, task, session) {
+  if (isBlockedMode(session?.permissionMode)) return false;
+  // 已完成任务的旧权限/分流不约束新的准备记录，只按活动任务核对。
+  const activeTask = task?.lifecycle === 'active' ? task : null;
+  if (payload.action === 'prepare') {
+    if (isBlockedMode(activeTask?.permissions?.mode)) return false;
+    if (activeTask?.route === 'operation-only') return false;
+    return payload.preparation?.size === 'complex';
+  }
+  if (payload.action === 'task-update') return Boolean(activeTask) && gateApplies(activeTask, payload.permissions?.mode ?? activeTask.permissions.mode);
+  if (payload.action === 'packages') return Boolean(activeTask) && gateApplies(activeTask);
+  return false;
+}
+async function jevSignalGate(config, payload, task, session) {
+  if (!config || !jevApplies(payload, task, session)) return null;
+  if (config.jevError) return jevFailureNotice(config.jevError);
+  if (!config.jev?.enabled) return null;
+  return checkJev(config.jev, payload.action, payload);
 }
 // PreToolUse 只做三类可判定的事：未开工时的业务写入、实施委派、本插件 task-start/packages 命令。
 // 读、检索、写计划、prepare 以及普通 shell 命令不读取状态直接放行；普通 shell 里的任意文件写入无法可靠区分。
@@ -505,11 +572,16 @@ async function preToolUse(directory, event, options, agent) {
   const cindyCall = cindyToolDelegation(name, input);
   const cindyDelegate = cindyCall !== null;
   const relevant = WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || COMMAND_TOOLS.has(name) || cindyDelegate;
-  if (!relevant) return {};
-  // 宿主明确标记为 Explore/Plan 的只读子代理共享父会话身份，也不能写文件或继续委派；
-  // 其他子代理的实际包所有权由发起时的 workflow-package 关联核对，这里不按 agent_id 猜包。
-  if (isSubagentEvent(event) && READ_ONLY_SUBAGENTS.has(event.agent_type) && (WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || cindyDelegate)) {
-    return preToolUseDeny(`只读子代理 ${event.agent_type} 不能修改文件或继续委派；只做读取、检索和结论交付。`);
+  if (!relevant) return preToolUseAllow('A01', '与 workflow 判定无关的工具');
+  // 宿主标记为只读的子代理共享父会话身份，也不能写文件或继续委派；其他子代理的实际包所有权
+  // 由发起时的 workflow-package 关联核对，这里不按 agent_id 猜包。子代理事件先解析项目，
+  // 未接入目录只按事件 cwd 这一层查定义。
+  const subagentWrite = isSubagentEvent(event) && (WRITE_TOOLS.has(name) || DELEGATION_TOOLS.has(name) || cindyDelegate);
+  if (subagentWrite) {
+    const state = await readState(directory);
+    const resolved = await resolveProject(state, event.cwd);
+    const search = resolved ? subagentSearch(resolved) : { cwd: event.cwd };
+    if (await isReadOnlySubagent(event.agent_type, search)) return preToolUseDeny('A02', `只读子代理 ${event.agent_type} 不能修改文件或继续委派；只做读取、检索和结论交付。`);
   }
   // 命令工具先用命令文本筛掉明显不是本插件入口或 Herdr/hc 委派的调用，再确认确实是直接 signal。
   // 复合命令不解析：只根据原文里是否出现委派子命令给出“改单条调用”的拒绝。
@@ -517,7 +589,7 @@ async function preToolUse(directory, event, options, agent) {
   let commandComposed = false;
   if (COMMAND_TOOLS.has(name)) {
     const raw = signalCommand(event);
-    if (typeof raw !== 'string') return {};
+    if (typeof raw !== 'string') return preToolUseAllow('A03', '命令输入不是字符串');
     const tokens = shellTokens(raw);
     // 复合命令即使同时含本插件 signal 也不解析；只要原文出现委派子命令就交给后面的会话核对。
     if (!tokens && mentionsHerdrDelegation(raw)) commandComposed = true;
@@ -526,21 +598,21 @@ async function preToolUse(directory, event, options, agent) {
       // 本插件 signal：继续走下面的状态核对。
     } else {
       if (tokens) commandDelegation = resolveCommandDelegation(tokens, { markers: text => delegationPackageMarkers({ message: text }) });
-      if (!commandDelegation && !commandComposed) return {};
+      if (!commandDelegation && !commandComposed) return preToolUseAllow('A04', '不是本插件入口或委派命令');
     }
   }
   const commandDelegate = Boolean(commandDelegation);
   const state = await readState(directory);
   const resolved = await resolveProject(state, event.cwd);
-  if (!resolved) return {};
+  if (!resolved) return preToolUseAllow('A05', '目录未接入 workflow');
   const projectId = resolved.project.projectId;
   const session = state.sessions[sessionKey(projectId, event.session_id)];
-  if (!session) return {};
-  if (commandComposed) return preToolUseDeny(COMMAND_COMPOSITION_DENIAL);
+  if (!session) return preToolUseAllow('A06', '会话未登记');
+  if (commandComposed) return preToolUseDeny('A07', COMMAND_COMPOSITION_DENIAL);
   // 子代理的 PreToolUse 已在上层按 agent_id 放行；委派子会话若声明了角色，按包所有权核对。
   if (session.role) {
-    if (!WRITE_TOOLS.has(name) && !DELEGATION_TOOLS.has(name) && !commandDelegate && !cindyDelegate) return {};
-    if (session.role === 'reviewer') return preToolUseDeny('Reviewer 只读审查：不能修改源码、测试或配置；把审查结论交回 Lead。');
+    if (!WRITE_TOOLS.has(name) && !DELEGATION_TOOLS.has(name) && !commandDelegate && !cindyDelegate) return preToolUseAllow('A08', '角色会话的非写入/委派调用');
+    if (session.role === 'reviewer') return preToolUseDeny('A09', 'Reviewer 只读审查：不能修改源码、测试或配置；把审查结论交回 Lead。');
     const owned = packageForSession(state, projectId, session);
     const hints = {
       'no-package': 'role-claim 未给出 packageId；用 signal role-claim --role worker --package <包ID> --task <活动任务ID> 重新声明',
@@ -549,17 +621,22 @@ async function preToolUse(directory, event, options, agent) {
       'task-inactive': `role-claim 绑定的任务 ${session.roleTaskId} 不是活动任务；先由 Lead 确认当前任务再重新声明`,
       'package-missing': `任务 ${session.roleTaskId} 没有工作包 ${session.packageId}；先由 Lead 用 packages 登记 dispatched 包，再开始实施`,
     };
-    if (!owned.pkg) return preToolUseDeny(`已声明为 ${session.role}，但无法关联工作包：${hints[owned.reason] || hints.unbound}。`);
-    if (owned.pkg.role !== session.role) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 的角色是 ${owned.pkg.role || '未填'}，与会话声明 ${session.role} 不一致；先由 Lead 核对 role-claim。`);
-    if (owned.pkg.status !== 'dispatched') return preToolUseDeny(`工作包 ${owned.pkg.packageId} 当前状态为 ${owned.pkg.status}，不是 dispatched；工作结束后不能继续直接写入，返修由 Lead 重新派发。`);
+    if (!owned.pkg) return preToolUseDeny('R01', `已声明为 ${session.role}，但无法关联工作包：${hints[owned.reason] || hints.unbound}。`);
+    if (owned.pkg.role !== session.role) return preToolUseDeny('R02', `工作包 ${owned.pkg.packageId} 的角色是 ${owned.pkg.role || '未填'}，与会话声明 ${session.role} 不一致；先由 Lead 核对 role-claim。`);
+    if (owned.pkg.status !== 'dispatched') return preToolUseDeny('R03', `工作包 ${owned.pkg.packageId} 当前状态为 ${owned.pkg.status}，不是 dispatched；工作结束后不能继续直接写入，返修由 Lead 重新派发。`);
     // 只读诊断包即使以 worker 角色声明也只读：不能借免审声明写业务，也不再向下委派。
     if (owned.pkg.diagnostic) {
-      if (WRITE_TOOLS.has(name)) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能修改文件；把结论写在交付 note 交回 Lead。`);
-      if (DELEGATION_TOOLS.has(name) || commandDelegate || cindyDelegate) return preToolUseDeny(`工作包 ${owned.pkg.packageId} 是只读诊断包：不能继续委派子代理；只做范围内的读取和结论交付。`);
+      if (WRITE_TOOLS.has(name)) return preToolUseDeny('R04', `工作包 ${owned.pkg.packageId} 是只读诊断包：不能修改文件；把结论写在交付 note 交回 Lead。`);
+      if (DELEGATION_TOOLS.has(name) || commandDelegate || cindyDelegate) return preToolUseDeny('R05', `工作包 ${owned.pkg.packageId} 是只读诊断包：不能继续委派子代理；只做范围内的读取和结论交付。`);
     }
-    const modeDenied = taskModeDenial(owned.task, name, event, resolved, directory, options.tempDir, commandDelegate || cindyDelegate);
-    if (modeDenied) return preToolUseDeny(modeDenied);
-    return {};
+    const modeDenied = await taskModeDenial(owned.task, name, event, resolved, directory, options.tempDir, commandDelegate || cindyDelegate);
+    if (modeDenied) return preToolUseDeny('R06', modeDenied);
+    const pathGate = await pathRuleGate(directory, state, resolved.project, owned.task, session, event, name, resolved);
+    if (pathGate?.note) {
+      await rememberReminderKeys(directory, projectId, event.session_id, pathGate.keys);
+      return preToolUseAllowWith('R08', { systemMessage: pathGate.note });
+    }
+    return preToolUseAllow('R09', '角色会话的包所有权与权限核对通过');
   }
   const task = session.taskId ? state.tasks[taskKey(projectId, session.taskId)] : null;
   const active = task?.lifecycle === 'active';
@@ -570,127 +647,174 @@ async function preToolUse(directory, event, options, agent) {
   // 纯启动（agent start、不带任务的 hc run）只做未开工拦截；hc send 无包标记时可能是子会话回报，开工后不按派工核对。
   if (commandDelegation) {
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir, true);
-      if (modeDenied) return preToolUseDeny(modeDenied);
-      if (commandDelegation.pureStart) return {};
+      const modeDenied = await taskModeDenial(task, name, event, resolved, directory, options.tempDir, true);
+      if (modeDenied) return preToolUseDeny('C01', modeDenied);
+      if (commandDelegation.pureStart) return preToolUseAllow('C02', '命令委派为纯启动，只做未开工拦截');
       const markers = commandDelegation.packageMarkers;
-      if (markers.length > 1) return preToolUseDeny(`委派命令同时给出多个工作包标记（${markers.join('、')}）；一次委派只能关联一个包。`);
-      if (!markers.length && commandDelegation.entry === 'hc-send') return {};
+      if (markers.length > 1) return preToolUseDeny('C03', `委派命令同时给出多个工作包标记（${markers.join('、')}）；一次委派只能关联一个包。`);
+      if (!markers.length && commandDelegation.entry === 'hc-send') return preToolUseAllow('C04', 'hc send 无包标记，可能是子会话回报');
       const pkg = markers[0] ? task.packages?.[markers[0]] : null;
       const denial = commandDelegationDenial(task, pkg, commandDelegation);
-      return denial ? preToolUseDeny(denial) : {};
+      return denial ? preToolUseDeny('C05', denial) : preToolUseAllow('C06', '命令委派按工作包核对通过');
     }
-    return preToolUseDeny(taskMessage(`实施委派被拦下（${commandDelegation.entry}）`));
+    return preToolUseDeny('C07', taskMessage(`实施委派被拦下（${commandDelegation.entry}）`));
   }
   // Cindy：Orca 是唯一受控派工入口；Session task 没有可靠 Agent 映射，开工后带包标记一律拒绝。
   // create_workers 逐项核对，任一项不合规即整体拒绝并指出是哪一项。
   if (cindyCall) {
-    if (cindyCall.error) return preToolUseDeny(`${cindyCall.error}；已拒绝本次派工`);
+    if (cindyCall.error) return preToolUseDeny('D01', `${cindyCall.error}；已拒绝本次派工`);
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir, true);
-      if (modeDenied) return preToolUseDeny(modeDenied);
+      const modeDenied = await taskModeDenial(task, name, event, resolved, directory, options.tempDir, true);
+      if (modeDenied) return preToolUseDeny('D02', modeDenied);
       for (const item of cindyCall.items) {
         const label = item.index === undefined ? item.entry : `${item.entry}[${item.index}]${item.label ? `（${item.label}）` : ''}`;
-        if (item.invalid) return preToolUseDeny(`${label} ${item.invalid}；已整体拒绝本次 create_workers`);
+        if (item.invalid) return preToolUseDeny('D03', `${label} ${item.invalid}；已整体拒绝本次 create_workers`);
         if (cindyCall.kind === 'session') {
           if (item.packageMarkers.length) {
-            return preToolUseDeny(`Session task 没有可靠的 Agent 映射，不能用 workflow-package 做受控派工；受控派工请改用 Orca create_worker（通道 cindy:orca:<agent>）`);
+            return preToolUseDeny('D04', `Session task 没有可靠的 Agent 映射，不能用 workflow-package 做受控派工；受控派工请改用 Orca create_worker（通道 cindy:orca:<agent>）`);
           }
-          return preToolUseDeny(`${packageDelegationDenial(task, null)}；Session task 即使补包标记也不能作为受控派工，受控派工请改用 Orca create_worker`);
+          return preToolUseDeny('D05', `${packageDelegationDenial(task, null)}；Session task 即使补包标记也不能作为受控派工，受控派工请改用 Orca create_worker`);
         }
-        if (item.packageMarkers.length > 1) return preToolUseDeny(`${label} 同时给出多个工作包标记（${item.packageMarkers.join('、')}）；一次委派只能关联一个包`);
+        if (item.packageMarkers.length > 1) return preToolUseDeny('D06', `${label} 同时给出多个工作包标记（${item.packageMarkers.join('、')}）；一次委派只能关联一个包`);
         // create_worker/create_workers 创建的就是执行 Agent，没有 initial_task 也不能免包关联；
         // send_to_worker 没有 Agent 字段，只按 cindy:orca:<agent> 通道尾部核对准备记录。
         if (item.entry !== 'cindy-orca-send_to_worker' && !item.agent) {
-          return preToolUseDeny(`${label} 未给出可解析的 agent，无法核对工作包的 Agent；显式指定 agent 后再派发`);
+          return preToolUseDeny('D07', `${label} 未给出可解析的 agent，无法核对工作包的 Agent；显式指定 agent 后再派发`);
         }
         const pkg = item.packageMarkers[0] ? task.packages?.[item.packageMarkers[0]] : null;
         const denial = commandDelegationDenial(task, pkg, item);
-        if (denial) return preToolUseDeny(`${label}：${denial}`);
+        if (denial) return preToolUseDeny('D08', `${label}：${denial}`);
       }
-      return {};
+      return preToolUseAllow('D09', 'Cindy 派工按工作包核对通过');
     }
-    return preToolUseDeny(taskMessage(`实施委派被拦下（${cindyCall.items[0]?.entry || name}）`));
+    return preToolUseDeny('D10', taskMessage(`实施委派被拦下（${cindyCall.items[0]?.entry || name}）`));
   }
   if (COMMAND_TOOLS.has(name)) {
     const details = signalInvocationDetails(event);
-    if (!details) return {};
+    if (!details) return preToolUseAllow('T01', '命令不是本插件 signal 写法');
     const inputPayload = await signalInput(event, details);
     const action = details.action || inputPayload?.action || null;
-    if (action === 'prepare') return {};
+    if (action === 'prepare') return preToolUseAllow('T02', 'prepare 只保存准备记录');
     if (action === 'packages') {
-      if (active) return {};
-      return preToolUseDeny('尚未开始任务：packages 只能在活动任务上记账；先完整准备并 task-start，或按简单任务声明后 task-start。');
+      if (active) return preToolUseAllow('T03', '活动任务上的 packages 记账');
+      return preToolUseDeny('T04', '尚未开始任务：packages 只能在活动任务上记账；先完整准备并 task-start，或按简单任务声明后 task-start。');
     }
-    if (action !== 'task-start') return {};
-    if (active) return {}; // 接续已有任务，准备记录已在开工时绑定。
+    if (action !== 'task-start') return preToolUseAllow('T05', '非 task-start 的插件信号');
+    if (active) return preToolUseAllow('T06', '接续已有任务，准备记录已在开工时绑定'); // 接续已有任务，准备记录已在开工时绑定。
     const route = details.flags.route ?? inputPayload?.route;
     if (route === 'operation-only') {
       // operation-only 不是业务写入豁免；协议层同样拒绝，这里在动作前直接给出缺项。
       const mode = details.flags.mode ?? inputPayload?.permissions?.mode;
-      if (mode === 'write') return preToolUseDeny('operation-only 只用于例行操作和事务，不能声明业务写入权限；需要写业务文件时改用 lead-direct 或 delegated 并按准备要求开工。');
-      return {};
+      if (mode === 'write') return preToolUseDeny('T07', 'operation-only 只用于例行操作和事务，不能声明业务写入权限；需要写业务文件时改用 lead-direct 或 delegated 并按准备要求开工。');
+      return preToolUseAllow('T08', 'operation-only 且未声明业务写入');
     }
-    if (preparation && gaps.length) return preToolUseDeny(preparationGapText(gaps) + '。' + taskMessage('准备记录尚未齐全，不能开始实施'));
+    if (preparation && gaps.length) return preToolUseDeny('T09', preparationGapText(gaps) + '。' + taskMessage('准备记录尚未齐全，不能开始实施'));
     if (preparation && gaps.length === 0) {
-      if (route === 'delegated' && preparation.size !== 'complex') return preToolUseDeny('分工任务需要完整的复杂准备记录；当前只有简单任务记录，不能开始派包。');
-      return {};
+      if (route === 'delegated' && preparation.size !== 'complex') return preToolUseDeny('T10', '分工任务需要完整的复杂准备记录；当前只有简单任务记录，不能开始派包。');
+      return preToolUseAllow('T11', '已有完整准备记录，开工');
     }
     const size = details.flags.size ?? inputPayload?.size;
     const sizeReason = details.flags['size-reason'] ?? inputPayload?.sizeReason;
-    if (size === 'simple' && typeof sizeReason === 'string' && sizeReason.trim()) return {};
-    if (size === 'complex') return preToolUseDeny('复杂任务开始前先用 prepare 保存完整准备记录，再 task-start。');
-    return preToolUseDeny(taskMessage('尚未保存准备记录，也没有声明简单任务'));
+    if (size === 'simple' && typeof sizeReason === 'string' && sizeReason.trim()) return preToolUseAllow('T12', '简单任务带非空理由，开工');
+    if (size === 'complex') return preToolUseDeny('T13', '复杂任务开始前先用 prepare 保存完整准备记录，再 task-start。');
+    return preToolUseDeny('T14', taskMessage('尚未保存准备记录，也没有声明简单任务'));
   }
   // 业务写入：没有活动任务时，只允许准备资料维护；已有活动任务则沿用任务权限/包所有权，不把准备齐当成任意写入。
   if (WRITE_TOOLS.has(name)) {
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir);
-      return modeDenied ? preToolUseDeny(modeDenied) : {};
+      const modeDenied = await taskModeDenial(task, name, event, resolved, directory, options.tempDir);
+      if (modeDenied) return preToolUseDeny('B01', modeDenied);
+      const pathGate = await pathRuleGate(directory, state, resolved.project, task, session, event, name, resolved);
+      if (pathGate?.note) {
+        await rememberReminderKeys(directory, projectId, event.session_id, pathGate.keys);
+        return preToolUseAllowWith('B03', { systemMessage: pathGate.note });
+      }
+      return preToolUseAllow('B04', '活动任务内的业务写入核对通过');
     }
     const targets = toolTargets(event);
-    if (!targets.length) return preToolUseDeny(taskMessage('无法识别这次写入的目标文件'));
+    if (!targets.length) return preToolUseDeny('B05', taskMessage('无法识别这次写入的目标文件'));
     const blocked = targets.filter(target => !planModeTargetAllowed(resolved, directory, options.tempDir, target, TEMP_WRITE_TOOLS.has(name)));
-    if (!blocked.length) return {};
-    if (preparation && gaps.length) return preToolUseDeny(preparationGapText(gaps) + '。' + taskMessage(`业务写入被拦下：${blocked.join('、')}`));
-    return preToolUseDeny(taskMessage(`业务写入被拦下：${blocked.join('、')}`));
+    if (!blocked.length) return preToolUseAllow('B06', '未开工时的准备资料或系统临时目录写入');
+    if (preparation && gaps.length) return preToolUseDeny('B07', preparationGapText(gaps) + '。' + taskMessage(`业务写入被拦下：${blocked.join('、')}`));
+    return preToolUseDeny('B08', taskMessage(`业务写入被拦下：${blocked.join('、')}`));
   }
   // 实施委派：没有活动任务时只放行明确只读的子代理；Codex 的 spawn 参数不含可核对的只读标记，故一律要求先开工。
   if (DELEGATION_TOOLS.has(name)) {
     if (active) {
-      const modeDenied = taskModeDenial(task, name, event, resolved, directory, options.tempDir);
-      if (modeDenied) return preToolUseDeny(modeDenied);
+      const modeDenied = await taskModeDenial(task, name, event, resolved, directory, options.tempDir);
+      if (modeDenied) return preToolUseDeny('G01', modeDenied);
       // 先解析包标记：只读子代理只有在没有声明工作包时才保留免关联豁免。
       // 带了 workflow-package:<id> 就必须按该包核对状态、通道、Agent 和角色，不能借 Explore/Plan 绕过。
       const markers = delegationPackageMarkers(input);
-      if (markers.length > 1) return preToolUseDeny(`委派输入同时给出多个工作包标记（${markers.join('、')}）；一次委派只能关联一个包。`);
-      if (!markers.length && (name === 'Agent' || name === 'Task') && READ_ONLY_SUBAGENTS.has(requestedDelegationAgent(name, input))) return {};
+      if (markers.length > 1) return preToolUseDeny('G02', `委派输入同时给出多个工作包标记（${markers.join('、')}）；一次委派只能关联一个包。`);
+      if (!markers.length && (name === 'Agent' || name === 'Task') && await isReadOnlySubagent(requestedDelegationAgent(name, input), subagentSearch(resolved))) return preToolUseAllow('G03', '只读子代理且未声明工作包');
       const packageId = markers[0] || null;
       const pkg = packageId ? task.packages?.[packageId] : null;
-      const denial = delegationDenial(task, pkg, name, input);
-      return denial ? preToolUseDeny(denial) : {};
+      const denial = await delegationDenial(task, pkg, name, input, subagentSearch(resolved));
+      return denial ? preToolUseDeny('G04', denial) : preToolUseAllow('G05', '实施委派按工作包核对通过');
     }
     if (name === 'Agent' || name === 'Task') {
       const type = input.subagent_type ?? input.agent_type;
       // 未开工时也只放行没有包标记的明确只读子代理；有标记就说明在冒充已登记委派。
-      if (READ_ONLY_SUBAGENTS.has(type) && !delegationPackageMarkers(input).length) return {};
+      if (await isReadOnlySubagent(type, subagentSearch(resolved)) && !delegationPackageMarkers(input).length) return preToolUseAllow('G06', '未开工时的只读子代理');
     }
-    return preToolUseDeny(`实施委派被拦下（${name}）：未开工时只放行不带 workflow-package 标记、subagent_type 为 Explore 或 Plan 的只读子代理；实施/审查包需要先保存准备记录，并由用户明确授权后用 task-start 开工。`);
+    return preToolUseDeny('G07', `实施委派被拦下（${name}）：未开工时只放行不带 workflow-package 标记、Explore/Plan 或定义文件 tools 全为只读工具的自定义子代理；实施/审查包需要先保存准备记录，并由用户明确授权后用 task-start 开工。`);
   }
-  return {};
+  return preToolUseAllow('G08', '未命中任何 PreToolUse 判定分支');
 }
 // 宿主 hook 超时：Codex 的 Interrupt/SessionEnd 只有 3 秒，其余 10 秒。锁等待预算必须留出
 // 启动、解析和落盘余量，预算耗尽时保守放行，不越过宿主上限。
 const LOCK_BUDGET = { lifecycle: 700, normal: 1500 };
 const lockBudget = name => LIFECYCLE_EVENTS.includes(name) ? LOCK_BUDGET.lifecycle : LOCK_BUDGET.normal;
-// task-end/Stop 的 spec 检查在状态锁外预检；4 秒是从预检开始计算的 Git 调用共享截止时间，
+// task-end/Stop 的 spec 检查在状态锁外预检；8 秒是从预检开始计算的 Git 调用共享截止时间，
 // 不保证整个 Hook 在宿主 10 秒回执窗口内返回：同步快照读取不可中断且同样消耗截止时间，
 // 锁内 ref 复核另按独立预算计时，预检之外的启动、解析与状态写入也占时间。
-const SPEC_CHECK_BUDGET_MS = 4000;
+const SPEC_CHECK_BUDGET_MS = 8000;
 // 与 protocol.identifier 相同的字面形状；非法 ref 会在信号校验处被拒，不先拿去查 Git。
 const SPEC_REF = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
 // 入口拿不到身份时的唯一提示：不冒充入口成功，也不创建猜测身份。
 const identityHint = 'workflow 本回合未建立入口身份（缺少宿主回合标识或会话未登记）：已保守放行；下一次 SessionStart/UserPromptSubmit 会重新建立，业务任务和票据不在此处猜测。';
+// PreToolUse 的判定附带规则编号：编号只进本机决定记录，输出保持原样；记录失败不影响判定。
+async function runPreToolUse(directory, event, options, agent) {
+  const context = {
+    sessionId: event.session_id,
+    event: 'PreToolUse',
+    host: agent,
+    toolUseId: typeof event.tool_use_id === 'string' ? event.tool_use_id : null,
+    toolName: typeof event.tool_name === 'string' ? event.tool_name : null,
+    turnId: typeof event.prompt_id === 'string' ? event.prompt_id : (typeof event.turn_id === 'string' ? event.turn_id : null),
+    transcriptPath: typeof event.transcript_path === 'string' ? event.transcript_path : null,
+  };
+  try {
+    const { output, decision } = await preToolUse(directory, event, options, agent);
+    await recordDecision(directory, { ...context, ...decision });
+    return output;
+  } catch (error) {
+    await recordDecision(directory, { ...context, rule: 'X01', decision: 'failed', reason: error.message });
+    throw error;
+  }
+}
+// Stop 的规则编号只用于决定记录；block/allow 结果仍完全由协议函数给出。
+function describeStop(session, task, event, agent, output) {
+  const base = {
+    sessionId: session.sessionId,
+    event: 'Stop',
+    host: agent,
+    turnId: typeof event.prompt_id === 'string' ? event.prompt_id : (typeof event.turn_id === 'string' ? event.turn_id : session.turnId || null),
+    transcriptPath: typeof event.transcript_path === 'string' ? event.transcript_path : null,
+  };
+  if (session.role || session.interrupted) return { ...base, rule: 'S01', decision: 'allow', reason: '角色会话或已中断，不核对' };
+  if (event.stop_hook_active === true) return { ...base, rule: 'S02', decision: 'allow', reason: '宿主已在阻挡后的 Stop 中，不重复核对' };
+  // stop() 在返回 block 前会写入 stopBlockedTurn；这里先认本次结果，避免把刚挡下的回合误记为“已挡过”。
+  if (output?.decision === 'block') {
+    const reason = String(output.reason || '');
+    return { ...base, rule: /个工作包在途/.test(reason) ? 'S10' : 'S11', decision: 'block', reason };
+  }
+  if (session.stopBlockedTurn === session.turnId) return { ...base, rule: 'S02', decision: 'allow', reason: '本回合已挡过或重复 Stop' };
+  if (['waiting-user', 'operation-only'].includes(session.phase)) return { ...base, rule: 'S03', decision: 'allow', reason: '等待用户或纯操作回合，不核对' };
+  if (!task || task.lifecycle !== 'active' || task.route === 'operation-only') return { ...base, rule: 'S04', decision: 'allow', reason: '没有活动业务任务，不核对' };
+  return { ...base, rule: 'S05', decision: 'allow', reason: '活动任务但本回合未进入交付，不核对' };
+}
 export async function handleHook(directory, event, options = {}) {
   // 结束事件独立落盘后，即使后续拿不到状态锁也要如实说明它已保存。
   let recordedLifecycle = null;
@@ -706,14 +830,14 @@ export async function handleHook(directory, event, options = {}) {
     if (isSubagentEvent(event)) {
       // 子代理内部工具调用沿用父会话的任务/准备状态做执行前检查；它没有自己的 workflow 身份，
       // 因此不建立回执，也不让它的 signal 被记账。只读子代理的 Read/Grep 仍直接放行。
-      if (name === 'PreToolUse') return await preToolUse(directory, event, options, agent);
+      if (name === 'PreToolUse') return await runPreToolUse(directory, event, options, agent);
       // 内置子代理没有 workflow 身份：它发的 signal 不记录，回一句说明，免得它反复重发或停下等回执。
       if (name === 'PostToolUse' && (await isSignalInvocation(event, options.entry, directory) || isComposedSignal(event))) return contextOutput(name, 'workflow 未接受：宿主内置子代理与 Lead 共用会话，没有自己的 workflow 身份，信号不记录。不要重发 role-claim 或其他信号；按工作包和对应角色指引完成工作，把结果交回 Lead，由 Lead 记账。');
       return {};
     }
     // 工具执行前检查不进入状态锁：只读状态并返回允许/拒绝，避免在动作前扩大写入与锁竞争。
     // 未接入目录、无关工具和普通读取在 preToolUse 内部先行放行。
-    if (name === 'PreToolUse') return await preToolUse(directory, event, options, agent);
+    if (name === 'PreToolUse') return await runPreToolUse(directory, event, options, agent);
     const hostMode = typeof event.permission_mode === 'string' && event.permission_mode.trim() ? event.permission_mode : null;
     const question = QUESTION_TOOLS[agent].includes(event.tool_name);
     const signalInvocation = name === 'PostToolUse' && await isSignalInvocation(event, options.entry, directory);
@@ -731,13 +855,36 @@ export async function handleHook(directory, event, options = {}) {
     // 普通工具与委派查询只在当前可信宿主模式变化时写状态，避免每次等待都放大锁竞争。
     const observedSession = existing.sessions[sessionKey(initial.project.projectId, event.session_id)];
     const modeChanged = hostMode && observedSession && (!turnId || observedSession.turnId === turnId) && observedSession.permissionMode !== hostMode;
-    if (name === 'PostToolUse' && !modeChanged) {
+    // 顾问调用结束的父级 PostToolUse；子代理内部事件带 agent_id，不在这里记账。
+    const advisorConsultation = name === 'PostToolUse'
+      && !isSubagentEvent(event)
+      && (event.tool_name === 'Agent' || event.tool_name === 'Task')
+      && await isAdvisorSubagent(event.tool_input?.subagent_type, { cwd: event.cwd, worktree: initial.worktree });
+    if (name === 'PostToolUse' && !modeChanged && !advisorConsultation) {
       if (delegationStatus) return delegationHint(existing, initial.project, event, turnId);
       if (!question && !signalInvocation && !nearMiss) return {};
     }
     if (existing.install?.status === 'installed' && !options.synthetic) {
       const { verifyRelease } = await import('./install.mjs');
       if (!await verifyRelease(existing.install)) return { systemMessage: 'workflow 发布副本指纹变化，维护不可用；已保守放行。' };
+    }
+    if (advisorConsultation) {
+      if (!observedSession) return {};
+      // task-end 后会话仍保留旧 taskId；只有任务 active 且不是角色会话时，记录才绑定父任务。
+      const activeTaskId = observedSession.taskId
+        && existing.tasks[taskKey(initial.project.projectId, observedSession.taskId)]?.lifecycle === 'active'
+        ? observedSession.taskId : null;
+      const consultation = await recordConsultation(directory, {
+        projectId: initial.project.projectId,
+        sessionId: event.session_id,
+        taskId: observedSession.role ? null : activeTaskId,
+        turnId: observedSession.turnId || null,
+        subagentType: event.tool_input.subagent_type,
+        prompt: event.tool_input.prompt,
+        description: event.tool_input.description,
+        eventId: typeof event.event_id === 'string' ? event.event_id : null,
+      });
+      return consultation.recorded || consultation.replayed ? {} : { systemMessage: `workflow 未写入顾问咨询记录：${consultation.reason}` };
     }
     // 信号载荷是纯解析，提前取出供锁外预检和锁内接受共用；真正的身份/正文校验仍在锁内协议层。
     const signalPayloads = signalInvocation ? extractSignals(event.tool_response) : [];
@@ -796,6 +943,8 @@ export async function handleHook(directory, event, options = {}) {
     }
     // 事件文件的归档要等状态提交成功后再执行；保存失败时事件留在原处，下次入口靠回执幂等跳过。
     let lifecycleArchive = [];
+    // Stop 决定记录在状态提交成功后追加；锁内只收集事实，不额外扩大写入。
+    let stopRecord = null;
     let output = await mutate(directory, async (state, save) => {
       const resolved = await resolveProject(state, event.cwd, probe);
       if (!resolved) return {};
@@ -870,10 +1019,39 @@ export async function handleHook(directory, event, options = {}) {
         if (signalPayloads.length !== 1) return contextOutput(name, 'workflow 未接受：输出未包含唯一的本插件信号');
         const payload = signalPayloads[0];
         if (payload?.sessionId !== event.session_id || payload.projectId !== project.projectId || payload.turnId !== session.turnId) return contextOutput(name, 'workflow 未接受：信号不属于当前宿主会话/项目/回合');
+        // 咨询记录在状态锁内读取：同一回合刚写下的记录也要能立刻用于门禁；读文件不改状态。
+        const consultTask = payload.taskId ? state.tasks[taskKey(project.projectId, payload.taskId)] : null;
+        const taskConsultations = consultTask
+          ? await readTaskConsultations(directory, state, consultTask)
+          : { records: [], corrupt: [] };
+        const sessionConsultations = await readSessionConsultations(directory, project.projectId, event.session_id);
+        const gateConfig = ['prepare', 'task-update', 'packages'].includes(payload.action)
+          ? await readGateConfig(project.knowledgeRoot)
+          : null;
+        const pathRules = payload.action === 'task-update' && gateConfig
+          ? { rules: gateConfig.rules, error: gateConfig.error }
+          : { rules: [], error: null };
+        // 重放同一 signalId 不再调用网关；首次不可用只记一次提示，后续信号不再重复。
+        // prepare 的 --task 可以指向其他/不存在任务，权限核对始终以会话当前活动任务为准。
+        const sessionTask = session.taskId ? state.tasks[taskKey(project.projectId, session.taskId)] : null;
+        const jevTask = payload.action === 'prepare' ? sessionTask : consultTask;
+        const jev = session.receipts?.[payload.signalId] ? null : await jevSignalGate(gateConfig, payload, jevTask, session);
+        const jevNotice = jev?.notice && !session.jevNotice ? jev.notice : null;
+        if (jevNotice) session.jevNotice = new Date().toISOString();
         const before = structuredClone(state);
         let result;
-        try { result = acceptSignal(state, payload, { root: resolved.worktree, spec: specCheck }); }
-        catch (error) {
+        try {
+          result = acceptSignal(state, payload, {
+            root: resolved.worktree,
+            spec: specCheck,
+            consultations: taskConsultations.records,
+            consultationsCorrupt: taskConsultations.corrupt,
+            sessionConsultations: sessionConsultations.records,
+            sessionConsultationsCorrupt: sessionConsultations.corrupt,
+            pathRules,
+            jev,
+          });
+        } catch (error) {
           // A rejected signal must not persist a partially changed phase or candidate disposition.
           for (const key of Object.keys(state)) delete state[key];
           Object.assign(state, before);
@@ -881,6 +1059,7 @@ export async function handleHook(directory, event, options = {}) {
           const current = state.sessions[sessionKey(project.projectId, event.session_id)];
           result = { accepted: false, reason: error.code || 'INPUT', message: error.message, ...(error.missing ? { missing: error.missing } : {}), ...(error.findings ? { findings: error.findings } : {}), expectedRevision: current?.revision, turnId: current?.turnId };
         }
+        if (jevNotice) result.jevNotice = jevNotice;
         if (result.accepted && !result.replayed && payload.action === 'task-start') await markExtractionStart(session, event.transcript_path, payload.taskId);
         // 已接受的任务结束才登记会话提取；登记失败只写作业级诊断，不阻塞、不回滚业务任务。
         // 副作用绑定回执里的任务身份：同回合先结束 A 再启动 B 后重放 A 的 task-end 时，不能按当前 session.taskId=B 提前登记 B。
@@ -901,6 +1080,8 @@ export async function handleHook(directory, event, options = {}) {
         const output = stop(state, project, session, event, { root: resolved.worktree, spec: specCheck });
         // The budget must be durable before returning a continuation decision.
         await save();
+        const task = session.taskId ? state.tasks[taskKey(project.projectId, session.taskId)] : null;
+        stopRecord = describeStop(session, task, event, agent, output);
         return output;
       }
       if (name === 'Interrupt' || name === 'StopFailure' || name === 'SessionEnd') {
@@ -916,6 +1097,7 @@ export async function handleHook(directory, event, options = {}) {
       if (name === 'PostCompact') return {};
       return {};
     }, { budgetMs: lockBudget(name) });
+    if (stopRecord) await recordDecision(directory, stopRecord);
     // 可选知识/对齐在状态锁外读取；失败已在 readOptionalContext 内降级，不影响已保存的入口身份。
     if (output?.entry) {
       const entry = output.entry;

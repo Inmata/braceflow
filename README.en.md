@@ -8,6 +8,8 @@ The core rules, project plans and work-package records are independent of the so
 
 **Lead, Worker and Reviewer are responsibilities. A role is not tied to a client or a model.** Claude Code can act as Lead, Worker or Reviewer; Codex, OpenCode, Pi and others are assigned the same way, based on current permissions and actual capabilities. The roles the user has confirmed, the tools available and the needs of the task decide who does what.
 
+Claude Code installs also write two read-only subagents: `workflow-explorer` (the Lead handles known-location small reads directly; cross-file investigation and long-log analysis go to the investigator; after a failure it only re-checks key fragments, with at most one retry) and `workflow-advisor` (a second opinion before important decisions). They do not write files, dispatch work, own work packages or replace Worker/Reviewer. The advisor is on demand: the Lead consults when it judges a second opinion useful or the user asks for one, and the record only proves the question was asked. See [decision escalation reminders](docs/design/protocol.md#决策升级提醒).
+
 The detailed method documents under `docs/` are written in Simplified Chinese. This README is the English entry point.
 
 ## Roles and host support
@@ -253,6 +255,38 @@ The role method text is in the [common method](docs/workflow.md); the three role
 - The three preparation steps, record format and cross-session resume: [preparation](docs/references/preparation.md) (in Chinese).
 - Adapters for each host and optional management software: [Codex](docs/adapters/codex.md), [Claude Code](docs/adapters/claude.md), [Codeg (optional)](docs/adapters/codeg.md).
 - Tutorials: [independent parallel work](examples/parallel-change/README.md), [dependencies and repair](examples/dependency-and-repair/README.md), [routine and small tasks](examples/routine/README.md), [preparation and resume](examples/preparation-and-resume/README.md).
+- Real-host evaluation: `npm run eval -- --suite smoke|protocol|model|herdr` drives the real host in an isolated config and temporary state directory; see [usage](docs/usage.md) for suites, exit codes and cost boundaries, and [acceptance](docs/acceptance.md) for actual results and uncovered boundaries.
+
+### Enable decision reminders (optional)
+
+Path rules and jev are both optional. The template `workflow-gate.example.json` ships with the release copy: in the source repository it is at the repository root, and after installation it is at the release-copy root. Copy it to the project root as `workflow-gate.json`:
+
+```powershell
+Copy-Item "<template directory>/workflow-gate.example.json" "<project root>/workflow-gate.json"
+```
+
+A complete example you can edit directly:
+
+```json
+{
+  "schemaVersion": 1,
+  "pathRules": {
+    "security": ["src/auth/**", "src/**/permissions.*", "hooks/**"],
+    "migration": ["migrations/**", "src/**/schema.*"]
+  },
+  "jev": {
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:3425/v1/systemone",
+    "model": "typesafe/jev-latest"
+  }
+}
+```
+
+- `pathRules.security` / `pathRules.migration` are arrays of project-relative globs. A missing category means an empty array; a missing or malformed `pathRules`, or an unknown category, disables path rules and reports an error. Empty rules mean off. Path rules check only complex write tasks' `task-update` business-path increments and actual writes by supported write tools; compliant `docs/plans/*.md` increments do not trigger them.
+- Path rules check actual writes only for `Write`, `Edit`, `MultiEdit`, `NotebookEdit`, `apply_patch`, `write_file`, and `delete_file`, using the target identified from tool arguments or patch text. Ordinary shell tools (`Bash`/`exec_command`/`PowerShell`/`pwsh`), redirection, and scripts that write files bypass path rules. A hit only reminds, never blocks: an actual write is not reminded when the task already has a consultation record; a `task-update` business-path increment is reminded when the task lacks a consultation record at or after the last saved change. Each key (`<taskId>:security|migration`) is reminded once per session.
+- `jev.enabled` defaults to `false`. When enabled, `endpoint` must be an `http`/`https` URL and `model` must be a non-empty string. Invalid configuration disables only jev, not path rules. The key is read only from the `TYPESAFE_API_KEY` environment variable and is sent only to a loopback address. `jev` participates only in `prepare`, `task-update`, and `packages` signals and does not inspect actual file writes: a hit without a corresponding consultation record only reminds. A `prepare` hit is suppressed by a record from the current session before this preparation (`taskId` empty or belonging to the current session task); when the session already has a previous preparation, only records at or after that preparation's `preparedAt` count, and the first preparation has no such lower bound. A `task-update` hit is suppressed by a task record at or after the last saved change; a `packages` hit by any record for the task. The reminder key is `<taskId or prepare>:jev`, once per session.
+- Edit the project-root `workflow-gate.json`; the next signal or write uses it without reinstalling. Delete the file or empty the rules to turn path rules off; set `jev.enabled: false` to turn jev off.
+- See [usage](docs/usage.md#决策升级提醒与可选-jev) for the field table, defaults and full operating instructions. Real-host delivery of path rules is still unverified; jev has only local fake-server tests and one local gateway sample; actual `effort` dispatch and the effect of the synchronous call on the state lock are also unverified.
 
 ## Development and verification
 
@@ -267,13 +301,21 @@ npm run verify
 
 ## Current status and limits
 
-Current source version is 0.9.0-dev.0 (pre-release). This is a development build, **not a stable release**: real-host acceptance M1–M4 for Herdr/Cindy is still pending (see [acceptance section 13.3](docs/acceptance.md#133-人工验收待用户执行)). The latest stable release remains v0.8.1. It includes the collaboration rules, CLI, hook adapters for two hosts, persistent notes, graded knowledge, configuration and optional background review, as well as routing, the work package ledger, completion gates, role claims and spec drift checks. Real-host acceptance records are in [0.3.0 acceptance](docs/acceptance.md#6-030-真实宿主验收). The installer tells copies apart by content digest. The source repository also provides an `npm run verify` combined check entry; `scripts/` is not shipped in installed release copies.
+Current source version is 0.10.0. Herdr TUI (M1) is verified on a real host; Herdr GUI and Cindy (M2–M4) are deferred by the owner and not verified on real hosts, and some other manual acceptance items remain pending (see [acceptance section 13.3](docs/acceptance.md#133-人工验收待用户执行)). It includes the collaboration rules, CLI, hook adapters for two hosts, persistent notes, graded knowledge, configuration and optional background review, as well as routing, the work package ledger, completion gates, role claims and spec drift checks. Real-host acceptance records are in [0.3.0 acceptance](docs/acceptance.md#6-030-真实宿主验收). The installer tells copies apart by content digest. The source repository also provides an `npm run verify` combined check entry; `scripts/` is not shipped in installed release copies.
+
+Changes in 0.10.0 (relative to 0.8.1, including the 0.9.0-dev.0 batch):
+
+- Decision advisor, jev gate and Trajectory: the advisor is consulted on demand, path rules and jev hits only remind; hook decisions are written to an offline Trajectory.
+- Context evaluation: a comparison framework, cost reconciliation (including subagents and retries; comparability looks only at the main-session model) and scenarios E10–E15; answers are judged from the last `result`.
+- Subagents: definitions use an ownership ledger; the first turn delivers a routing rule that sends cross-file root-cause tracing and long logs to `workflow-explorer`.
+- Real-host acceptance: Herdr GUI and Cindy (M2–M4) are deferred; the routing evaluation verdict is "no clear difference" and cannot be attributed to the routing sentence.
 
 Changes in 0.9.0-dev.0:
 
-- Herdr TUI/GUI and Cindy adapters: delegation commands are checked against the work package, `hc` child-session replies are not treated as user turns, Cindy Orca dispatches are checked while controlled Session task dispatches are rejected, and the installer supports additional Codex config directories. Real-host acceptance M1–M4 is still pending.
+- Herdr TUI/GUI and Cindy adapters: delegation commands are checked against the work package, `hc` child-session replies are not treated as user turns, Cindy Orca dispatches are checked while controlled Session task dispatches are rejected, and the installer supports additional Codex config directories. Real-host acceptance M1 is done; M2–M4 are deferred.
 - Planning and review guardrails: compliant `docs/plans/*.md` and system temp targets are allowed before work starts and in `plan` mode; `task-update` accepts plan-only path changes, incremental preparation merges and same-base-agent model/effort adjustments; complex `delegated` tasks cannot waive independent review at `task-end` and only honour a `reviewWaiver` declared during preparation.
 - Docs and compact recovery: the four Reviewer criteria and Herdr operational safeguards are complete, and the core Lead disciplines are re-injected after compaction.
+- Layering and decision escalation (W1–W4): Claude Code installs write two read-only subagents, `workflow-explorer` / `workflow-advisor`; the Lead session can use a lighter model while Worker/Reviewer assignments stay unchanged. The advisor is on demand and its record only proves the question was asked; `prepare`, `task-update`, `packages` and `task-end` no longer require a consultation first. A project-root `workflow-gate.json` only reminds on `security` / `migration` path hits during supported write-tool actual writes and scope expansion; the optional jev adapter only participates in preparation, update and ledger signals, is off by default and also only reminds, with each key reminded once per session and a 2-second timeout treated as a miss. Real-host delivery of path rules, actual `effort` dispatch and the effect of the synchronous call on the state lock are still unverified; jev has only local fake-server tests and one local gateway sample.
 
 Changes in 0.8.1:
 
@@ -282,17 +324,17 @@ Changes in 0.8.1:
 - Extraction scoped to the task: `task-start` records the task start, and `task-end` freezes the transcript prefix size, SHA-256 and message boundary. Later appends do not enter an existing job; replacement, truncation, an unconfirmable start or an old job without a range is skipped instead of reading the whole session. A task with learning disabled also advances the boundary; a replayed `task-end` only looks up the original task's job and does not register the current new task early.
 - Other boundary fixes: alignment read failures or check-budget exhaustion produce an "incomplete" hint while keeping progress from readable parts; project disable can be retried without overwriting user edits to AGENTS.
 
-After upgrading, reinstall the hosts; both hosts share `current`, and each install command only updates the selected host's registration. The AGENTS managed block is unchanged, so re-onboarding is not needed. These behaviours are covered by this repository's tests and synthetic smoke; the release notes do not treat that as real-host acceptance, and real callbacks, model calls and the 4-second Git preflight budget on very large repositories still need separate verification.
+After upgrading, reinstall the hosts; both hosts share `current`, and each install command only updates the selected host's registration. The AGENTS managed block is unchanged, so re-onboarding is not needed. These behaviours are covered by this repository's tests and synthetic smoke; the release notes do not treat that as real-host acceptance, and real callbacks, model calls and the 8-second Git preflight budget on very large repositories still need separate verification.
 
 Changes in 0.8.0:
 
 - Explicit route for new tasks: `task-start` and full payloads must declare `route` (`operation-only`, `lead-direct` or `delegated`). A new task without it, or with an invalid value, returns `ROUTE` and no task is created. Continuing an existing task may omit it; historical tasks left by older versions (no `route` field in their record) continue as before and may declare it once when resumed, after which it cannot change. The gate still runs spec checks for historical tasks without a route; complex `lead-direct` also checks validation and the requirement acceptance matrix.
-- Spec checks preflight outside the state lock: `task-end` and Stop check specs outside the state lock against the current worktree and `finalRef` (HEAD by default), using an absolute deadline set at check start to share a 4-second budget across its Git calls: synchronous file snapshot reads cannot be forcibly interrupted, but their elapsed time consumes the same deadline and reduces the Git time left, so 4 seconds does not guarantee the preflight or hook total duration; the final in-lock ref check has its own separate budget. Slow Git therefore no longer occupies the state lock needed by other sessions. The preflight binds the commit OID, governed-file digests, spec list and index snapshot into a `binding`; inside the lock it only re-resolves the ref once and compares snapshots, without rerunning status/log/rev-list. If the commit, workspace, index or session/task snapshot changes, the old report is discarded as `spec-check:stale`, which cannot be waived and must be retried; Stop says "spec check could not be confirmed" instead of claiming "no gate items".
+- Spec checks preflight outside the state lock: `task-end` and Stop check specs outside the state lock against the current worktree and `finalRef` (HEAD by default), using an absolute deadline set at check start to share a 8-second budget across its Git calls: synchronous file snapshot reads cannot be forcibly interrupted, but their elapsed time consumes the same deadline and reduces the Git time left, so 4 seconds does not guarantee the preflight or hook total duration; the final in-lock ref check has its own separate budget. Slow Git therefore no longer occupies the state lock needed by other sessions. The preflight binds the commit OID, governed-file digests, spec list and index snapshot into a `binding`; inside the lock it only re-resolves the ref once and compares snapshots, without rerunning status/log/rev-list. If the commit, workspace, index or session/task snapshot changes, the old report is discarded as `spec-check:stale`, which cannot be waived and must be retried; Stop says "spec check could not be confirmed" instead of claiming "no gate items".
 - Onboarding preflight order and PowerShell arguments: when core onboarding checks fail, `project onboard` no longer reads or runs an executor configured in personal or project config. Commands generated for users and agents use PowerShell single-quoted literals; paths and arguments containing spaces, single quotes, `$`, backticks, semicolons or `$(...)` are passed literally instead of being expanded or executed. Values Windows PowerShell 5.1 cannot pass verbatim (double quotes and empty arguments) use a `workflow-arg64:` marker that is decoded only when the generated command carries `--workflow-arg64-transport`.
 - Maintenance verification entry: the new `npm run verify` runs the selected `check`, `test` and `demo` scripts from `package.json` in order, keeping each command's raw output plus `summary.json`/`summary.md`; any required check that fails or does not finish makes the overall exit code non-zero, and the demo is always labelled a synthetic smoke.
 - Related boundary fixes: alignment checks treat permission or busy read failures as `errors` and mark the index stale/incomplete instead of reporting deleted files; atomic rollback after a rejected `task-end` is provided by the production hook's transaction boundary, and new direct callers of the protocol function must supply the same boundary.
 
-After upgrading, reinstall the hosts; both hosts share `current`, and each install command only updates the selected host's registration. The AGENTS managed block is unchanged, so re-onboarding is not needed. These behaviours are covered by this repository's tests and synthetic smoke; the release notes do not treat that as real-host acceptance, and real callbacks, model calls and the 4-second Git preflight budget on very large repositories still need separate verification.
+After upgrading, reinstall the hosts; both hosts share `current`, and each install command only updates the selected host's registration. The AGENTS managed block is unchanged, so re-onboarding is not needed. These behaviours are covered by this repository's tests and synthetic smoke; the release notes do not treat that as real-host acceptance, and real callbacks, model calls and the 8-second Git preflight budget on very large repositories still need separate verification.
 
 Changes in 0.7.0:
 

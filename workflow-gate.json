@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "pathRules": {
+    "security": [
+      "src/hooks.mjs",
+      "src/protocol.mjs",
+      "src/install.mjs",
+      "src/consult.mjs",
+      "src/advisor-gate.mjs",
+      "src/jev.mjs",
+      "src/adapters/*.mjs",
+      "agents/*.md",
+      "hooks/*.json"
+    ],
+    "migration": [
+      "src/store.mjs",
+      "src/signal.mjs",
+      "src/preparation.mjs",
+      "src/learning.mjs",
+      "src/capture.mjs",
+      "src/protocol.mjs",
+      "src/consult.mjs"
+    ]
+  },
+  "jev": {
+    "enabled": false,
+    "endpoint": "http://127.0.0.1:3425/v1/systemone",
+    "model": "typesafe/jev-latest"
+  }
+}

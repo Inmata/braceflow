@@ -10,6 +10,7 @@ import { getContext } from '../src/context.mjs';
 import { handleHook } from '../src/hooks.mjs';
 import { mutate, readState } from '../src/store.mjs';
 import { sessionKey, taskKey } from '../src/protocol.mjs';
+import { recordConsultation } from '../src/consult.mjs';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const entry = path.join(root, 'bin', 'workflow.mjs');
@@ -64,6 +65,20 @@ export async function claudeEvent(f, name, extra = {}) {
   return handleHook(f.directory, { hook_event_name: name, cwd: f.project, session_id: f.sessionId, prompt_id: f.promptId, permission_mode: 'default', ...extra }, { synthetic: true, entry, agent: 'claude' });
 }
 export async function identity(f) { return (await getContext(f.directory, f.project, 'lead', f.sessionId)).identity; }
+// 门禁夹具用真实 recordConsultation 写会话级记录；taskId 由调用方按场景给出（prepare 前为 null）。
+export async function consult(f, { taskId = null, prompt = '决策问题、选项与已知证据是否足够？', description = null } = {}) {
+  const result = await recordConsultation(f.directory, {
+    projectId: f.projectId,
+    sessionId: f.sessionId,
+    taskId,
+    turnId: f.turnId,
+    subagentType: 'workflow-advisor',
+    prompt,
+    description,
+  });
+  assert.equal(result.recorded || result.replayed, true, JSON.stringify(result));
+  return result;
+}
 // 合成用例主要验证账本和门禁，不再用 operation-only 冒名建立再改 route：
 // lead-direct 走真实的显式简单声明（size=simple + 理由），由协议正常建立并绑定简单快照。
 // 旧任务接续不再由通用 emit 暗中注入；需要历史账本的用例必须显式调用 legacyEmit。

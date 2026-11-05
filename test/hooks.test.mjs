@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
 import path from 'node:path';
 import { cp, mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -9,7 +10,11 @@ import { handleHook } from '../src/hooks.mjs';
 import { sessionKey, taskKey } from '../src/protocol.mjs';
 import { command } from '../src/entry.mjs';
 import { mutate, readState, withLock } from '../src/store.mjs';
-import { cli, deliver, emit, entry, event, fixture, git, gitFixture, identity, root, start, temporary } from './helpers.mjs';
+import { consultationPath } from '../src/consult.mjs';
+import { cli, consult as advisorConsult, deliver, emit, entry, event, fixture, git, gitFixture, identity, root, start, temporary } from './helpers.mjs';
+
+// 子代理定义目录也必须在隔离环境内解析，不能读到本机 ~/.claude。
+process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), 'workflow-tests', 'hooks-agent-config');
 
 test('P11 未接入目录不先核验发布副本，已接入项目仍按指纹拦截', async () => {
   const f = await fixture();
@@ -489,6 +494,8 @@ test('提问工具按宿主分表：原生与 Codeg MCP 名称置 waiting-user�
 
 // F05 隔离故障样本：用预加载替换 spec 检查里的 spawnSync，模拟 Git 变慢或卡住。
 // 预加载只改 `--literal-pathspecs` 的调用（spec.mjs 专用），并记录真实传给 spawnSync 的 timeout。
+// 延迟在预加载进程内忙等，不额外拉起 Node 子进程：进程启动开销会随全量测试并发负载放大，
+// 使实际延迟远大于 SLOW_GIT_MS，把“慢 Git”变成不可控的预算耗尽。
 // 卡住分支按 spawnSync 的契约在 options.timeout 后返回 ETIMEDOUT；整次检查还受总预算限制，
 // 因此既能验证单次调用占满预算，也能验证多次慢调用不会累计超过宿主回执窗口。
 async function slowGitPreload(f) {
@@ -510,7 +517,8 @@ async function slowGitPreload(f) {
     '    while (Date.now() < until) {}',
     "    return { status: null, signal: null, error: Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' }), stdout: '', stderr: '' };",
     '  }',
-    "  real(process.execPath, ['-e', 'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ' + delay + ')'], { windowsHide: true });",
+    '  const until = Date.now() + delay;',
+    '  while (Date.now() < until) {}',
     '  return real(command, args, options);',
     '};',
     'syncBuiltinESMExports();',
@@ -647,12 +655,12 @@ test('F05 多次慢 Git 不累计耗尽宿主回执：总预算内返回，调�
   const payload = { ...await identity(f), taskId: f.taskId, signalId: 'signal-many-slow', action: 'task-end' };
   const { done } = spawnHook(f, taskEndEvent(f, payload), {
     NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
-    SLOW_GIT_MS: '1500',
+    SLOW_GIT_MS: '2000',
     SLOW_GIT_LOG: log,
   });
   const result = await done;
   assert.equal(result.code, 0, result.stderr);
-  assert.ok(result.elapsed < 9000, `多次慢 Git 不能累计到宿主 10 秒上限：${result.elapsed}ms`);
+  assert.ok(result.elapsed < 10000, `多次慢 Git 不能累计到宿主 10 秒上限：${result.elapsed}ms`);
   const receipt = hookReceipt(result.stdout);
   assert.equal(receipt?.accepted, false, result.stdout);
   assert.ok(receipt.missing.includes('spec-check:git'), JSON.stringify(receipt));
@@ -713,6 +721,7 @@ test('F05 预检期间正常并发改动受管文件：Stop 明确无法确认�
 const w2Plan = 'docs/plans/plan.md';
 const w2PlanText = '# W2 准备\n\n## 实施步骤\n\n1. 实现检查。\n\n## Agent 选择表\n\n| 包 | Agent |\n| --- | --- |\n| W1 | Claude Code |\n';
 async function w2Prepare(f, overrides = {}) {
+  await advisorConsult(f);
   await mkdir(path.dirname(path.join(f.project, w2Plan)), { recursive: true });
   await writeFile(path.join(f.project, w2Plan), w2PlanText);
   const preparation = {
@@ -824,6 +833,139 @@ test('W2 PreToolUse：未开工的实施委派被拒，只读子代理放行；C
   assert.equal(childWrite.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(childWrite));
   assert.deepEqual(await pre(f, 'Read', { file_path: path.join(f.project, 'README.md') }, { agent_id: 'agent-1', agent_type: 'Explore' }), {});
 });
+test('W1 只读子代理按定义文件工具放行，改名不获得豁免，子代理内部写入仍被拒', async () => {
+  const f = await fixture();
+  const agentDir = path.join(process.env.CLAUDE_CONFIG_DIR, 'agents');
+  await mkdir(agentDir, { recursive: true });
+  for (const name of ['workflow-explorer.md', 'workflow-advisor.md']) {
+    await cp(path.join(root, 'agents', name), path.join(agentDir, name));
+  }
+  await writeFile(path.join(agentDir, 'user-reader.md'), '---\nname: user-reader\ntools: Read, WebFetch\n---\n');
+  const projectAgentDir = path.join(f.project, '.claude', 'agents');
+  await mkdir(projectAgentDir, { recursive: true });
+  await writeFile(path.join(projectAgentDir, 'project-reader.md'), '---\nname: project-reader\ntools: Read, Grep\n---\n');
+  const types = ['workflow-explorer', 'workflow:workflow-explorer', 'workflow-advisor', 'workflow:workflow-advisor', 'project-reader', 'user-reader'];
+  for (const type of types) {
+    assert.deepEqual(await pre(f, 'Agent', { subagent_type: type, description: '只读', prompt: '只读' }), {}, type);
+  }
+  const foreign = await pre(f, 'Agent', { subagent_type: 'other:workflow-advisor', description: '只读', prompt: '只读' });
+  assert.equal(foreign.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(foreign));
+  await start(f);
+  for (const type of types) {
+    assert.deepEqual(await pre(f, 'Agent', { subagent_type: type, description: '只读', prompt: '只读' }), {}, type);
+    const marked = await pre(f, 'Agent', { subagent_type: type, description: 'workflow-package:W1 只读', prompt: '只读' });
+    assert.equal(marked.hookSpecificOutput?.permissionDecision, 'deny', `${type}: ${JSON.stringify(marked)}`);
+  }
+  for (const type of types) {
+    assert.deepEqual(await pre(f, 'Read', { file_path: path.join(f.project, 'README.md') }, { agent_id: 'agent-1', agent_type: type }), {}, type);
+    const write = await pre(f, 'Write', { file_path: path.join(f.project, 'src', 'a.mjs'), content: 'x' }, { agent_id: 'agent-1', agent_type: type });
+    assert.equal(write.hookSpecificOutput?.permissionDecision, 'deny', `${type}: ${JSON.stringify(write)}`);
+  }
+  // 名字本身不再提供豁免：把 workflow-explorer 定义改成含 Bash 后按写入子代理拒绝。
+  await writeFile(path.join(agentDir, 'workflow-explorer.md'), '---\nname: workflow-explorer\ntools: Read, Bash\n---\n');
+  const renamed = await pre(f, 'Agent', { subagent_type: 'workflow-explorer', description: '只读', prompt: '只读' });
+  assert.equal(renamed.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(renamed));
+  await cp(path.join(root, 'agents', 'workflow-explorer.md'), path.join(agentDir, 'workflow-explorer.md'));
+});
+test('W1 子目录事件从 cwd 逐级向上解析项目定义，最近目录优先', async () => {
+  const f = await fixture();
+  const nested = path.join(f.project, 'packages', 'nested');
+  const rootAgents = path.join(f.project, '.claude', 'agents');
+  const nestedAgents = path.join(nested, '.claude', 'agents');
+  const userAgents = path.join(process.env.CLAUDE_CONFIG_DIR, 'agents');
+  await mkdir(rootAgents, { recursive: true });
+  await mkdir(nestedAgents, { recursive: true });
+  await mkdir(userAgents, { recursive: true });
+  await writeFile(path.join(userAgents, 'shadow-writer.md'), '---\nname: shadow-writer\ntools: Read\n---\n');
+  await writeFile(path.join(rootAgents, 'shadow-writer.md'), '---\nname: shadow-writer\ntools: Read, Edit\n---\n');
+  const fromNested = (tool, input, extra = {}) => pre(f, tool, input, { cwd: nested, ...extra });
+  // 根目录写入定义遮蔽用户级只读同名定义：子目录事件同样拒绝。
+  const shadowed = await fromNested('Agent', { subagent_type: 'shadow-writer', prompt: '只读' });
+  assert.equal(shadowed.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(shadowed));
+  assert.match(shadowed.hookSpecificOutput.permissionDecisionReason, /实施委派被拦下/);
+  // 嵌套只读定义优先于根目录写入定义：放行。
+  await writeFile(path.join(nestedAgents, 'shadow-writer.md'), '---\nname: shadow-writer\ntools: Read, Grep\n---\n');
+  assert.deepEqual(await fromNested('Agent', { subagent_type: 'shadow-writer', prompt: '只读' }), {});
+  // 564 处反向遮蔽：嵌套写入定义优先于根目录只读定义，不再按只读子代理拒绝。
+  await writeFile(path.join(rootAgents, 'reverse.md'), '---\nname: reverse\ntools: Read\n---\n');
+  await writeFile(path.join(nestedAgents, 'reverse.md'), '---\nname: reverse\ntools: Read, Write\n---\n');
+  const child = await fromNested('Write', { file_path: path.join(f.project, 'src', 'a.mjs'), content: 'x' }, { agent_id: 'agent-1', agent_type: 'reverse' });
+  assert.equal(child.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(child));
+  assert.doesNotMatch(child.hookSpecificOutput.permissionDecisionReason, /只读子代理/);
+});
+test('W1 顾问调用结束写会话级咨询记录，探索者和子代理内部事件不写', async () => {
+  const f = await fixture();
+  const file = consultationPath(f.directory, f.projectId, f.sessionId);
+  const consult = (type, extra = {}) => event(f, 'PostToolUse', {
+    tool_name: 'Agent',
+    tool_input: { description: '选型决策', prompt: '方案 A 还是 B？\n已知证据', subagent_type: type },
+    tool_response: { content: [{ type: 'text', text: '建议 A' }] },
+    ...extra,
+  });
+  assert.deepEqual(await consult('workflow-explorer'), {});
+  await assert.rejects(readFile(file), { code: 'ENOENT' });
+  assert.deepEqual(await consult('workflow:workflow-advisor'), {});
+  let record = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(record.consultations.length, 1);
+  assert.equal(record.consultations[0].taskId, null);
+  assert.equal(record.consultations[0].subagentType, 'workflow:workflow-advisor');
+  assert.equal(record.consultations[0].question, '选型决策');
+  // 同一 event_id 重放不重复追加。
+  await consult('workflow:workflow-advisor', { event_id: 'event-1' });
+  await consult('workflow:workflow-advisor', { event_id: 'event-1' });
+  record = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(record.consultations.length, 2);
+  // 子代理内部事件（带 agent_id）不写。
+  await consult('workflow:workflow-advisor', { agent_id: 'agent-1', agent_type: 'workflow:workflow-advisor' });
+  record = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(record.consultations.length, 2);
+  // 开工后记录所属任务。
+  await start(f);
+  await consult('workflow-advisor');
+  record = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(record.consultations.at(-1).taskId, f.taskId);
+});
+test('W1 顾问咨询记录损坏时保留原文件并提示', async () => {
+  const f = await fixture();
+  const file = consultationPath(f.directory, f.projectId, f.sessionId);
+  await mkdir(path.dirname(file), { recursive: true });
+  await writeFile(file, '不是 JSON');
+  const output = await event(f, 'PostToolUse', {
+    tool_name: 'Agent',
+    tool_input: { description: '决策', prompt: '证据', subagent_type: 'workflow-advisor' },
+    tool_response: {},
+  });
+  assert.match(output.systemMessage, /咨询记录/);
+  assert.equal(await readFile(file, 'utf8'), '不是 JSON');
+});
+test('W1 改名后的顾问按 workflow-role 写入咨询记录，普通子代理不写', async () => {
+  const f = await fixture();
+  const file = consultationPath(f.directory, f.projectId, f.sessionId);
+  const agentDir = path.join(f.project, '.claude', 'agents');
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(path.join(agentDir, 'second-opinion.md'), '---\nname: second-opinion\nworkflow-role: advisor\ntools: Read\n---\n');
+  await writeFile(path.join(agentDir, 'plain-helper.md'), '---\nname: plain-helper\ntools: Read\n---\n');
+  const consult = (type, extra = {}) => event(f, 'PostToolUse', {
+    tool_name: 'Agent',
+    tool_input: { description: '选型决策', prompt: '方案 A 还是 B？', subagent_type: type },
+    tool_response: { content: [{ type: 'text', text: '建议 A' }] },
+    ...extra,
+  });
+  assert.deepEqual(await consult('plain-helper'), {});
+  await assert.rejects(readFile(file), { code: 'ENOENT' });
+  await consult('second-opinion');
+  let record = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(record.consultations.length, 1);
+  assert.equal(record.consultations[0].subagentType, 'second-opinion');
+  // 子目录事件也要从 cwd 向上找到项目级顾问定义。
+  const nested = path.join(f.project, 'packages', 'advice');
+  await mkdir(path.join(nested, '.claude', 'agents'), { recursive: true });
+  await writeFile(path.join(nested, '.claude', 'agents', 'nested-advisor.md'), '---\nname: nested-advisor\nworkflow-role: advisor\n---\n');
+  await consult('nested-advisor', { cwd: nested });
+  record = JSON.parse(await readFile(file, 'utf8'));
+  assert.equal(record.consultations.length, 2);
+  assert.equal(record.consultations[1].subagentType, 'nested-advisor');
+});
 test('W2 准备记录固定到任务，packages 按包 ID 核对 role/agent/channel/scope；task-update 范围变化重新核对', async () => {
   const f = await fixture();
   await w2Prepare(f);
@@ -845,6 +987,7 @@ test('W2 准备记录固定到任务，packages 按包 ID 核对 role/agent/chan
   // 目标变化时，当前准备记录被改成不齐：task-update 拒绝，状态保持原目标。
   const session = (await readState(f.directory)).sessions[sessionKey(f.projectId, f.sessionId)];
   const current = session.preparation;
+  await advisorConsult(f);
   const pending = await emit(f, {
     action: 'prepare',
     preparation: {
@@ -1042,6 +1185,7 @@ test('R2 task-update 准备更新可新增包/换选择，保留旧包并记录 
   const blocked = await emit(f, { action: 'task-update', goal: '扩大目标' });
   assert.equal(blocked.result.reason, 'PREPARATION');
   assert.deepEqual(blocked.result.missing, ['preparation:update']);
+  await advisorConsult(f, { taskId: f.taskId });
   // 同一信号提供完整准备更新：接受并保留 W1，新增 W2。
   const applied = await emit(f, {
     action: 'task-update', goal: '扩大目标', preparation: updated, preparationReason: '用户确认新增 W2 并扩大目标',
@@ -1146,10 +1290,32 @@ test('R2 简单任务允许审查与只读诊断包，实施 worker 必须显式
     confirmation: { scope: ['实施包'], basis: '用户确认升级' },
     pending: [], source: { path: 'docs/plans/upgrade.md', sections: ['实施'] },
   };
+  await advisorConsult(f, { taskId: f.taskId });
   const upgrade = await emit(f, { action: 'task-update', preparation, preparationReason: '用户确认从简单任务升级为复杂绑定' });
   assert.equal(upgrade.result.accepted, true, JSON.stringify(upgrade.result));
   const retried = await emit(f, { action: 'packages', packages: [{ packageId: 'W1', role: 'worker', status: 'dispatched', agent: 'Claude Code', channel: 'builtin:general-purpose', scope: 'README.md' }] });
   assert.equal(retried.result.accepted, true, JSON.stringify(retried.result));
+});
+test('W2 诊断包委派按定义文件工具判断只读，写入定义被拒', async () => {
+  const f = await fixture();
+  const agentDir = path.join(f.project, '.claude', 'agents');
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(path.join(agentDir, 'diagnose-reader.md'), '---\nname: diagnose-reader\ntools: Read, Grep\n---\n');
+  await writeFile(path.join(agentDir, 'diagnose-writer.md'), '---\nname: diagnose-writer\ntools: Read, Edit\n---\n');
+  await emit(f, { action: 'task-start', goal: '诊断核对', route: 'lead-direct', size: 'simple', sizeReason: '只读核对', permissions: { mode: 'write', allowedPaths: ['README.md'] } });
+  const packages = await emit(f, {
+    action: 'packages',
+    packages: [{
+      packageId: 'D1', role: 'worker', status: 'dispatched', agent: 'Claude Code', channel: 'builtin:', scope: 'README.md',
+      diagnostic: { purpose: '核对', scope: ['README.md'], reason: '只读核对' },
+    }],
+  });
+  assert.equal(packages.result.accepted, true, JSON.stringify(packages.result));
+  const allowed = await pre(f, 'Agent', { subagent_type: 'diagnose-reader', description: 'workflow-package:D1 核对', prompt: '核对' });
+  assert.deepEqual(allowed, {});
+  const denied = await pre(f, 'Agent', { subagent_type: 'diagnose-writer', description: 'workflow-package:D1 核对', prompt: '核对' });
+  assert.equal(denied.hookSpecificOutput?.permissionDecision, 'deny', JSON.stringify(denied));
+  assert.match(denied.hookSpecificOutput.permissionDecisionReason, /只读诊断包/);
 });
 
 // W1：Herdr TUI/GUI 委派只从 Bash/PowerShell 单条直接调用识别，Agent 来源按入口区分。

@@ -1,6 +1,6 @@
 # workflow 通用定位、开工前流程与交付闭环改造计划
 
-状态：W1–W3 实施、独立审查及 Lead 必要集成验证已完成；提交与远端同步状态以本分支 Git 历史为准；详细结果见 `docs/acceptance.md` 第 12 节。W3 已提交 `855901f`，提交后 spec 检查无漂移；完整 verify 的 check/test 通过，demo 旧声明已定向修复并经独立复核及 check/demo 复验通过。以下历史进度以本段和第 12 节集成记录为准。W3 已实施；R3 首审五项 NEEDS_FIX 已全部定向修复，后续两处文档修订已闭合，最终独立复审 PASS（Codex child279，任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`）。**当前基线：W1 已提交 `c49ed52` 且 R1 最终复审 PASS；W2 已提交 `1c48799` 且 R2 最终独立复核 PASS（Codex child273，任务 `d9b690e9-2447-4c24-8615-8575fb20c634`）。** W3 已完成需求验收矩阵、覆盖缺项、阶段交付状态、Reviewer 双结论和接续文档；W3 已提交 `855901f`，定向测试、提交后 spec 检查、全量测试及必要集成复验通过；远端同步以 Git 状态为准，完整结果见验收第 12 节。用户已明确以 Claude Code 为主要强制准备入口；Codex 继续独立 Reviewer，Codex 原生 Windows 隔离失败不再阻塞 Claude 路径。以下各轮 R2 首审/复审历史段保留为历史证据，当前状态以本段和 W3 进度为准。Claude Code 2.1.316 的收紧配置在所列工具/入口取得实际拒绝事件；真实 MCP、NotebookEdit、Windows 文件符号链接及 Codex/Codeg ACP 仍未验，不能写成 OS 隔离或全入口覆盖。此前“仅制定计划、尚未授权实施”是 2026-11-01 用户授权前的历史状态，现已失效。
+状态：W1–W3 实施、独立审查及 Lead 必要集成验证已完成；提交与远端同步状态以本分支 Git 历史为准；详细结果见 `docs/acceptance.md` 第 12 节。W3 已提交 `855901f`，提交后 spec 检查无漂移；完整 verify 的 check/test 通过，demo 旧声明已定向修复并经独立复核及 check/demo 复验通过。以下历史进度以本段和第 12 节集成记录为准。W3 已实施；R3 首审五项 NEEDS_FIX 已全部定向修复，后续两处文档修订已闭合，最终独立复审 PASS（Codex child279，任务 `session-2`）。**当前基线：W1 已提交 `c49ed52` 且 R1 最终复审 PASS；W2 已提交 `1c48799` 且 R2 最终独立复核 PASS（Codex child273，任务 `session-4`）。** W3 已完成需求验收矩阵、覆盖缺项、阶段交付状态、Reviewer 双结论和接续文档；W3 已提交 `855901f`，定向测试、提交后 spec 检查、全量测试及必要集成复验通过；远端同步以 Git 状态为准，完整结果见验收第 12 节。用户已明确以 Claude Code 为主要强制准备入口；Codex 继续独立 Reviewer，Codex 原生 Windows 隔离失败不再阻塞 Claude 路径。以下各轮 R2 首审/复审历史段保留为历史证据，当前状态以本段和 W3 进度为准。Claude Code 2.1.316 的收紧配置在所列工具/入口取得实际拒绝事件；真实 MCP、NotebookEdit、Windows 文件符号链接及 Codex/Codeg ACP 仍未验，不能写成 OS 隔离或全入口覆盖。此前“仅制定计划、尚未授权实施”是 2026-11-01 用户授权前的历史状态，现已失效。
 
 日期：2026-11-01。实施前基线：0.8.1。前序核对确认实施前 HEAD 与 `v0.8.1` 标签文件内容相同；当前已包含 W1 提交 `c49ed52` 和 W2 提交 `1c48799`。本文件记录本轮讨论形成的需求、建议方案和实施安排；W1 覆盖准备资料的保存与恢复且 R1 最终复审 PASS；W2 覆盖准备绑定、逐包核对和两宿主真实 `PreToolUse` 拒绝且 R2 child273 PASS；W3 已实现需求验收矩阵、覆盖缺项、阶段交付状态和接续文档；R3 首审五项 NEEDS_FIX 和两处文档问题均已修复，最终独立复审 child279 PASS。此状态不表示整项改造完成或所有入口已覆盖；A01–A21 的最终证据与未验边界见 `docs/acceptance.md` 第 11 节，首轮/第二轮 R2 记录是历史证据。
 
@@ -336,7 +336,7 @@ Agent：Claude Code。独立审查：R1，Agent：Codex。
 
 **必要验证：** 缺 Agent 或缺实际调用通道的计划返回具体缺项；逐包选择不同仍准确保留；旧版普通 Markdown 可由 Lead 整理后绑定；换状态目录不重问；准备资料可以写入且不误称已经派工。归一化测试使用实际不同的需求、Agent 和通道输入，避免仅验证序列化自身一致。
 
-**W1 进度（2026-11-01，R1 通过后）：** W1 已实施并完成定向自测；R1 首审给出 NEEDS_FIX，首轮四项和第二轮三项定向返修完成；R1 最终独立复审 PASS（Codex child259，任务 f0e3c351-b81e-4060-b178-11f482e64796，72 项定向测试和 check 通过）；随后提交 `c49ed52`。
+**W1 进度（2026-11-01，R1 通过后）：** W1 已实施并完成定向自测；R1 首审给出 NEEDS_FIX，首轮四项和第二轮三项定向返修完成；R1 最终独立复审 PASS（Codex child259，任务 session-5，72 项定向测试和 check 通过）；随后提交 `c49ed52`。
 
 - 实现：新增 `src/preparation.mjs`，集中归一化准备记录、计算项目内计划来源的内容摘要、按字段返回缺项；`prepare` 作为会话级信号保存，不创建 task-start 任务、工作包或账本，也不改变 `phase`。`src/context.mjs` 只向 Lead 返回准备步骤、缺项、来源和“已保存不等于已派工”的提示；记录随回合保留，可在另一份空白状态按同一 Markdown 和稳定的逐包安排恢复。第二轮返修补齐逐包实际调用通道缺项：复杂任务每个包缺 `channel` 时返回 `package:ID:channel`，规范化记录和入口摘要保留该通道；程序不猜默认通道。
 - 文档：新增 `docs/references/preparation.md`、`docs/adapters/codex.md`，改写 `docs/adapters/codeg.md` 为可选接入；同步 `docs/workflow.md`、`docs/roles/lead.md`、`docs/references/spec-plan.md`、`docs/references/delegation.md`、`docs/roles/worker.md`、`docs/roles/reviewer.md`、`README.md`、`README.en.md`、`docs/usage.md`，纠正“已有通道无条件沿用”的旧表述。第二轮返修把“只交付纯技术方案按用户范围停在方案”同步到 Lead 入口、计划交付、计划模式/Stop 提示和 README；把通道偏离拒绝限定为当前协议可检测的情况：任务已声明该角色通道而包通道不同，或 delegated 任务 worker 包改由 Lead 实施；同角色各包不同通道时省略角色键，逐包核对留 W2。`docs/design/protocol.md`、`docs/design/drift-governance.md` 中与 Stop/通道描述直接相关的段落也已同步。
@@ -419,7 +419,7 @@ Agent：Claude Code。独立审查：R1，Agent：Codex。
 - 真实宿主（2026-11-01，隔离临时项目/状态/用户配置，凭据只读复制后删除；未改真实配置或信任）：Claude Code 2.1.316 实测普通读取放行、计划 Markdown 写入放行、业务 `Write` 拒绝且文件不变、未准备直接 `task-start` 拒绝且无任务、简单任务声明后建立并 `task-end` 接受、`Agent(general-purpose)` 拒绝、`Agent(Explore)` 放行并实际 `Grep`。Codex 0.166.0 实测 `apply_patch` 业务写入拒绝且文件不变、`collaborationspawn_agent` 拒绝、未准备直接 `task-start` 拒绝且无任务；隔离 `CODEX_HOME` 的 trusted_hash 取自 `hooks/list` `currentHash`，未用绕过 hook 信任旗标。`codex exec` 默认把 `permission_mode` 报为 `bypassPermissions`，不是本轮传入的旗标；该轮宿主沙箱为 read-only，`exec_command` 读和 `apply_patch` 写计划在 hook 外被拒绝，故 Codex 的 allow 分支只有合成测试证据。第 5.4 节复测进一步发现：`elevated` 自定义权限下计划写入可以成功、工作根外读取仍被拒绝，所测 `unelevated` 配置又允许改业务；这是不同配置和入口的新观察，不能反证先前实验，以 10.5 节的分项条件理解。去敏样本与完整边界见 `docs/acceptance.md` 第 10 节及两宿主适配页。
 - 未覆盖：任意 `Bash`/`exec_command`/PowerShell 写文件不做命令解析，只拦本插件直接 `signal`；Codex `write_stdin`、命令启动后的外部进程写入不触发 `PreToolUse`；子代理只按父会话任务/准备状态检查，不单独证明工作包范围所有权，且子代理内部写入的父会话检查只有合成测试；`scope` 是文本声明不是路径沙箱；真实 Codeg ACP 未运行，Codeg MCP 是否转发 `PreToolUse` 未验证；Windows `PowerShell`/`pwsh` 类型只有合成测试，真实命令入口覆盖 Claude `Bash` 与 Codex `exec_command`；`PreToolUse` 热路径不重复校验发布副本完整性；直连协议只有已有旧任务续接保留无准备兼容，新任务不再进入该路径。这些不能写成已覆盖。
 
-**历史：R2 首轮独立审查（2026-11-01）：NEEDS_FIX。** Reviewer 为 Codex child261，委派任务 `641457e6-fc1a-4145-8d5a-3a3bd991d561`。只读静态审查，复用已有测试与宿主证据，未运行全量或新增宿主探针。以下是当前阻塞；前述 W2 自测通过不能抵扣这些问题。
+**历史：R2 首轮独立审查（2026-11-01）：NEEDS_FIX。** Reviewer 为 Codex child261，委派任务 `session-6`。只读静态审查，复用已有测试与宿主证据，未运行全量或新增宿主探针。以下是当前阻塞；前述 W2 自测通过不能抵扣这些问题。
 
 | 严重度 | 发现及实际影响 | 修复或决策状态 |
 | --- | --- | --- |
@@ -495,7 +495,7 @@ Agent：Claude Code。独立审查：R1，Agent：Codex。
 
 **W2 窄范围补证（2026-11-01，承接 R2 child271）：** R2 child271 复核第三批五项代码，未发现新产品缺陷，只指出 `test/signal.test.mjs` 缺空白状态真实 CLI `prepare`→`task-start`→`packages` 全链正例、未开工带 `workflow-package` 标记的 Explore 拒绝断言，以及两处文档口径待补。本轮在 `test/signal.test.mjs` 增加真实 CLI→Post 全链正例（断言准备快照保留、W1 正确登记、任务非旧夹具建立），在 `test/hooks.test.mjs` 增加未开工标记 Explore 拒绝与无标记 Explore 放行断言；`docs/usage.md` 明确未开工更新 `prepare`、已开工用 `task-update` 更新绑定快照；本文件冲突列表改为历史/已修复口径。产品代码未改。定向 `node --test test/signal.test.mjs test/hooks.test.mjs`：70 项通过、0 失败、0 跳过。
 
-**R2 最终独立复核（2026-11-01）：PASS。** Codex child273（任务 `d9b690e9-2447-4c24-8615-8575fb20c634`）确认空白状态真实 CLI→合成 PostToolUse→实际 hook 的三步正例足以补齐普通 CLI 链路缺口，未开工 Explore 标记断言与两处文档已补齐，可推进 W3。复核只读，复用 70 项定向通过和此前全量结果；真实宿主与未验入口仍按 10.7/10.8 范围理解。
+**R2 最终独立复核（2026-11-01）：PASS。** Codex child273（任务 `session-4`）确认空白状态真实 CLI→合成 PostToolUse→实际 hook 的三步正例足以补齐普通 CLI 链路缺口，未开工 Explore 标记断言与两处文档已补齐，可推进 W3。复核只读，复用 70 项定向通过和此前全量结果；真实宿主与未验入口仍按 10.7/10.8 范围理解。
 
 **文档与代码冲突（历史记录：以下均为首轮/第二轮发现，已按最终代码修正；当前无新增未修正冲突）：**
 - 已修复（历史）：`docs/usage.md` 的 delegated 快速开始原先缺 `prepare`，审查包示例缺 `--package-agent`/`--scope`；task-update 示例仍只展示 goal/mode/paths，未说明 `preparationTarget`/`preparationRemove`；operation-only、诊断包、委派 schema 和计划真实路径边界曾是旧口径。
@@ -539,7 +539,7 @@ Agent：Claude Code。独立审查：R1，Agent：Codex。
 - 文档：新增 `.spec/preparation/spec.md`，同步 `.spec/task-protocol/spec.md`；更新 `docs/roles/reviewer.md`（需求验收与工程规范分开，默认一个独立 Reviewer）、`validation.md`、`reports.md`、`delegation.md`、`spec-plan.md`、`preparation.md`、`usage.md`、`design/protocol.md`、`examples/preparation-and-resume/README.md`、中英文 README；`docs/acceptance.md` 新增第 11 节，按 A01–A21 记录已验证/人工待验/受阻/经用户同意后延的实际证据与下一步。`install-onboard` 无实际注册变化；因 `entry.hostTool` 新增宿主事件形状归一，补一条目标说明。学习规则未改，仅补 `PreToolUse` 门禁不影响学习行为的边界，避免 spec 漂移门禁把 W2 的 `hooks.mjs`/CLI 改动误报为未同步。
 - 定向验证：`node --test test/preparation.test.mjs test/gate.test.mjs test/r2-regressions.test.mjs` 73 项通过；随后定向复跑 preparation/protocol/signal/context/task-update/hooks/adapters/claude/gate/install/entry 等受影响测试并保留完整输出。Lead 已执行完整 `npm run verify` 及失败项定向复验，结果见验收第 12 节。
 - 未验边界：真实 MCP、NotebookEdit、Windows 文件符号链接、Codex/Codeg ACP 仍未测；A01、A02、A04、A05、A09、A14、A15、A17、A19、A21 等协作体验为人工待验；A08 资料恢复已由独立状态目录测试验证，真实换机仅作可选补充；A19 的原生入口与独立状态资料复用已按 10.7/10.8 和准备/接续测试记录部分证据，真实换用另一套管理软件后的项目复用仍待验，只有 Herdr 本体安装、配置、专用接入和实测单列范围外，不把整项 A19 延期；A20 真实 Codeg 回归受阻。不能用程序测试或“记录齐全”写成全部验收通过。
-- R3 历史：首审五项 NEEDS_FIX 已全部定向修复；child277 复审确认代码部分通过，提出 A09 证据分类及 README 豁免口径两项文档问题。修订后 child279 最终独立复审 PASS（任务 `c3c1fafe-2f0c-4258-919a-cd5caa8f81c5`）；复用已有测试与 child277 代码核验，未复测宿主。W3 已提交 `855901f`；spec 检查无漂移；完整 verify 的 check/test 通过（430 项、427 通过、3 跳过），demo 首次失败后以简单声明修正，child281 复核 PASS、check/demo 定向复验通过，远端同步以 Git 状态为准。详细失败与复验保留于验收第 12 节。
+- R3 历史：首审五项 NEEDS_FIX 已全部定向修复；child277 复审确认代码部分通过，提出 A09 证据分类及 README 豁免口径两项文档问题。修订后 child279 最终独立复审 PASS（任务 `session-2`）；复用已有测试与 child277 代码核验，未复测宿主。W3 已提交 `855901f`；spec 检查无漂移；完整 verify 的 check/test 通过（430 项、427 通过、3 跳过），demo 首次失败后以简单声明修正，child281 复核 PASS、check/demo 定向复验通过，远端同步以 Git 状态为准。详细失败与复验保留于验收第 12 节。
 
 **R3 重点：** 是否重复已有 spec 审查；是否把记录齐全当真实性证明；是否新增无必要的全测和角色；未完成事项是否只留在聊天或另一台机器的临时路径里。
 
@@ -617,7 +617,7 @@ Lead 负责当前计划确认、用户选择传递、所有权交接、集成和
 
 ### 9.2 当前状态与后续条件
 
-- W1 已提交 `c49ed52`，R1 PASS（Codex child259，任务 f0e3c351-b81e-4060-b178-11f482e64796）。W2 已提交 `1c48799`，R2 child273 PASS（任务 d9b690e9-2447-4c24-8615-8575fb20c634）；Claude v2 严格权限与真实 hook 的联合最小验证通过。W3 已实现整项验收矩阵、覆盖缺项、阶段交付和接续文档；R3 首审五项 NEEDS_FIX 与两处文档问题已修，最终独立复审 child279 PASS；真实 MCP、文件符号链接、NotebookEdit、Codex/Codeg ACP 实机仍未测。
+- W1 已提交 `c49ed52`，R1 PASS（Codex child259，任务 session-5）。W2 已提交 `1c48799`，R2 child273 PASS（任务 session-4）；Claude v2 严格权限与真实 hook 的联合最小验证通过。W3 已实现整项验收矩阵、覆盖缺项、阶段交付和接续文档；R3 首审五项 NEEDS_FIX 与两处文档问题已修，最终独立复审 child279 PASS；真实 MCP、文件符号链接、NotebookEdit、Codex/Codeg ACP 实机仍未测。
 - 执行顺序为 W1 → R1 → W2 → R2 → W3 → R3。所有 Worker 使用 Claude Code，所有 Reviewer 使用 Codex，已写入第 7.1 节。
 - 历史状态：本文件最初仅制定计划，用户尚未要求实施；指定 Agent 不等于授权开始工作。用户在 2026-11-01 明确授权按本计划实施到提交推送后，W1 已启动；主协调负责后续审查、提交和推送，W1 不提交、不推送。保留此说明以免旧状态与当前进度混淆。
 - 统一版本和接入方式的建议已写入第 5.7、5.8 节。Herdr 实际安装、配置、专用接入和真实验收不包含在本轮实施包中；后续需要使用时另列接入任务。本计划完成不等于 Herdr 已接入。
