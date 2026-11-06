@@ -2,6 +2,8 @@
 
 本文件记录代码、隔离自动化验证、真实环境验收与交付结果。真实宿主接入、模型调用、Windows 定时运行与实际项目试点按各节证据分别记录，未执行的项目不视为通过；需要补验时可在当前可用环境进行，不要求另找一台电脑。项目资料可携带和恢复不以真实换机验收为交付前提。
 
+> **当前产品范围：** Claude Code 是默认宿主与 Lead；Herdr TUI 已真机验证，Herdr GUI 与 Cindy 待真机适配。文中较早的 Codex 章节是历史证据，不表示当前仍受支持，也不代表相关代码已删除。
+
 ## 1. 拉取与准备
 
 在 workflow 仓库执行，已有改动先保留，拉取冲突不要强制覆盖：
@@ -13,7 +15,7 @@ node --test test/*.test.mjs
 node scripts/check-package.mjs
 ```
 
-需要 Windows、Node.js 24+，以及已配置并能使用目标模型的 Codex CLI。前台可以用 Codex 或 Claude Code。确认目标电脑执行器的 `codex exec --help`、`codex features list`；支持性以 `learning doctor` 的实测结果为准。
+需要 Windows、Node.js 24+，以及已配置并能使用目标模型的 Claude Code CLI。确认目标电脑执行器的可用性；支持性以 `learning doctor` 的实测结果为准。
 
 ## 2. 安装与选择一个试点项目
 
@@ -22,8 +24,8 @@ node scripts/check-package.mjs
 ```powershell
 $workflowState = Join-Path $env:LOCALAPPDATA 'workflow'
 $pilotRoot = 'D:/待试点项目'
-node bin/workflow.mjs install --agent codex --state-dir $workflowState
-node bin/workflow.mjs doctor --agent codex --state-dir $workflowState
+node bin/workflow.mjs install --agent claude --state-dir $workflowState
+node bin/workflow.mjs doctor --agent claude --state-dir $workflowState
 node bin/workflow.mjs project enable --root $pilotRoot --state-dir $workflowState
 ```
 

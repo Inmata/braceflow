@@ -1,8 +1,10 @@
-# Cindy 适配（可选）
+# Cindy 适配（待真机适配）
 
-Cindy 是运行 Agent 的一种桌面软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收独立于 Cindy；不使用 Cindy 时按 [Codex 适配](codex.md)、[Claude Code 适配](claude.md)、[Codeg 适配](codeg.md)或 [Herdr 适配](herdr.md)接入。
+Cindy 是运行 Agent 的一种桌面软件，不是 workflow 的使用前提。公共规则、项目计划、工作包、审查和验收独立于 Cindy；不使用 Cindy 时按 [Claude Code 适配](claude.md)、[Codeg 适配](codeg.md)或 [Herdr 适配](herdr.md)接入。
 
-Cindy 同时可以托管 Claude 与 Codex 两种宿主，委派入口、通道写法和等待方式相同；差异只在宿主自己的 hook 注册位置。识别代码集中在 `src/adapters/cindy.mjs`，公共 hook 只消费适配结果。
+> **当前状态：待真机适配。** 本页记录已有识别代码和合成验证，不表示 Cindy 已对外可用。
+
+Cindy 可以托管 Claude 宿主，委派入口、通道写法和等待方式独立于宿主 hooks。识别代码集中在 `src/adapters/cindy.mjs`，公共 hook 只消费适配结果。
 
 ## 两条委派入口
 
@@ -53,12 +55,12 @@ Cindy 的宿主注入文本以 `[Task delivery] Host bookkeeping` 开头时，�
 
 ## 已知边界与待实测项
 
-- **code_mode_only**：Cindy 的 Codex 启用 `code_mode_only`，嵌套 MCP 调用是否经过外层 PreToolUse 尚未验证。本适配的合成工具输入测试只证明解析和包核对逻辑；不能证明真实 Codex 会话里每次嵌套调用都会被 hook 看到。
-- **hooks 注册位置**：Cindy 的 Codex 使用独立 `CODEX_HOME`（如 `Roaming\Cindy\codex-home`）；默认 `~/.codex` 的安装不代表 Cindy 目录已注册。安装时须显式传 `--user-dir`，见[安装文档](../usage.md)。
+- **code_mode_only**：Cindy 的 Codex 模式启用 `code_mode_only`，嵌套 MCP 调用是否经过外层 PreToolUse 尚未验证。本适配的合成工具输入测试只证明解析和包核对逻辑；不能证明真实 Codex 会话里每次嵌套调用都会被 hook 看到。
+- **hooks 注册位置**：Cindy 的 Codex 模式使用独立 `CODEX_HOME`（如 `Roaming\Cindy\codex-home`）；当前不支持该安装路径，Claude 宿主的 hooks 注册位置仍需真机核对。
 - **Agent 映射**：Orca `agent` 当前枚举为 `claude-code`、`codex`、`pi`；通道尾部必须用同一原值。其他名称无法证明执行者，保守拒绝。
 - **回报格式**：Session task / Orca 回报文本未取得，宿主消息表目前只含 `[Task delivery] Host bookkeeping`。
 - **提醒式门禁，不是沙箱**：只核对上述工具结构与包标记；用户自写脚本、其他 MCP 工具或包装层可以绕过，宿主自己的权限/审批仍是实际边界。
-- 人工验收（M3/M4）：在 Cindy 打开本仓 Claude 会话，确认 workflow 入口出现；未开工时请它 `start_session_task` 应被拒；开工后带包标记派 Session task 应被拒并提示 Orca；经 Orca `create_worker` 带包标记且 Agent 与准备记录一致时放行，并记录回报原文开头。Codex 侧按 M4 安装后确认入口与重启/切换账号后的 `hooks.json` 保留情况。
+- 人工验收（M3/M4）：在 Cindy 打开本仓 Claude 会话，确认 workflow 入口出现；未开工时请它 `start_session_task` 应被拒；开工后带包标记派 Session task 应被拒并提示 Orca；经 Orca `create_worker` 带包标记且 Agent 与准备记录一致时放行，并记录回报原文开头。Codex 侧的旧验收记录只作历史证据。
 
 ## 验证
 

@@ -1,12 +1,12 @@
 {
   "name": "personal-workflow",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "跨智能体项目协作、持久经验采集与受限后台知识维护",
   "license": "MIT",
   "type": "module",
   "private": true,
   "engines": { "node": ">=24" },
-  "bin": { "workflow": "bin/workflow.mjs" },
+  "bin": { "workflow": "bin/workflow.mjs", "braceflow": "bin/workflow.mjs" },
   "scripts": {
     "test": "node --test test/*.test.mjs",
     "check": "node scripts/check-package.mjs",
@@ -14,5 +14,5 @@
     "eval": "node scripts/eval/run.mjs",
     "verify": "node scripts/verify.mjs"
   },
-  "files": ["bin", "src", "hooks", "agents", ".codex-plugin", "docs/workflow.md", "docs/alignment.md", "docs/roles", "docs/references", "docs/adapters", "docs/usage.md", "docs/design/protocol.md", "docs/learning.md", "docs/background-review.md", "docs/acceptance.md", "examples", "package.json", "plugin.json", "workflow-gate.example.json", "README.md", "README.en.md"]
+  "files": ["bin", "src", "hooks", "agents", "skills", ".codex-plugin", "docs/workflow.md", "docs/alignment.md", "docs/roles", "docs/references", "docs/adapters", "docs/usage.md", "docs/design/protocol.md", "docs/learning.md", "docs/background-review.md", "docs/acceptance.md", "docs/designer.md", "docs/releases.md", "examples", "package.json", "plugin.json", "workflow-gate.example.json", "README.md", "README.en.md"]
 }

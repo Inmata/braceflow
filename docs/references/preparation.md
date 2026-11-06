@@ -79,7 +79,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
     },
     "packages": [
       { "packageId": "W1", "role": "worker", "agent": "Claude Code", "channel": "builtin:agent", "scope": "实现准备记录", "delivers": "准备结果可保存并可从计划恢复", "dependsOn": [], "verification": "定向测试" },
-      { "packageId": "R1", "role": "reviewer", "agent": "Codex", "channel": "codeg:codex", "scope": "独立审查 W1", "delivers": "对 W1 的独立审查结论", "dependsOn": ["W1"] }
+      { "packageId": "R1", "role": "reviewer", "agent": "Claude Code", "channel": "builtin:general-purpose", "scope": "独立审查 W1", "delivers": "对 W1 的独立审查结论", "dependsOn": ["W1"] }
     ],
     "verification": ["node --test test/preparation.test.mjs"],
     "confirmation": {

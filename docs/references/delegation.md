@@ -12,7 +12,7 @@ Lead 派发 Worker/Reviewer 时读本页；简单任务不需要，复杂 `lead-
    node "<入口>" signal task-start --session <sessionId> --turn <turnId> --id start-1 --task <taskId> --route delegated --goal "..." --mode write --paths src/a.mjs
    node "<入口>" signal packages --session <sessionId> --turn <turnId> --id pkg-w1 --package w1 --role worker --status dispatched --package-agent "Claude Code" --channel codeg:claude_code --scope "src/a.mjs" --handle <委派ID>
    node "<入口>" signal packages --session <sessionId> --turn <turnId> --id pkg-w1-done --package w1 --status consumed --ref <交付提交>
-   node "<入口>" signal packages --session <sessionId> --turn <turnId> --id pkg-r1 --package r1 --role reviewer --status dispatched --package-agent "Codex" --channel codeg:codex --scope "独立审查 w1" --handle <委派ID> --reviews w1
+   node "<入口>" signal packages --session <sessionId> --turn <turnId> --id pkg-r1 --package r1 --role reviewer --status dispatched --package-agent "Claude Code" --channel builtin:general-purpose --scope "独立审查 w1" --handle <委派ID> --reviews w1
    node "<入口>" signal packages --session <sessionId> --turn <turnId> --id pkg-r1-done --package r1 --status consumed --verdict PASS --ref <被审提交>
    ```
 

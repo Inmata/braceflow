@@ -34,7 +34,7 @@
 | 包 | 角色 | 范围 | 完成后可验证的行为 | 依赖 | Agent | 实际通道 |
 | --- | --- | --- | --- | --- | --- | --- |
 | W1 | Worker | 登录请求超时与取消 | 取消后旧响应不覆盖新结果，正常登录仍成功 | 无 | Claude Code | `builtin:agent` |
-| R1 | Reviewer | 独立审查 W1 | 对 W1 最终交付的审查结论 | W1 | Codex | `codeg:codex` |
+| R1 | Reviewer | 独立审查 W1 | 对 W1 最终交付的审查结论 | W1 | Claude Code | `builtin:general-purpose` |
 
 示例中的 Agent 和通道只是这一次的用户选择，不是角色默认值；以后重新分包要重新确认。用户只指定 Agent 而当前工具通道唯一时，由 Lead 按可用工具填写通道，不要求用户另一次确认，也不把 Codeg 写成固定入口。
 

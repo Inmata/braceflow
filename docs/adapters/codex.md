@@ -1,6 +1,8 @@
-# Codex 适配
+# Codex 适配（保留实现，当前不支持）
 
-Codex 可以作为 Lead、Worker 或 Reviewer，使用与其他智能体相同的[公共方法](../workflow.md)和角色指引。本页说明 Codex 原生 hooks、回合字段和本机已核实的工具能力。用 Codeg 或其他管理软件运行 Codex 时，再阅读对应软件的可选适配；Codeg 的 ACP 内嵌版本可能与本机 Codex CLI 不同。
+> **当前状态：不作为 workflow 的宿主、Lead、Worker 或 Reviewer 适配。** 本页和对应实现为历史资料，保留供以后恢复适配；不要按本页配置当前产品。Codex 目前只能在用户主动选择时，作为[外部 Designer](../designer.md)使用 `workflow-designer` 参与 plan。
+
+Codex 适配代码仍保留在仓库中，使用与其他智能体相同的[公共方法](../workflow.md)和角色指引。本页说明历史 Codex 原生 hooks、回合字段和本机已核实的工具能力。用 Codeg 或其他管理软件运行历史 Codex 会话时，再阅读对应软件的可选适配。
 
 ## 安装
 

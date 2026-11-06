@@ -2,43 +2,28 @@
 
 ## 使用
 
-运行环境为 Windows、Node.js 24+，自动 hooks 已适配 Claude Code 与 Codex。Lead、Worker、Reviewer 按[公共方法](workflow.md)分配，均不绑定客户端或模型；Codeg 等产品是可选的管理软件，通过被管理 Agent 的 hooks 工作，不替代宿主接入。其他智能体通过实际可用的委派工具协作，原生 hooks 支持范围见 [README](../README.md#角色与接入支持)。运行时无第三方依赖，无常驻服务，不新增付费模型调用，不要求日常手动调用技能。
+运行环境为 Windows、Node.js 24+，自动 hooks 已适配 Claude Code。Claude Code 是默认宿主与 Lead，默认自己完成 plan、准备和后续协作；Lead、Worker、Reviewer 是职责名称，不绑定具体模型。外部 Designer 和 Herdr、Codeg 等入口都是可选项，支持范围见 [README](../README.md#当前支持范围)。运行时无第三方依赖，无常驻服务，不新增付费模型调用，不要求日常手动调用技能。
 
 开发验证在仓库根目录运行 `npm test`、`npm run check`、`npm run demo`。这些是源码仓库的自检命令，不属于安装后的产品能力；按改动选择检查、失败判定、组合入口和证据留存见[本仓维护的验证场景与命令](acceptance.md#8-本仓维护的验证场景与命令f10)。测试和 demo 使用系统临时目录下 `workflow-tests/` 中的隔离目录、本地 Git 远端和合成事件，不写入仓库，也不改真实全局配置。
 
 ### 安装与首次接入
 
-选择实际使用的宿主安装并检查：
+安装 Claude Code 适配并检查：
 
 ```powershell
-# Claude Code
 node bin/workflow.mjs install --agent claude
 node bin/workflow.mjs doctor --agent claude
-
-# Codex
-node bin/workflow.mjs install --agent codex
-node bin/workflow.mjs doctor --agent codex
 ```
 
-只用一个宿主时，只执行对应两条命令。Claude Code 写入 `~/.claude/settings.json`，Codex 写入 `~/.codex/hooks.json`；两个宿主分别安装、升级和 `uninstall`，可共用发布副本和状态目录。使用 Codeg 时仍按被管理的 Codex/Claude 安装对应宿主，Codeg 不替代 hooks；Codeg 专有操作见[可选适配](adapters/codeg.md)。
+Claude Code 写入 `~/.claude/settings.json`。使用 Codeg 管理 Claude Code 时，Codeg 不替代 hooks；专有操作见[可选适配](adapters/codeg.md)。Herdr TUI 和 Codeg 是可选运行入口，Herdr GUI 与 Cindy 仍待真机适配。
 
-Claude Code 安装还会把发布副本里的 `agents/workflow-explorer.md` 和 `agents/workflow-advisor.md` 写入 `<configDir>/agents/`，并按名字记录 `managed`、`user`、`deleted` 三种状态。无记录时，内容与发布一致的既有文件（包括用户事先放置、中断重试时已写入但账本尚未更新）认作 `managed`，内容不同则记为 `user`；`managed` 内容等于账本或本次发布即视为未改动并随发布更新，被改或不是普通文件时转为 `user`；`user` 的同名文件即使内容等于发布仍保持 `user`，重装不覆盖也不报冲突；`deleted` 表示用户删除过，重装不补回，文件重新出现时转为 `user`。`doctor --agent claude` 的 `agents` 段按同一口径只读判断，列出每个定义的状态和是否与发布默认不同，不改写账本：文件缺失记 `deleted`，被改或非普通文件记 `user`。卸载只移除内容仍等于账本记录的 `managed` 文件，其余保留并在回执列出。Codex 不写子代理定义。
+Claude Code 安装还会把发布副本里的 `agents/workflow-explorer.md` 和 `agents/workflow-advisor.md` 写入 `<configDir>/agents/`，并按名字记录 `managed`、`user`、`deleted` 三种状态。无记录时，内容与发布一致的既有文件（包括用户事先放置、中断重试时已写入但账本尚未更新）认作 `managed`，内容不同则记为 `user`；`managed` 内容等于账本或本次发布即视为未改动并随发布更新，被改或不是普通文件时转为 `user`；`user` 的同名文件即使内容等于发布仍保持 `user`，重装不覆盖也不报冲突；`deleted` 表示用户删除过，重装不补回，文件重新出现时转为 `user`。`doctor --agent claude` 的 `agents` 段按同一口径只读判断，列出每个定义的状态和是否与发布默认不同，不改写账本：文件缺失记 `deleted`，被改或非普通文件记 `user`。卸载只移除内容仍等于账本记录的 `managed` 文件，其余保留并在回执列出。Claude Code 不写子代理账本之外的宿主定义。
 
 只读子代理的豁免按定义文件的 `tools` 判断：`Explore`、`Plan`，以及 `tools` 全部属于 `Read`、`Grep`、`Glob`、`WebFetch`、`WebSearch` 的自定义子代理放行；名字本身不提供豁免，没有 `tools`、含 MCP 或其他工具、解析不到定义时都不放行。hook 先从项目 `.claude/agents/` 再用户级 `<configDir>/agents/` 解析；`CLAUDE_CONFIG_DIR` 未设置时用户级目录为 `~/.claude`。
 
-Codex 运行在独立的配置目录时（例如 Cindy 使用 `%APPDATA%\Cindy\codex-home`），由用户显式把该目录作为附加位置传入：`install --user-dir "$env:APPDATA\Cindy\codex-home"`。安装器不会自动扫描 `Roaming\Cindy`，也不修改 Cindy 的 `config.toml`。
+Codex 配置目录的相关实现仍保留在安装器中，供以后恢复适配，但当前产品不支持把 Codex 作为 workflow 宿主。不要按附加 `--user-dir` 路径安装当前版本；历史安装记录的撤销方式见 [Codex 适配](adapters/codex.md)。
 
-```powershell
-# 默认目录与附加 Codex 目录分别安装、检查、撤销
-node bin/workflow.mjs install --agent codex
-node bin/workflow.mjs install --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
-node bin/workflow.mjs doctor --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
-node bin/workflow.mjs uninstall --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
-```
-
-默认 Codex 配置位置（通常为 `~/.codex`）是权威记录，附加位置按规范化后的配置文件路径单独登记，第二条不会覆盖第一条；即使默认位置还没安装，显式传入的其他目录也只登记为附加位置，不会因为“先装”而抢占权威记录。各位置的 `hooks.json` 分别维护。`doctor --user-dir` 只报告该位置；不带 `--user-dir` 时顶层报告默认位置，并在 `locations` 中列出所有已登记位置及各自的 status/registration/integrity/version；默认位置未安装时顶层为 `not-installed`，附加位置仍会列在 `locations` 中。`uninstall --user-dir` 只撤销该位置自己登记的 handlers，其他位置、其他插件和用户新增配置保持不变；不带 `--user-dir` 时只撤销默认位置，不撤销附加位置，并在结果的 `locations`/`extras` 中列出仍登记的附加位置。同一目录的不同大小写或分隔符写法视为同一位置，不会重复登记。Cindy 升级或切换账号可能重建 `codex-home`，重建后 hooks 可能丢失：需对当前目录重新执行 `doctor`，按结果重新 `install`。多个 Codex 配置位置共用同一个 `current`，升级时建议对每个已登记位置都重新安装，避免某个位置仍登记旧快照而在 doctor 中显示 `integrity: unavailable`。
-
-然后接入项目，并在该目录用所选宿主打开新主会话，当前主会话承担 Lead：
+然后接入项目，并在该目录用 Claude Code 打开新主会话，当前主会话承担 Lead：
 
 ```powershell
 node bin/workflow.mjs project onboard --root "D:/某个已明确允许接入的项目"
@@ -48,13 +33,13 @@ node bin/workflow.mjs project onboard --root "D:/某个已明确允许接入的�
 
 插件给出的命令可直接粘贴到 Windows PowerShell 5.1 或 PowerShell 7：入口路径与含空格、单引号、`$`、反引号、分号或 `$(...)` 的参数都用单引号字面量书写，不会被展开执行。Windows PowerShell 5.1 调用原生程序时无法原样传递双引号和空参数，这类值以 `workflow-arg64:` 开头的标记书写，命令末尾同时带上 `--workflow-arg64-transport` 开关；CLI 只在看到该开关时还原标记，直接手写的同名 `workflow-arg64:` 普通文本按字面值接收。整条命令照原样粘贴即可，不要改写标记或删除开关。
 
-同一本机目录的绑定由两种宿主共用，切换已安装适配的宿主不必重新接入。同一项目可以同时开多个 Lead 会话，都能写共享资料；并发改同一文件时，后写的一方收到 `CONFLICT`，重读后再写。
+同一本机目录的绑定由已安装的 Claude Code 会话使用，不需要重复接入。同一项目可以同时开多个 Lead 会话，都能写共享资料；并发改同一文件时，后写的一方收到 `CONFLICT`，重读后再写。
 
-`install` 修改所选宿主的实际用户 hooks 注册，只在已决定安装时执行。安装生成带摘要的发布副本，并用固定入口 `current` 指向它；hook 命令只含 `current` 路径，升级时路径不变，宿主信任只需做一次。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指该链接，不重写宿主配置、不新建发布副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场，返回 `conflict` 与路径，不自动删除或接管。两个宿主及同一宿主的多个 Codex 配置目录共用一个 `current`，重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主或配置位置登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级。没有需要用户配置的运行时依赖。状态默认 `%LOCALAPPDATA%/workflow`；隔离试用为每条命令指定相同 `--state-dir`，安装另指定临时 `--user-dir`（直接指向宿主配置目录，如 `.codex` 或 `.claude`，不是用户根）。发布副本与公共资料固定同一版本，活动任务/prepared 事务导致升级延期，完成或明确结束后再安装。安装副本被用户改写时停止覆盖并报告差异。
+`install` 修改所选宿主的实际用户 hooks 注册，只在已决定安装时执行。安装生成带摘要的发布副本，并用固定入口 `current` 指向它；hook 命令只含 `current` 路径，升级时路径不变，宿主信任只需做一次。重复执行会核对 `current` 的实际目标：自有入口被删除、断链或错链时只重建或改指该链接，不重写宿主配置、不新建发布副本；`current` 被替换成用户自己的目录或指向安装目录外的链接时保留现场，返回 `conflict` 与路径，不自动删除或接管。两个已登记宿主及同一宿主的多个附加配置目录共用一个 `current`（Codex 相关路径为保留实现）；重复安装只修自己的入口：如果 `current` 已指向另一个已安装宿主或配置位置登记且完整的发布快照，不会改指，而是返回 `conflict` 并提示先统一升级。没有需要用户配置的运行时依赖。状态默认 `%LOCALAPPDATA%/workflow`；隔离试用为每条命令指定相同 `--state-dir`，安装另指定临时 `--user-dir`（直接指向宿主配置目录，如 `.claude`，不是用户根）。发布副本与公共资料固定同一版本，活动任务/prepared 事务导致升级延期，完成或明确结束后再安装。安装副本被用户改写时停止覆盖并报告差异。
 
 新副本先在状态根 `release-staging/` 中复制并核对完整性，完成后才切换到正式发布目录。复制失败或中断不改用户配置；残留暂存目录保留供核查，可直接重试安装，清理时使用系统回收站。
 
-安装只注册自有 handlers，保留已有插件和用户配置（Claude 侧保留 `settings.json` 的 `env`、`model` 等全部顶层配置）；不写信任记录。Codex 按 `hooks.json` 中分组的位置和内容记录信任，所以重装时自有分组留在原位置；其他插件（如 document-learning）重装若改变分组位置，Codex 会要求重新信任。使用当前宿主支持的 `/hooks` 审查定义，在新会话或新连接验证回调。doctor 分别报告 registration/discovery/trust/execution；配置存在不证明后面三项。回调记录也需结合真实宿主证据确认来源，不能用合成事件冒充。全局 Codex 版本不能代表 ACP 内嵌版本；Claude 侧的回合、中断和回执字段见[适配说明](adapters/claude.md)。
+安装只注册自有 handlers，保留已有插件和用户配置（Claude 侧保留 `settings.json` 的 `env`、`model` 等全部顶层配置）；不写信任记录。使用当前宿主支持的 `/hooks` 审查定义，在新会话或新连接验证回调。doctor 分别报告 registration/discovery/trust/execution；配置存在不证明后面三项。回调记录也需结合真实宿主证据确认来源，不能用合成事件冒充。Claude 侧的回合、中断和回执字段见[适配说明](adapters/claude.md)。
 
 接入写本机身份绑定和 AGENTS 短管理区，保留用户正文；不要求补齐 README/spec/计划、不创建空 LESSONS。AGENTS 不含机器安装绝对路径；每次 hook 给实际公共资料和 CLI 路径。资料采用其他命名时继续使用，不改名。非 Git 项目可接入。复制/移动/重 clone 的目录不会静默继承，需要重新明确接入。
 
@@ -101,7 +86,7 @@ node '<本次hook提供的bin/workflow.mjs>' signal prepare --session <sessionId
 node '<本次hook提供的bin/workflow.mjs>' signal task-start --session <sessionId> --turn <turnId> --id start-1 --task task-readme --route delegated --goal "本次已授权目标" --mode write --paths README.md,LESSONS.md
 node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-1 --package w1 --role worker --status dispatched --package-agent "Claude Code" --channel codeg:claude_code --scope "src/hooks.mjs" --handle <委派ID>
 node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-2 --package w1 --status consumed --ref <交付提交>
-node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-3 --package r1 --role reviewer --status dispatched --package-agent "Codex" --channel codeg:codex --scope "独立审查 w1" --handle <委派ID> --reviews w1
+node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-3 --package r1 --role reviewer --status dispatched --package-agent "Claude Code" --channel builtin:general-purpose --scope "独立审查 w1" --handle <委派ID> --reviews w1
 node '<本次hook提供的bin/workflow.mjs>' signal packages --session <sessionId> --turn <turnId> --id pkg-4 --package r1 --status consumed --verdict PASS --ref <被审提交>
 node '<本次hook提供的bin/workflow.mjs>' signal task-end --session <sessionId> --turn <turnId> --id end-1 --final-ref <交付提交> --evidence "npm test 250/250 通过" --evidence "npm run check 0 错误"
 ```
@@ -174,7 +159,7 @@ node "<入口>" signal prepare --session <sessionId> --turn <turnId> --id prep-1
 
 换会话、换电脑或换状态目录时，读取同一份计划重新提交同形记录即可恢复包、逐包 Agent 和实际调用通道；稳定包 ID、项目相对路径和代码基线是可携带依据，原会话 ID、票据和本机绝对路径不参与。计划只改进度或证据链接时，不取消已确认的需求、方案、Agent 和通道选择；原计划只写了 Agent 时，按新入口实际可用工具补 `channel`，不要求用户重选。
 
-当前实现边界：`prepare` 保存记录、来源摘要和缺项；新任务的 `task-start` 必须已有完整准备、带理由的简单声明或 `operation-only`，不再以 `preparation-unbound` 新建；只有已有旧任务续接保留兼容。`operation-only` 只用于例行操作/事务，不能声明 write、不能登记实施 worker 包，也不能在 `task-update` 中取得业务写权限；只读诊断包仍可登记。固定后的逐包 `role`/`agent`/`channel`/`scope` 是后续 `packages` 的核对依据。简单任务用 `--size simple --size-reason "<理由>"` 声明；空包快照只允许 reviewer 和带 `diagnostic` 的只读 worker 包，实施 worker 需用 `task-update` 显式升级为复杂准备绑定。两个已注册的宿主在 `PreToolUse` 拒绝未开工的业务写入、实施委派和本插件直接 `task-start`/`packages` 命令；普通读取、`docs/plans/` 下全部合规 Markdown（不要求已绑定）和 `prepare` 放行，当前 worktree 与 stateDir 之外、真实位于系统临时目录（`os.tmpdir()`）且无 symlink/junction 逃逸的路径也放行（仅 `Write`/`Edit`/`MultiEdit`/`NotebookEdit` 的路径参数）；被拦截的只读检索可改用不带 `workflow-package` 标记的只读子代理（`Explore`/`Plan` 或 `workflow-explorer`）。计划只接受 `docs/plans/` 下的 Markdown，路径链上任何 symlink/junction 都拒绝，且解析后的真实路径仍须在真实 `docs/plans/` 内；`.local`、任意后缀、业务文件和除上述符合条件的系统临时路径外的项目外目标不放行。活动任务的实际委派（worker 实施或 reviewer 审查）必须在输入中带 `workflow-package:<包ID>`（或 `packageId`），关联到已 dispatched 且角色匹配的包，并按该宿主工具 schema 核对 Agent/通道/任务/角色；无法关联或缺少必需字段时拒绝。Codeg `delegate_to_agent` 只要出现非空 `assistant_id` 就拒绝（包括同时给 `agent_type`），因为 workflow 没有可靠的 assistant→Agent 映射；Codeg 的 `codeg:<agent_type>` 通道编码实际 Agent，委派入口的 Agent 必须同时匹配准备记录 `agent` 和通道尾部，只匹配其中一个会被拒绝。不带包标记的只读子代理可不带包关联：内置 `Explore`/`Plan`，以及定义文件 `tools` 全为只读工具的自定义子代理（如 `workflow-explorer`）；一旦带 `workflow-package:<包ID>`，即使是只读子代理也必须按包核对状态、通道与 Agent。带 `diagnostic` 声明的工作包也只能派给这些只读子代理，不能借 general-purpose 或 Codeg 委派取得写入。声明范围不是沙箱：程序核对包、Agent、通道和声明字段，不解析 prompt 语义或验证路径。任意 shell 业务写入、Codex `write_stdin` 和命令启动后的外部写入不在 workflow 拦截范围内；Claude 主用路径由启动方严格权限配置兜底（见 [Claude 适配](adapters/claude.md)），Codex/Codeg ACP 未验。不能把“已保存草案”说成“准备完成”或“已获授权实施”。
+当前实现边界：`prepare` 保存记录、来源摘要和缺项；新任务的 `task-start` 必须已有完整准备、带理由的简单声明或 `operation-only`，不再以 `preparation-unbound` 新建；只有已有旧任务续接保留兼容。`operation-only` 只用于例行操作/事务，不能声明 write、不能登记实施 worker 包，也不能在 `task-update` 中取得业务写权限；只读诊断包仍可登记。固定后的逐包 `role`/`agent`/`channel`/`scope` 是后续 `packages` 的核对依据。简单任务用 `--size simple --size-reason "<理由>"` 声明；空包快照只允许 reviewer 和带 `diagnostic` 的只读 worker 包，实施 worker 需用 `task-update` 显式升级为复杂准备绑定。Claude Code 的 `PreToolUse` 拒绝未开工的业务写入、实施委派和本插件直接 `task-start`/`packages` 命令；普通读取、`docs/plans/` 下全部合规 Markdown（不要求已绑定）和 `prepare` 放行，当前 worktree 与 stateDir 之外、真实位于系统临时目录（`os.tmpdir()`）且无 symlink/junction 逃逸的路径也放行（仅 `Write`/`Edit`/`MultiEdit`/`NotebookEdit` 的路径参数）；被拦截的只读检索可改用不带 `workflow-package` 标记的只读子代理（`Explore`/`Plan` 或 `workflow-explorer`）。计划只接受 `docs/plans/` 下的 Markdown，路径链上任何 symlink/junction 都拒绝，且解析后的真实路径仍须在真实 `docs/plans/` 内；`.local`、任意后缀、业务文件和除上述符合条件的系统临时路径外的项目外目标不放行。活动任务的实际委派（worker 实施或 reviewer 审查）必须在输入中带 `workflow-package:<包ID>`（或 `packageId`），关联到已 dispatched 且角色匹配的包，并按该宿主工具 schema 核对 Agent/通道/任务/角色；无法关联或缺少必需字段时拒绝。Codeg `delegate_to_agent` 只要出现非空 `assistant_id` 就拒绝（包括同时给 `agent_type`），因为 workflow 没有可靠的 assistant→Agent 映射；Codeg 的 `codeg:<agent_type>` 通道编码实际 Agent，委派入口的 Agent 必须同时匹配准备记录 `agent` 和通道尾部，只匹配其中一个会被拒绝。不带包标记的只读子代理可不带包关联：内置 `Explore`/`Plan`，以及定义文件 `tools` 全为只读工具的自定义子代理（如 `workflow-explorer`）；一旦带 `workflow-package:<包ID>`，即使是只读子代理也必须按包核对状态、通道与 Agent。带 `diagnostic` 声明的工作包也只能派给这些只读子代理，不能借 general-purpose 或 Codeg 委派取得写入。声明范围不是沙箱：程序核对包、Agent、通道和声明字段，不解析 prompt 语义或验证路径。任意 shell 业务写入、命令启动后的外部写入不在 workflow 拦截范围内；Claude 主用路径由启动方严格权限配置兜底（见 [Claude 适配](adapters/claude.md)），Codex/Codeg ACP 未验。不能把“已保存草案”说成“准备完成”或“已获授权实施”。
 
 中断或 SessionEnd 将未完任务标为 suspended 并撤销票据，保留业务未完成记录；显式 task-start 才恢复。重发 task-start 接续沿用原 goal 与 permissions，回执带 `kept:{goal,permissions}` 和提示；本次附带的 goal/permissions 不生效。挂起任务不再以 active 永久挡住升级，未辨认的写事务仍需恢复。
 
@@ -218,7 +203,7 @@ node "<入口>" signal task-update ... --id update-4 --goal "扩大后的目标"
 
 Lead 的活动任务结束回合时，Stop 会挡一次（等待用户、本回合已挡过时不挡）：有在途工作包时要求继续等待结果：`codeg:` 包给出 `get_delegation_status` 的 `wait_ms: 0` 阻塞等待，`builtin:` 包说明宿主会通知结果，其他通道要求按当前入口实际支持的方式等待；或向用户说明为什么暂停（在途包全是 `builtin:` 时只要求说明在等什么）；没有在途包而未发 task-end 时给出缺项，按提示补齐后发 task-end，或向用户说明还没完成的部分。计划模式下，仅本回合显式 task-start/phase 才核对计划交付：交付完整实施计划时一次列明分包，先说明执行顺序、串并行关系和理由，再请用户为每个包指定 Agent 与实际调用通道；同一套已确认分包可沿用原选择，新增、拆分、合并或更换包的范围时重新确认，不按角色套默认值，Lead 直接执行的任务不问 Worker；只交付纯技术方案时按用户给定范围停在方案，不要求分包或逐包选择。历史 `plans` 和普通解释、讨论不因 `mode=plan` 单独挡，也不落到通用门禁阻挡。
 
-用户指定了各角色用哪个智能体时，task-start 可选带 `"channels": {"worker": "codeg:claude_code", "reviewer": "codeg:codex"}`，每个工作包填实际 `channel`。`channels` 每角色只能声明一个；同一角色各包通道不同时省略该角色键，必要时整项不带，以准备记录的逐包 `agent`/`channel` 和每次 `packages` 的 `channel` 为准。当前协议只在任务已声明该角色通道而包通道不同（含未填），或 delegated 任务的 worker 包由 Lead 实施（`channel: "lead"` 或 `handle: "lead-direct"`）时判偏离：须在同一 packages 信号附 `change` 列出该包，否则回执 `CHANNEL`。准备记录在 `task-start` 固定到任务后，`packages` 还会按包 ID 核对 `role`/`agent`/`channel`/`scope`：新包未在准备记录中声明，或字段与开工时选择不一致，返回 `PREPARATION` 和具体 `missing`；新增、拆分、合并或更换包需先请用户确认：尚未开工时更新 `prepare`；任务已开工则用 `task-update` 的 `preparation` 与 `preparationReason` 更新已绑定快照（目标或范围变化时同时给 `preparationTarget`）。`scope` 是可核对的负责范围文本，不是路径所有权沙箱。换新 packageId 返修时新包带 `"supersedes": "<旧包>"`，只能在创建时声明；已交付或审查要求修订的轮次累计（同一交付轮次只计一次，同一轮迟到的交付引用或 FIX 不重复累计）、旧包自动收尾；从未产出的启动失败重派不增加返修。同包返修再次交付后，旧 `reviewedRef` 不再匹配新的 `deliveredRef`，必须重新送审。当前账本仍有审查结论的 worker 包（PASS/FIX/BLOCKED；含它接替过的旧包），审查缺项不能用 waivers 豁免，也不能改标 waived。waived 预校验同时看批前当前结论与本批合并后的最终结论：同一批把审查对象从 A 改指 B 时，A 的批前 FIX/BLOCKED 仍参与；重指须在单独信号成功落盘后，后续信号才不再保留旧 FIX/BLOCKED。历史只有 PASS 单调保留，并跨信号沿 supersedes 链保留；审查对象改指其他包后，历史 PASS 仍算已审。曾有 PASS 的包不能改 canceled（即使审查后来改成 FIX/BLOCKED，返回 `PACKAGE`）；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消。处理方式是重新送审最终交付版本，或用 supersedes 接替。同一批 packages 不允许重复 packageId（返回 `PACKAGE` 并整批回滚）。同一批新建 worker 包并直接标 canceled 时，若同批 PASS 指向它或 supersedes 链上有 PASS，整批返回 `PACKAGE`，与数组顺序无关。`task show` 显示 `channels`、`diagnostic` 与 `reviewWaived`。
+用户指定了各角色用哪个智能体时，task-start 可选带 `"channels": {"worker": "codeg:claude_code", "reviewer": "builtin:general-purpose"}`，每个工作包填实际 `channel`。`channels` 每角色只能声明一个；同一角色各包通道不同时省略该角色键，必要时整项不带，以准备记录的逐包 `agent`/`channel` 和每次 `packages` 的 `channel` 为准。当前协议只在任务已声明该角色通道而包通道不同（含未填），或 delegated 任务的 worker 包由 Lead 实施（`channel: "lead"` 或 `handle: "lead-direct"`）时判偏离：须在同一 packages 信号附 `change` 列出该包，否则回执 `CHANNEL`。准备记录在 `task-start` 固定到任务后，`packages` 还会按包 ID 核对 `role`/`agent`/`channel`/`scope`：新包未在准备记录中声明，或字段与开工时选择不一致，返回 `PREPARATION` 和具体 `missing`；新增、拆分、合并或更换包需先请用户确认：尚未开工时更新 `prepare`；任务已开工则用 `task-update` 的 `preparation` 与 `preparationReason` 更新已绑定快照（目标或范围变化时同时给 `preparationTarget`）。`scope` 是可核对的负责范围文本，不是路径所有权沙箱。换新 packageId 返修时新包带 `"supersedes": "<旧包>"`，只能在创建时声明；已交付或审查要求修订的轮次累计（同一交付轮次只计一次，同一轮迟到的交付引用或 FIX 不重复累计）、旧包自动收尾；从未产出的启动失败重派不增加返修。同包返修再次交付后，旧 `reviewedRef` 不再匹配新的 `deliveredRef`，必须重新送审。当前账本仍有审查结论的 worker 包（PASS/FIX/BLOCKED；含它接替过的旧包），审查缺项不能用 waivers 豁免，也不能改标 waived。waived 预校验同时看批前当前结论与本批合并后的最终结论：同一批把审查对象从 A 改指 B 时，A 的批前 FIX/BLOCKED 仍参与；重指须在单独信号成功落盘后，后续信号才不再保留旧 FIX/BLOCKED。历史只有 PASS 单调保留，并跨信号沿 supersedes 链保留；审查对象改指其他包后，历史 PASS 仍算已审。曾有 PASS 的包不能改 canceled（即使审查后来改成 FIX/BLOCKED，返回 `PACKAGE`）；取消只按 PASS 判断，只有 FIX/BLOCKED 而没有 PASS 的包仍可取消。处理方式是重新送审最终交付版本，或用 supersedes 接替。同一批 packages 不允许重复 packageId（返回 `PACKAGE` 并整批回滚）。同一批新建 worker 包并直接标 canceled 时，若同批 PASS 指向它或 supersedes 链上有 PASS，整批返回 `PACKAGE`，与数组顺序无关。`task show` 显示 `channels`、`diagnostic` 与 `reviewWaived`。
 
 只读诊断包（不产生项目写入的调查、复现或资料核对）可在**首次创建**时声明免审，避免为简单诊断重复派 Reviewer：同一批 packages 不允许重复 packageId，不能先消费再在批内改 `dispatched` 补挂；同一 packages 信号给新包带 `"diagnostic": {"purpose": "核对 README 与发布说明是否一致", "scope": ["README.md", "docs/usage.md"], "reason": "只读比对，不修改文件"}`，包须为 `dispatched` 的 worker，不能带 `deliveredRef` 或 `supersedes`。实现包、审查包、事后补声明或修改声明、空理由、空/绝对/含 `..` 的范围都返回 `PACKAGE`。交付时在 `note` 写可定位结论与证据，例如 `"note": "结论：一致；证据：README.md 第 1 行、docs/usage.md"`；门禁缺结论会列 `diagnostic:<id>`，不能用 waiver 抵扣。声明只表示事先约定与信任，不证明进程实际未写；历史未声明包仍要求审查。
 
@@ -419,17 +404,15 @@ apply 输入身份与 `changes`，每项有 path、baseline、content、responsi
 
 ```powershell
 node bin/workflow.mjs project disable --root "<试点项目>"
-node bin/workflow.mjs uninstall --agent codex
 node bin/workflow.mjs uninstall --agent claude
-node bin/workflow.mjs uninstall --agent codex --user-dir "$env:APPDATA\Cindy\codex-home"
 ```
 
-disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手改则保留并报告。uninstall 仅撤销未被修改的自有 handlers，保留其他插件/新增配置，保留发布副本、项目资料、LESSONS 和追溯记录。用户改动冲突不整文件覆盖。Codex 附加配置位置用 `--user-dir` 单独撤销，只移除该位置的 handlers；不带 `--user-dir` 时只处理默认位置，不撤销其他已登记位置，并在结果的 `locations`/`extras` 中列出仍登记的附加位置。
+disable 先停用绑定，仅在管理区指纹一致时撤下该区；用户手改则保留并报告。uninstall 仅撤销未被修改的自有 handlers，保留其他插件/新增配置，保留发布副本、项目资料、LESSONS 和追溯记录。用户改动冲突不整文件覆盖。
 
 多个插件共存时状态、信号、个人库独立；workflow 不重跑另一插件学习，旧 `coexistence-mode` 参数保留兼容。停止后台学习使用 `learning disable`，撤销系统任务使用 `learning schedule remove`；撤销宿主安装前先执行这两步。不要把关闭另一插件作为排错的默认步骤。
 
 ### 常见阻塞
 
-启动/认证/余额/能力问题先看真实错误，不循环重启或静默换代理。Codex 或 Codeg 正常完成任务接续新会话，中断先核对停止与检查点，见 [Codex 适配](adapters/codex.md)和 [Codeg 适配](adapters/codeg.md)。测试宿主未进入路径、缺接口、文件占用按[验证约定](references/validation.md)收敛。陌生 schema/损坏状态保留原文并停维护；锁只在进程已被操作系统确认为退出时回收，不按年龄抢活锁；短暂争用会按有界预算等待，超时只给恢复提示，不冒充已保存。中断与会话结束事件先独立落盘，状态提交后才归档，下一次入口幂等消费；缺可信回合标识时保留待办、不推断当前回合；同一任务仍被其他 Lead 会话使用时不挂起。权限拒绝不靠改信任记录绕过。
+启动/认证/余额/能力问题先看真实错误，不循环重启或静默换代理。Codeg 正常完成任务接续新会话，中断先核对停止与检查点，见 [Codeg 适配](adapters/codeg.md)。测试宿主未进入路径、缺接口、文件占用按[验证约定](references/validation.md)收敛。陌生 schema/损坏状态保留原文并停维护；锁只在进程已被操作系统确认为退出时回收，不按年龄抢活锁；短暂争用会按有界预算等待，超时只给恢复提示，不冒充已保存。中断与会话结束事件先独立落盘，状态提交后才归档，下一次入口幂等消费；缺可信回合标识时保留待办、不推断当前回合；同一任务仍被其他 Lead 会话使用时不挂起。权限拒绝不靠改信任记录绕过。
 
 教学案例：[独立并行](../examples/parallel-change/README.md)、[依赖与返修](../examples/dependency-and-repair/README.md)、[例行及小任务](../examples/routine/README.md)。仅需计划时不实施；UI 图片先确认只有用户要求才安排；接口经确认冻结后停止追加。报告按任务规模，用户实际反馈才标人工通过；本地提交、push、改版本、Release 分别按明确授权执行。

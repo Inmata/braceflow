@@ -75,7 +75,9 @@ node "$env:LOCALAPPDATA/workflow/current/bin/workflow.mjs" learning config get -
 
 密钥和网关地址只放在个人配置或 CLI 自己的配置文件里，不要写进项目 `.workflow/config.json`，后者会随 Git 提交。
 
-### Codex CLI
+### Codex CLI（保留执行器）
+
+> 当前产品推荐后台复盘使用 Claude Code 执行器。Codex CLI 执行路径仍保留，供已有配置和以后恢复适配使用；它不是当前日常使用的推荐入口。
 
 ```json
 { "executor": "codex", "executorPath": "C:/.../codex.exe", "profile": "workflow-learning", "model": "group/hardworker" }

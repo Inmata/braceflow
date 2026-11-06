@@ -35,4 +35,4 @@ reviewedRef：实际审查的版本
 
 PASS 表示范围内无应修复缺陷且必要证据齐全；FIX 表示同时满足准则第 2 条、有具体复现或证据的验收/正确性/安全/数据缺陷，仅有疑点按“边界/备注”或“待证”处理；BLOCKED 表示缺证据/环境无法判断，需写具体缺口。存在阻断缺陷不能同时称 PASS；Lead 要求澄清并按 FIX 处理。PASS 的 `reviewedRef` 必须是被审 worker 包最终的 `deliveredRef`；同包返修再次交付后旧 PASS 失效，不能沿用。完成结论立即交回，不为问题数量继续寻找工作。
 
-FIX 交原 Worker；原范围且有新证据时继续，到提醒阈值由 Lead 做一次裁决，不机械重开委派。Reviewer 不直接修复或派工。复审只看原缺陷、修复差异及直接影响，仍返回最终版本结论，报告其中新验收缺陷，保留其他有效结论；不沿用修前结论。正常完成或接续 Codex 任务见 [Codex 适配](../adapters/codex.md)，使用 Codeg 时见 [Codeg 适配](../adapters/codeg.md)。报告遵守[规模约定](../references/reports.md)。
+FIX 交原 Worker；原范围且有新证据时继续，到提醒阈值由 Lead 做一次裁决，不机械重开委派。Reviewer 不直接修复或派工。复审只看原缺陷、修复差异及直接影响，仍返回最终版本结论，报告其中新验收缺陷，保留其他有效结论；不沿用修前结论。正常完成后的新任务由 Lead 按已确认分工接续；使用 Codeg 时见 [Codeg 适配](../adapters/codeg.md)。报告遵守[规模约定](../references/reports.md)。

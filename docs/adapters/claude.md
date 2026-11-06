@@ -1,6 +1,6 @@
 # Claude Code 适配
 
-Claude Code 主会话可以直接担任 Lead，使用与其他智能体相同的[公共方法](../workflow.md)和[Lead 指引](../roles/lead.md)，负责范围、派工、审查协调、集成与知识处置。受委派的 Claude Code 会话也可按工作包担任 Worker 或 Reviewer；角色由任务决定。
+Claude Code 是 workflow 的默认宿主与 Lead，使用与其他智能体相同的[公共方法](../workflow.md)和[Lead 指引](../roles/lead.md)，负责范围、派工、审查协调、集成与知识处置。它默认自己完成 plan；受委派的 Claude Code 会话也可按工作包担任 Worker 或 Reviewer。
 
 ## 安装
 
@@ -9,9 +9,9 @@ node bin/workflow.mjs install --agent claude
 node bin/workflow.mjs doctor --agent claude
 ```
 
-安装把自有 handler 合并进 `~/.claude/settings.json` 的 `hooks` 段，保留其他插件的 hooks 和全部顶层配置（`env`、`model` 等）。Codex 与 Claude 的安装记录分开保存，可以只装一个，也可以同时装；`uninstall --agent <宿主>` 只撤自己注册的条目。
+安装把自有 handler 合并进 `~/.claude/settings.json` 的 `hooks` 段，保留其他插件的 hooks 和全部顶层配置（`env`、`model` 等）。`uninstall --agent claude` 只撤本插件注册的条目。
 
-handler 用 `command` + `args` 数组（Node 可执行文件、入口脚本、`hook --agent claude --state-dir <状态目录>`），避免 Windows 路径在 shell 字符串里的引号歧义。发布副本、状态目录可与 Codex 共用；升级只更新所选宿主的注册，两个宿主都使用时须分别执行 `install --agent claude` 和 `install --agent codex`。已接入的项目绑定保留。
+handler 用 `command` + `args` 数组（Node 可执行文件、入口脚本、`hook --agent claude --state-dir <状态目录>`），避免 Windows 路径在 shell 字符串里的引号歧义。发布副本与状态目录由安装器统一管理；升级时重新执行 `install --agent claude`。已接入的项目绑定保留。
 
 ## 事件与回合
 
@@ -40,7 +40,7 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 
 - 加载与确认：在 `/hooks` 中核对 workflow 已加载，并处理宿主实际出现的确认提示；安装不代写信任记录。新会话的实际回调才证明执行，不套用其他宿主的 `modified` / `trusted` 状态。参见[官方 hooks 指南](https://code.claude.com/docs/en/hooks-guide)。
 - 压缩：`PostCompact` 不支持附加上下文；压缩后的入口由 `SessionStart(source=compact)` 提供。
-- 与 Codex 的 `Interrupt` 对应：Claude 用 `StopFailure` 保存中断。
+- 中断语义：Claude 用 `StopFailure` 保存中断，不按其他宿主的同名事件推断。
 - doctor 只核对本机注册与副本完整性；`discovery`、`trust`、`execution` 需要真实会话证据。
 
 ## 宿主能力表
@@ -86,7 +86,7 @@ Claude Code 的 Bash `tool_response` 把命令输出放在 `stdout`。只认 std
 
 ### 宿主权限隔离收紧验证（2026-11-01）
 
-本机用隔离临时项目、隔离 `CLAUDE_CONFIG_DIR` 和真实 `claude -p` 对 Claude Code 2.1.316 做了一轮收紧配置验证；Codex 仍是独立 Reviewer，不因本节改动。去敏配置、逐项事件、拒绝原文前缀、文件核对和未测边界见 [验收第 10.6 节](../acceptance.md#106-claude-收紧配置定向续接2026-11-01)；10.5 的旧宽配置仅作历史证据，不再作为候选。原始 `stream-json` 与凭据副本已删除。
+本机用隔离临时项目、隔离 `CLAUDE_CONFIG_DIR` 和真实 `claude -p` 对 Claude Code 2.1.316 做了一轮收紧配置验证；当时的独立 Reviewer 使用保留的 Codex 实现，属于历史验收条件。去敏配置、逐项事件、拒绝原文前缀、文件核对和未测边界见 [验收第 10.6 节](../acceptance.md#106-claude-收紧配置定向续接2026-11-01)；10.5 的旧宽配置仅作历史证据，不再作为候选。原始 `stream-json` 与凭据副本已删除。
 
 **联合验证（2026-11-01）：** 在隔离项目同时安装当前 workflow hook 并应用 v2 配置后，真实 `claude -p` 会话中业务 Read、指定 `docs/plans/plan.md` 的 Write/Edit 放行；业务 Write/Edit 与 `Agent(general-purpose)` 由 `PreToolUse` 拒绝，Bash 与 Skill 由宿主 `dontAsk` 拒绝，业务文件保持 `ORIGINAL`。逐项事件见[验收 10.7](../acceptance.md#107-真实-workflow-hook--claude-v2-严格权限联合验证2026-11-01)。
 

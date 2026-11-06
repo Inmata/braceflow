@@ -87,7 +87,7 @@ docs/plans 或 docs/archive 下的历史计划（当前任务直接相关除外�
 不要自行选择任何一方，也不要默默按项目优先。
 
 按[提问路径](workflow.md#提问路径)询问我（宿主结构化提问可用时优先，
-否则 Codeg MCP ask_user_question，再否则文本编号问题），每次最多 4 条，每条给出：
+否则文本编号问题），每次最多 4 条，每条给出：
 - 项目现在怎么做（引用文件位置）
 - workflow 默认怎么做
 - 两种做法的实际影响
@@ -96,7 +96,7 @@ docs/plans 或 docs/archive 下的历史计划（当前任务直接相关除外�
 我选择后，用 `project align decide` 登记（它同时更新表格状态和"已裁决记录"），不要手改表格里的状态列。
 待裁决项已保存在表格里，可以跨回合回答：本回合没问完或我没回答，
 下一回合继续问或 decide，不要求一个回合内处理完。
-计划模式下只扫描、提问和起草，不写文件；回到可写模式后再 apply/decide。Codex 的 Plan 协作模式不在 hook 中报 plan，插件按活动任务声明的 `permissions.mode=plan` 提示，Lead 须如实声明。
+计划模式下只扫描、提问和起草，不写文件；回到可写模式后再 apply/decide。外部 Designer 的只读模式不改变 workflow 状态；回到 Claude Code 后由 Lead 按活动任务声明的 `permissions.mode=plan` 继续。
 后续会话不再重复询问已裁决项，除非我要求复核。
 
 注意：项目原有做法未必更好。如果证据表明项目做法已经过时

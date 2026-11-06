@@ -1,8 +1,8 @@
 # 公共工作方法
 
-项目首次明确接入后，Lead 读取本文件和[Lead 指引](roles/lead.md)，其余按场景读取（Lead 指引开头有导航表）。实施工作包只附本文件、[Worker 指引](roles/worker.md)、直接项目资料和包内列出的相关技能；审查工作包改附[Reviewer 指引](roles/reviewer.md)。需要讨论、调研或拆包时读[准备流程](references/preparation.md)；验证或实际失败时读[验证约定](references/validation.md)，需要复杂交付时读[报告约定](references/reports.md)。Codex 原生接入见 [Codex 适配](adapters/codex.md)；使用 Codeg 管理 Agent 时读 [Codeg 适配](adapters/codeg.md)，它是一层可选的软件适配，不是使用 workflow 的前提。使用 Herdr TUI 或 Herdr GUI（`hc`）委派时读 [Herdr 适配](adapters/herdr.md)：两种形态的委派命令、通道写法和等待方式不同，门禁只识别单条直接调用。使用 Cindy 时读 [Cindy 适配](adapters/cindy.md)：Orca 是唯一受控派工入口（`cindy:orca:<agent>`），Session task 带包标记会被拒绝。
+项目首次明确接入后，Lead 读取本文件和[Lead 指引](roles/lead.md)，其余按场景读取（Lead 指引开头有导航表）。实施工作包只附本文件、[Worker 指引](roles/worker.md)、直接项目资料和包内列出的相关技能；审查工作包改附[Reviewer 指引](roles/reviewer.md)。需要讨论、调研或拆包时读[准备流程](references/preparation.md)；验证或实际失败时读[验证约定](references/validation.md)，需要复杂交付时读[报告约定](references/reports.md)。Claude Code 是默认宿主与 Lead，安装和事件说明见 [Claude Code 适配](adapters/claude.md)。使用 Codeg 管理 Agent 时读 [Codeg 适配](adapters/codeg.md)，它是一层可选的软件适配，不是使用 workflow 的前提。使用 Herdr TUI 或 Herdr GUI（`hc`）委派时读 [Herdr 适配](adapters/herdr.md)：TUI 已适配，GUI 待真机适配，两种形态的委派命令、通道写法和等待方式不同。使用 Cindy 时读 [Cindy 适配](adapters/cindy.md)：当前待真机适配。把 plan 交给外部 Agent 时读[可选 Designer](designer.md)。
 
-Lead、Worker、Reviewer 按职责分配，依据用户已确认的安排、当前可用工具和任务需要选择智能体；不按客户端或模型名称固定角色。主会话承担 Lead，受委派会话按工作包承担 Worker 或 Reviewer；同一种智能体可在独立会话中承担不同角色。hook 安装参数只选择宿主接入方式，自动接入的支持范围见 [README](../README.md#角色与接入支持)。
+Claude Code 是默认 Lead。Lead、Worker、Reviewer 按职责分配，依据用户已确认的安排、当前可用工具和任务需要选择智能体；职责名称不固定客户端或模型。主会话承担 Lead，受委派会话按工作包承担 Worker 或 Reviewer；同一种智能体可在独立会话中承担不同角色。plan 默认也由 Claude Code 完成；只有用户明确选择时才交给外部 Designer。hook 安装参数只选择宿主接入方式，当前支持范围见 [README](../README.md#当前支持范围)。
 
 Claude Code 安装还会写入两个只读子代理：`workflow-explorer` 在跨文件追查、长日志分析或需要并行读取多处材料时按需派发，只回结论、证据位置与未确认项；`workflow-advisor` 用于重要决策前的第二意见。两者只读，不写文件、不派工、不占工作包，也不替代 Worker 或 Reviewer；已知位置的小读取由 Lead 直接做。顾问按需调用：Lead 判断需要或用户点名时咨询，记录只证明问过，不证明决策正确。项目根 `workflow-gate.json` 的路径规则在 `task-update` 业务路径增量和受支持写入工具的实际写入时核对，可选 jev 在 `prepare`、`task-update`、`packages` 时核对；命中且没有对应咨询记录时只提醒，每个键最多提醒一次，不拦截。规则见[协议](design/protocol.md#决策升级提醒)，配置见[使用说明](usage.md#决策升级提醒与可选-jev)。
 
@@ -56,11 +56,11 @@ Worker 随正常交付回报稳定 ID、事件 ID、适用条件、发现和证�
 
 需要用户裁决时按以下顺序选可用入口，不要求用户切换模式，插件也不切换模式：
 
-1. 宿主原生结构化提问（Codex `request_user_input`，Claude Code `AskUserQuestion`），当前模式可用时；
+1. 宿主原生结构化提问（Claude Code `AskUserQuestion`），当前模式可用时；
 2. Codeg MCP `ask_user_question`，与宿主模式无关；
 3. 普通文本编号问题。
 
-前两种由 hook 在工具调用成功时自动记 waiting-user，不必先发 phase，同一问题不重复修改状态；不认识的工具和普通文本提问由 Lead 显式发 phase 信号，插件不读问号或关键词猜测。每次最多 4 个问题，对应工具上限。可持久保存的待决项（如对齐表格）允许跨回合回答。用户没回答、只回答了一部分或回答跑题时，未答的问题不由 Lead 代选默认值：受影响的动作暂停，下一回合重新提问，或在汇报里列为待决；独立工作继续。各宿主各模式下的可用工具见 [Codex 适配](adapters/codex.md#宿主能力表)、[Claude 适配](adapters/claude.md#宿主能力表)；使用 Codeg 时另见 [Codeg 适配](adapters/codeg.md#宿主能力表)。
+前两种由 hook 在工具调用成功时自动记 waiting-user，不必先发 phase，同一问题不重复修改状态；不认识的工具和普通文本提问由 Lead 显式发 phase 信号，插件不读问号或关键词猜测。每次最多 4 个问题，对应工具上限。可持久保存的待决项（如对齐表格）允许跨回合回答。用户没回答、只回答了一部分或回答跑题时，未答的问题不由 Lead 代选默认值：受影响的动作暂停，下一回合重新提问，或在汇报里列为待决；独立工作继续。各宿主各模式下的可用工具见 [Claude 适配](adapters/claude.md#宿主能力表)；使用 Codeg 时另见 [Codeg 适配](adapters/codeg.md#宿主能力表)。
 
 ## 收尾
 

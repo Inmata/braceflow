@@ -6,8 +6,9 @@ import { PRODUCT_ROOT } from './entry.mjs';
 import { CLAUDE_EVENTS, EVENTS, HOSTS as HOST_NAMES } from './hooks.mjs';
 
 export const RELEASE_PATHS = [
-  'bin', 'src', 'hooks', 'agents', '.codex-plugin', 'docs/workflow.md', 'docs/alignment.md', 'docs/roles',
+  'bin', 'src', 'hooks', 'agents', 'skills', '.codex-plugin', 'docs/workflow.md', 'docs/alignment.md', 'docs/roles',
   'docs/references', 'docs/adapters', 'docs/usage.md', 'docs/design/protocol.md', 'docs/learning.md', 'docs/background-review.md', 'docs/acceptance.md',
+  'docs/designer.md', 'docs/releases.md',
   'examples', 'package.json', 'plugin.json', 'workflow-gate.example.json', 'README.md', 'README.en.md',
 ];
 async function inventory(root, relative = '', selected = RELEASE_PATHS) {

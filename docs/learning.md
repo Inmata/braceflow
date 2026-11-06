@@ -19,9 +19,9 @@
 | `maxCaptureRunsPerDay` | 1 | 单项目每天最多启动多少次会话候选提取模型；与复盘额度分开计算，已开始作业的重试只受尝试次数约束 |
 | `maxInputChars` | 24000 | 本批材料与相关旧知识的 JSON 字符预算 |
 | `retrievalLimit` / `retrievalChars` | 5 / 2500 | 默认召回条数和摘要字符预算 |
-| `executor` | `codex` | 后台复盘用的 CLI：`codex` 或 `claude`；可按项目分别设置 |
-| `model` / `reasoningEffort` / `profile` | `null` | 推荐 Codex 设 `profile` 为专用 profile（如 `workflow-learning`），后台复盘用自己的 provider 和模型；`null` 表示明确选择继承所选 CLI 的主配置。Claude 的 `reasoningEffort` 对应 `--effort`；`profile` 只对 Codex 生效 |
-| `executorPath` | `codex` | Codex CLI 命令名或绝对路径 |
+| `executor` | `codex` | 后台复盘用的 CLI：`codex` 或 `claude`；可按项目分别设置。Codex CLI 执行器为保留实现，当前产品推荐新配置使用 `claude` |
+| `model` / `reasoningEffort` / `profile` | `null` | Claude 执行器可直接设 `model` / `reasoningEffort`；Codex 保留执行器可设专用 `profile`（如 `workflow-learning`）。`null` 表示明确选择继承所选 CLI 的主配置 |
+| `executorPath` | `codex` | 保留的 Codex CLI 命令名或绝对路径；新配置推荐使用 Claude 执行器 |
 | `claudePath` | `claude` | Claude Code CLI 命令名或绝对路径；建议填 `claude.exe` 绝对路径 |
 | `claudeSettings` | `null` | 后台复盘专用的 Claude 设置文件绝对路径，Claude 执行器推荐设置；`null` 表示明确选择继承 `~/.claude/settings.json` |
 | `timeZone` | 当前系统时区 | 每日额度采用的时区 |
@@ -232,7 +232,7 @@ Windows 计划任务只在当前用户登录时运行，无常驻插件服务。
 
 任务经 `conhost.exe --headless` 直接启动 Node（需 Windows 10 1809+），运行时不弹终端窗口、不抢焦点，也不受 PowerShell 执行策略限制。登录触发器限定为当前用户；不限定时 Windows 视为“任意用户登录”，普通权限注册会报拒绝访问。0.3.0 及更早版本登记的任务经 PowerShell 脚本启动，在执行策略为 `Restricted` 的电脑上根本不会运行；0.3.0 的登录触发器也未限定用户，注册会失败。升级后请重新执行一次 `learning schedule install`。旧任务若能正常运行，也会在下一次定时检查时自动按新定义重新注册。
 
-执行器为 Codex CLI 或 Claude Code（见[切换执行器](#切换执行器)），前台宿主可以是任一种。执行器继承原有认证与路由，前置检查禁用 hooks、MCP、工具、联网搜索与递归代理；无法核实隔离时停止。分析在项目外临时目录中进行，只收结构化提案。正式文件由程序核对指纹、保存快照后写入；模型没有直接改项目的职责。`doctor` 只检查能力，不能证明真实模型、额度或认证可用。
+执行器为 Claude Code（推荐）或保留的 Codex CLI（见[切换执行器](#切换执行器)），前台宿主为 Claude Code。执行器继承原有认证与路由，前置检查禁用 hooks、MCP、工具、联网搜索与递归代理；无法核实隔离时停止。分析在项目外临时目录中进行，只收结构化提案。正式文件由程序核对指纹、保存快照后写入；模型没有直接改项目的职责。`doctor` 只检查能力，不能证明真实模型、额度或认证可用。
 
 ```powershell
 # 这条会真实调用模型；--now 仅跳过数量/年龄门槛，不绕过每日限额
